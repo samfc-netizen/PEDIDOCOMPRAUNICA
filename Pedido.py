@@ -1263,8 +1263,58 @@ def aplicar_css_global():
             }
 
             [data-testid="stSidebar"] .stRadio label,
-            [data-testid="stSidebar"] .stNumberInput label {
+            [data-testid="stSidebar"] .stNumberInput label,
+            [data-testid="stSidebar"] .stMarkdown,
+            [data-testid="stSidebar"] .stCaption {
                 color: #e2e8f0 !important;
+            }
+
+            /* Correção de contraste nos parâmetros da sidebar:
+               o tema escuro da sidebar não pode deixar textos claros dentro de campos claros. */
+            [data-testid="stSidebar"] input,
+            [data-testid="stSidebar"] textarea,
+            [data-testid="stSidebar"] [contenteditable="true"] {
+                color: #0f172a !important;
+                background-color: #ffffff !important;
+                caret-color: #0f172a !important;
+            }
+
+            [data-testid="stSidebar"] div[data-baseweb="input"],
+            [data-testid="stSidebar"] div[data-baseweb="base-input"] {
+                background-color: #ffffff !important;
+                border-color: #cbd5e1 !important;
+            }
+
+            [data-testid="stSidebar"] div[data-baseweb="input"] *,
+            [data-testid="stSidebar"] div[data-baseweb="base-input"] * {
+                color: #0f172a !important;
+            }
+
+            [data-testid="stSidebar"] button[aria-label="Increment"],
+            [data-testid="stSidebar"] button[aria-label="Decrement"],
+            [data-testid="stSidebar"] button[data-testid="stNumberInputStepUp"],
+            [data-testid="stSidebar"] button[data-testid="stNumberInputStepDown"] {
+                background-color: #f8fafc !important;
+                border-color: #cbd5e1 !important;
+            }
+
+            [data-testid="stSidebar"] button[aria-label="Increment"] *,
+            [data-testid="stSidebar"] button[aria-label="Decrement"] *,
+            [data-testid="stSidebar"] button[data-testid="stNumberInputStepUp"] *,
+            [data-testid="stSidebar"] button[data-testid="stNumberInputStepDown"] * {
+                color: #0f172a !important;
+                fill: #0f172a !important;
+            }
+
+            [data-testid="stSidebar"] div[role="radiogroup"] label {
+                background: rgba(255, 255, 255, 0.06);
+                border-radius: 10px;
+                padding: 6px 8px;
+                margin-bottom: 4px;
+            }
+
+            [data-testid="stSidebar"] div[role="radiogroup"] label:hover {
+                background: rgba(255, 255, 255, 0.12);
             }
 
             .hero-card {
