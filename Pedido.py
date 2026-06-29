@@ -12,7 +12,7 @@ try:
 except Exception:
     Workbook = None
 
-st.set_page_config(page_title="Pedido de Compra - Giro Sikkens", layout="wide")
+st.set_page_config(page_title="Análise de Giro e Pedido de Compra", layout="wide", page_icon="📊")
 
 # =========================================================
 # CONFIGURAÇÕES DO NEGÓCIO
@@ -1227,20 +1227,248 @@ def totalizar_valor_pedido(df):
     preco = pd.to_numeric(df.get("Preço Última Compra", 0), errors="coerce").fillna(0)
     return float((qtd * preco).sum())
 
+
+
+# =========================================================
+# UI / EXPERIÊNCIA DO USUÁRIO
+# =========================================================
+
+APP_NAME = "Análise de Giro e Pedido de Compra"
+
+
+def aplicar_css_global():
+    st.markdown(
+        """
+        <style>
+            :root {
+                --primary: #1d4ed8;
+                --primary-soft: #eff6ff;
+                --bg-soft: #f8fafc;
+                --border: #e2e8f0;
+                --text-muted: #64748b;
+            }
+
+            .main .block-container {
+                padding-top: 1.25rem;
+                padding-bottom: 2.5rem;
+                max-width: 1500px;
+            }
+
+            [data-testid="stSidebar"] {
+                background: linear-gradient(180deg, #0f172a 0%, #1e293b 100%);
+            }
+
+            [data-testid="stSidebar"] * {
+                color: #f8fafc !important;
+            }
+
+            [data-testid="stSidebar"] .stRadio label,
+            [data-testid="stSidebar"] .stNumberInput label {
+                color: #e2e8f0 !important;
+            }
+
+            .hero-card {
+                background: linear-gradient(135deg, #0f172a 0%, #1d4ed8 52%, #2563eb 100%);
+                color: white;
+                border-radius: 24px;
+                padding: 28px 32px;
+                margin-bottom: 22px;
+                box-shadow: 0 18px 45px rgba(15, 23, 42, .18);
+            }
+
+            .hero-card h1 {
+                margin: 0;
+                font-size: 34px;
+                line-height: 1.1;
+                color: white;
+                letter-spacing: -0.02em;
+            }
+
+            .hero-card p {
+                margin: 10px 0 0 0;
+                font-size: 15px;
+                color: #dbeafe;
+            }
+
+            .section-title {
+                font-size: 22px;
+                font-weight: 800;
+                margin: 20px 0 8px 0;
+                color: #0f172a;
+            }
+
+            .muted {
+                color: var(--text-muted);
+                font-size: 14px;
+            }
+
+            .metric-card {
+                background: white;
+                border: 1px solid var(--border);
+                border-radius: 18px;
+                padding: 18px 20px;
+                min-height: 118px;
+                box-shadow: 0 8px 24px rgba(15, 23, 42, .06);
+            }
+
+            .metric-card .label {
+                color: #64748b;
+                font-size: 13px;
+                font-weight: 700;
+                text-transform: uppercase;
+                letter-spacing: .04em;
+            }
+
+            .metric-card .value {
+                margin-top: 8px;
+                color: #0f172a;
+                font-size: 28px;
+                font-weight: 850;
+                letter-spacing: -0.03em;
+            }
+
+            .metric-card .hint {
+                margin-top: 5px;
+                color: #64748b;
+                font-size: 13px;
+            }
+
+            .upload-card {
+                background: #ffffff;
+                border: 1px solid var(--border);
+                border-radius: 18px;
+                padding: 16px 18px;
+                box-shadow: 0 8px 24px rgba(15, 23, 42, .05);
+                margin-bottom: 8px;
+            }
+
+            .upload-card strong {
+                color: #0f172a;
+                font-size: 16px;
+            }
+
+            .status-ok {
+                color: #047857;
+                font-weight: 800;
+            }
+
+            .status-warn {
+                color: #b45309;
+                font-weight: 800;
+            }
+
+            .download-card {
+                background: white;
+                border: 1px solid var(--border);
+                border-radius: 18px;
+                padding: 18px;
+                box-shadow: 0 8px 24px rgba(15, 23, 42, .05);
+                margin-bottom: 14px;
+            }
+
+            div[data-testid="stDataFrame"], div[data-testid="stDataEditor"] {
+                border-radius: 16px;
+                overflow: hidden;
+                border: 1px solid #e2e8f0;
+            }
+
+            .stButton > button, .stDownloadButton > button {
+                border-radius: 12px !important;
+                font-weight: 800 !important;
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_header(subtitulo="Sistema de apoio à decisão para giro, estoque e compra."):
+    st.markdown(
+        f"""
+        <div class="hero-card">
+            <h1>{APP_NAME}</h1>
+            <p>{subtitulo}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_metric(label, value, hint=""):
+    st.markdown(
+        f"""
+        <div class="metric-card">
+            <div class="label">{label}</div>
+            <div class="value">{value}</div>
+            <div class="hint">{hint}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_upload_status(titulo, arquivo, obrigatorio=False):
+    status = "✓ Arquivo carregado" if arquivo else ("Obrigatório" if obrigatorio else "Opcional")
+    classe = "status-ok" if arquivo else "status-warn"
+    nome = getattr(arquivo, "name", "") if arquivo else ""
+    st.markdown(
+        f"""
+        <div class="upload-card">
+            <strong>{titulo}</strong><br>
+            <span class="{classe}">{status}</span><br>
+            <span class="muted">{nome}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_kpis_gerais(tabela_resumo, pedido_df=None):
+    pedido_ref = pedido_df.copy() if pedido_df is not None and not pedido_df.empty else inicializar_pedido_editavel(tabela_resumo)
+    pedido_ref = atualizar_valor_e_origem(pedido_ref)
+    total_produtos = len(tabela_resumo)
+    itens_compra = int((pd.to_numeric(pedido_ref.get("PEDIDO Final", 0), errors="coerce").fillna(0) > 0).sum())
+    valor_pedido = totalizar_valor_pedido(pedido_ref)
+    sem_compra = int(tabela_resumo.get("Data Última Compra", pd.Series(dtype=str)).astype(str).str.contains("⚠️", na=False).sum())
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        render_metric("Produtos analisados", format_int_br(total_produtos), "Itens processados no giro")
+    with c2:
+        render_metric("Itens com compra", format_int_br(itens_compra), "Pedido final maior que zero")
+    with c3:
+        render_metric("Valor do pedido", format_moeda_br(valor_pedido), "Quantidade × última compra")
+    with c4:
+        render_metric("Alertas sem compra", format_int_br(sem_compra), "Conforme parâmetro definido")
+
+
+def render_download_card(titulo, descricao):
+    st.markdown(
+        f"""
+        <div class="download-card">
+            <strong>{titulo}</strong><br>
+            <span class="muted">{descricao}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 # =========================================================
 # APP STREAMLIT
 # =========================================================
 
-st.title("Análise de Giro e Pedido de Compra - Sikkens")
+aplicar_css_global()
+render_header()
 
-st.sidebar.title("Menu")
+st.sidebar.markdown("### 📊 Análise de Giro")
 pagina = st.sidebar.radio(
-    "Selecione a página",
-    ["Tabela Consolidada", "Sugestão de Pedido", "Exportar Pedido", "Tratamento de Pedido Final"],
+    "Navegação",
+    ["📦 Giro Consolidado", "🛒 Pedido de Compra", "📄 Exportações", "⚙️ Tratamento Final"],
+    label_visibility="collapsed",
 )
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("### Parâmetros")
+st.sidebar.markdown("### ⚙️ Parâmetros")
 dias_estoque_alvo = st.sidebar.number_input(
     "Dias de estoque alvo",
     min_value=1,
@@ -1261,18 +1489,22 @@ meses_alerta_sem_compra = st.sidebar.number_input(
 
 st.sidebar.caption("Estoque Final = Estoque Atual Geral + Saldo em Trânsito/ABERTO")
 
-st.markdown("### Upload dos arquivos")
+st.markdown('<div class="section-title">Upload dos arquivos</div>', unsafe_allow_html=True)
+st.caption("Envie o PDF de Giro para iniciar. Os demais arquivos enriquecem a análise e o pedido final.")
 col_upload_1, col_upload_2, col_upload_3 = st.columns(3)
 
 with col_upload_1:
-    giro_pdf = st.file_uploader("PDF - Giro de Estoque", type=["pdf"])
+    giro_pdf = st.file_uploader("PDF - Giro de Estoque", type=["pdf"], key="upload_giro_pdf")
+    render_upload_status("📄 Giro de Estoque", giro_pdf, obrigatorio=True)
 with col_upload_2:
-    pedidos_pdf = st.file_uploader("PDF - Pedidos em Aberto", type=["pdf"])
+    pedidos_pdf = st.file_uploader("PDF - Pedidos em Aberto", type=["pdf"], key="upload_pedidos_pdf")
+    render_upload_status("📄 Pedidos em Aberto", pedidos_pdf)
 with col_upload_3:
-    cadastro_csv = st.file_uploader("CSV - Cadastro de Produtos", type=["csv"])
+    cadastro_csv = st.file_uploader("CSV - Cadastro de Produtos", type=["csv"], key="upload_cadastro_csv")
+    render_upload_status("📄 Cadastro de Produtos", cadastro_csv)
 
-if pagina == "Tratamento de Pedido Final":
-    st.markdown("## Tratamento de Pedido Final")
+if pagina == "⚙️ Tratamento Final":
+    st.markdown('<div class="section-title">⚙️ Tratamento de Pedido Final</div>', unsafe_allow_html=True)
     st.caption(
         "Envie a planilha final editável. O sistema vai gerar um Excel para importação no Autcom: "
         "coluna B = zx, coluna F = PEDIDO Final e coluna H = Preço Última Compra."
@@ -1307,7 +1539,7 @@ if pagina == "Tratamento de Pedido Final":
 
         excel_tratamento = gerar_excel_autcom_tratamento(df_tratamento)
         st.download_button(
-            "Baixar pedido tratado para importação no Autcom",
+            "⬇️ Baixar pedido tratado para importação no Autcom",
             excel_tratamento,
             "pedido_tratado_importacao_autcom.xlsx",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1319,7 +1551,7 @@ if pagina == "Tratamento de Pedido Final":
     st.stop()
 
 if not giro_pdf:
-    st.info("Envie o PDF de Giro de Estoque para iniciar.")
+    st.info("Envie o PDF de Giro de Estoque para iniciar a análise.")
     st.stop()
 
 with st.spinner("Lendo Giro de Estoque..."):
@@ -1368,8 +1600,11 @@ for col in colunas_consolidadas:
     if col not in tabela_resumo.columns:
         tabela_resumo[col] = 0
 
-if pagina == "Tabela Consolidada":
-    st.markdown("## Tabela Consolidada")
+render_kpis_gerais(tabela_resumo, st.session_state.get("pedido_editado"))
+st.markdown("---")
+
+if pagina == "📦 Giro Consolidado":
+    st.markdown('<div class="section-title">📦 Giro Consolidado</div>', unsafe_allow_html=True)
     st.caption(
         "A data da última compra é puxada somente da loja 009. "
         "Quando a data ultrapassa o parâmetro de meses sem compra, aparece o ícone ⚠️ ao lado da data."
@@ -1380,14 +1615,14 @@ if pagina == "Tabela Consolidada":
     render_tabela_interativa_colorida(tabela)
 
     st.download_button(
-        "Baixar tabela consolidada em CSV",
+        "⬇️ Baixar tabela consolidada em CSV",
         gerar_csv(tabela),
         "tabela_consolidada_giro_pedido.csv",
         "text/csv",
     )
 
     st.markdown("---")
-    st.markdown("## Drill por produto")
+    st.markdown('<div class="section-title">🔎 Drill por produto</div>', unsafe_allow_html=True)
     opcoes_produtos = (
         tabela_resumo["codigo"].astype(str) + " - " + tabela_resumo["descricao"].astype(str)
     ).drop_duplicates().tolist()
@@ -1412,8 +1647,8 @@ if pagina == "Tabela Consolidada":
             },
         )
 
-elif pagina == "Sugestão de Pedido":
-    st.markdown("## Sugestão de Pedido")
+elif pagina == "🛒 Pedido de Compra":
+    st.markdown('<div class="section-title">🛒 Pedido de Compra</div>', unsafe_allow_html=True)
     st.caption(
         "Todos os itens aparecem aqui, inclusive os com sugestão zero. "
         "A coluna PEDIDO Final é editável. A coluna Valor Final do Pedido é recalculada por quantidade × preço última compra."
@@ -1544,7 +1779,7 @@ elif pagina == "Sugestão de Pedido":
         unsafe_allow_html=True,
     )
 
-    if st.button("Salvar Pedido", type="primary"):
+    if st.button("💾 Salvar Pedido", type="primary"):
         base_completa = st.session_state["pedido_editado"].copy()
         if "Estoque Geral" not in base_completa.columns and "Estoque Atual Geral" in base_completa.columns:
             base_completa["Estoque Geral"] = base_completa["Estoque Atual Geral"]
@@ -1567,7 +1802,7 @@ elif pagina == "Sugestão de Pedido":
     try:
         excel_editavel_bytes = gerar_excel_pedido_editavel(pedido_editado)
         st.download_button(
-            "Baixar pedido editável em Excel",
+            "⬇️ Baixar pedido editável em Excel",
             excel_editavel_bytes,
             "pedido_editavel.xlsx",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1575,8 +1810,8 @@ elif pagina == "Sugestão de Pedido":
     except RuntimeError as e:
         st.error(str(e))
 
-elif pagina == "Exportar Pedido":
-    st.markdown("## Exportar Pedido")
+elif pagina == "📄 Exportações":
+    st.markdown('<div class="section-title">📄 Exportações</div>', unsafe_allow_html=True)
     st.caption("O Excel será gerado para importação no Autcom: coluna B = código, coluna F = quantidade, coluna H = valor unitário, sem cabeçalho.")
 
     pedido_final = st.session_state.get("pedido_editado", inicializar_pedido_editavel(tabela_resumo)).copy()
@@ -1613,10 +1848,11 @@ elif pagina == "Exportar Pedido":
     col_dl1, col_dl2 = st.columns(2)
 
     with col_dl1:
+        render_download_card("Excel Autcom", "Arquivo sem cabeçalho: coluna B = código, F = quantidade, H = preço.")
         try:
             excel_bytes = gerar_excel_pedido(pedido_final)
             st.download_button(
-                "Baixar pedido para importação no Autcom",
+                "⬇️ Baixar pedido para importação no Autcom",
                 excel_bytes,
                 "pedido_importacao_autcom.xlsx",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1626,8 +1862,9 @@ elif pagina == "Exportar Pedido":
             st.error(str(e))
 
     with col_dl2:
+        render_download_card("Cópia para fornecedor", "Lista simples com código de fábrica, descrição e quantidade.")
         st.download_button(
-            "Baixar cópia CSV para fornecedor",
+            "⬇️ Baixar cópia CSV para fornecedor",
             gerar_copia_fornecedor_csv(pedido_final),
             "copia_fornecedor.csv",
             "text/csv",
