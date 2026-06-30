@@ -1629,7 +1629,7 @@ def classificar_status_ruptura(media_mensal, estoque_geral, dias_cobertura):
     return "OK"
 
 
-def montar_analise_ruptura_por_marca(df_ruptura, meses_ref):
+def montar_analise_ruptura_por_marca(df_ruptura, meses_ref, df_aberto_ruptura=None):
     if df_ruptura.empty:
         return pd.DataFrame(), pd.DataFrame()
 
@@ -1649,16 +1649,28 @@ def montar_analise_ruptura_por_marca(df_ruptura, meses_ref):
     itens["Giro Geral"] = itens[meses_ref].sum(axis=1)
     itens["Média Giro Geral"] = itens[meses_ref].mean(axis=1).round(2)
     itens["Estoque Geral"] = itens["estoque"].round(2)
+
+    if df_aberto_ruptura is not None and not df_aberto_ruptura.empty:
+        aberto = df_aberto_ruptura.copy()
+        aberto["codigo"] = aberto["codigo"].astype(str).str.extract(r"(\d+)")[0].str.zfill(5)
+        aberto["Saldo em Trânsito/ABERTO"] = pd.to_numeric(aberto.get("Saldo em Trânsito/ABERTO", 0), errors="coerce").fillna(0)
+        aberto = aberto.groupby("codigo", as_index=False)["Saldo em Trânsito/ABERTO"].sum()
+        itens = itens.merge(aberto, on="codigo", how="left")
+    else:
+        itens["Saldo em Trânsito/ABERTO"] = 0
+
+    itens["Saldo em Trânsito/ABERTO"] = pd.to_numeric(itens["Saldo em Trânsito/ABERTO"], errors="coerce").fillna(0).round(2)
+    itens["Estoque Considerado"] = (itens["Estoque Geral"] + itens["Saldo em Trânsito/ABERTO"]).round(2)
     itens["Dias de Cobertura"] = itens.apply(
-        lambda r: round((float(r["Estoque Geral"]) / float(r["Média Giro Geral"]) * 30), 1) if float(r["Média Giro Geral"] or 0) > 0 else 9999,
+        lambda r: round((float(r["Estoque Considerado"]) / float(r["Média Giro Geral"]) * 30), 1) if float(r["Média Giro Geral"] or 0) > 0 else 9999,
         axis=1,
     )
     itens["Status"] = itens.apply(
-        lambda r: classificar_status_ruptura(r["Média Giro Geral"], r["Estoque Geral"], r["Dias de Cobertura"]),
+        lambda r: classificar_status_ruptura(r["Média Giro Geral"], r["Estoque Considerado"], r["Dias de Cobertura"]),
         axis=1,
     )
     itens["Necessidade 30 dias"] = itens.apply(
-        lambda r: max(math.ceil(float(r["Média Giro Geral"] or 0) - float(r["Estoque Geral"] or 0)), 0),
+        lambda r: max(math.ceil(float(r["Média Giro Geral"] or 0) - float(r["Estoque Considerado"] or 0)), 0),
         axis=1,
     )
     itens["Peso Risco"] = itens["Status"].map({"CRÍTICO": 4, "ALTO": 3, "ATENÇÃO": 2, "OK": 1, "SEM GIRO": 0}).fillna(0)
@@ -1673,12 +1685,14 @@ def montar_analise_ruptura_por_marca(df_ruptura, meses_ref):
         Giro_Geral=("Giro Geral", "sum"),
         Media_Giro_Geral=("Média Giro Geral", "sum"),
         Estoque_Geral=("Estoque Geral", "sum"),
+        Em_Aberto=("Saldo em Trânsito/ABERTO", "sum"),
+        Estoque_Considerado=("Estoque Considerado", "sum"),
         Necessidade_30_dias=("Necessidade 30 dias", "sum"),
         Score_Risco=("Peso Risco", "sum"),
     )
     resumo["% Itens em Risco"] = ((resumo["Criticos"] + resumo["Alto"] + resumo["Atencao"]) / resumo["Itens"].replace(0, pd.NA) * 100).fillna(0).round(1)
     resumo["Dias Cobertura Marca"] = resumo.apply(
-        lambda r: round((float(r["Estoque_Geral"]) / float(r["Media_Giro_Geral"]) * 30), 1) if float(r["Media_Giro_Geral"] or 0) > 0 else 9999,
+        lambda r: round((float(r["Estoque_Considerado"]) / float(r["Media_Giro_Geral"]) * 30), 1) if float(r["Media_Giro_Geral"] or 0) > 0 else 9999,
         axis=1,
     )
     resumo = resumo.sort_values(["Score_Risco", "Criticos", "Alto", "% Itens em Risco"], ascending=[False, False, False, False])
@@ -1691,6 +1705,8 @@ def montar_analise_ruptura_por_marca(df_ruptura, meses_ref):
         "Giro_Geral": "Giro Geral",
         "Media_Giro_Geral": "Média Giro Geral",
         "Estoque_Geral": "Estoque Geral",
+        "Em_Aberto": "Em Aberto",
+        "Estoque_Considerado": "Estoque Considerado",
         "Necessidade_30_dias": "Necessidade 30 dias",
         "Score_Risco": "Score Risco",
         "Dias Cobertura Marca": "Dias de Cobertura",
@@ -1735,21 +1751,29 @@ def colorir_resumo_marca(row):
 def render_pagina_ruptura_por_marca():
     st.markdown('<div class="section-title">🏷️ Ruptura por Marca</div>', unsafe_allow_html=True)
     st.caption(
-        "Esta página funciona separada do pedido de compra. Envie aqui o PDF específico de Giro Geral por Marca. "
-        "A análise soma lojas Dauto + Única e ordena as marcas com maior risco de ruptura."
+        "Esta página funciona separada do pedido de compra. Envie aqui o PDF específico de Giro Geral por Marca "
+        "e, se houver, o PDF de Pedidos em Aberto. A análise soma lojas Dauto + Única e considera o saldo em aberto no estoque."
     )
 
-    pdf_marca = st.file_uploader(
-        "PDF - Giro Geral por Marca",
-        type=["pdf"],
-        key="upload_pdf_ruptura_por_marca_independente",
-    )
+    col_pdf_ruptura, col_pdf_aberto = st.columns(2)
+    with col_pdf_ruptura:
+        pdf_marca = st.file_uploader(
+            "PDF - Giro Geral por Marca",
+            type=["pdf"],
+            key="upload_pdf_ruptura_por_marca_independente",
+        )
+    with col_pdf_aberto:
+        pdf_pedidos_aberto_ruptura = st.file_uploader(
+            "PDF - Pedidos em Aberto",
+            type=["pdf"],
+            key="upload_pdf_pedidos_aberto_ruptura_independente",
+        )
 
     if not pdf_marca:
         st.info("Envie o PDF de Giro Geral por Marca para iniciar esta análise.")
         return
 
-    st.info("Leitura otimizada ativada: esta página usa PyMuPDF. Não usa pdfplumber neste relatório grande.")
+    st.info("Leitura otimizada ativada: o Giro por Marca usa PyMuPDF. O PDF de Pedidos em Aberto, quando enviado, entra como saldo em trânsito no cálculo da ruptura.")
 
     try:
         bytes_pdf = pdf_marca.getvalue()
@@ -1758,11 +1782,21 @@ def render_pagina_ruptura_por_marca():
         st.error(f"Não consegui ler o PDF de Ruptura por Marca. Erro: {e}")
         return
 
+    df_aberto_ruptura = pd.DataFrame(columns=["codigo", "Saldo em Trânsito/ABERTO"])
+    if pdf_pedidos_aberto_ruptura:
+        try:
+            with st.spinner("Lendo Pedidos em Aberto para considerar no estoque..."):
+                df_aberto_ruptura = parse_pedidos_compra_aberto_pdf(pdf_pedidos_aberto_ruptura)
+            st.success(f"Pedidos em aberto lidos: {len(df_aberto_ruptura)} item(ns) com saldo em aberto.")
+        except Exception as e:
+            st.warning(f"Não consegui ler o PDF de Pedidos em Aberto. A análise seguirá apenas com o estoque atual. Erro: {e}")
+            df_aberto_ruptura = pd.DataFrame(columns=["codigo", "Saldo em Trânsito/ABERTO"])
+
     if df_ruptura.empty:
         st.error("Não consegui extrair os itens do PDF enviado. Verifique se é o relatório de Giro Geral por Marca.")
         return
 
-    resumo_marca, itens_marca = montar_analise_ruptura_por_marca(df_ruptura, meses_ref)
+    resumo_marca, itens_marca = montar_analise_ruptura_por_marca(df_ruptura, meses_ref, df_aberto_ruptura)
     if resumo_marca.empty:
         st.warning("O PDF foi lido, mas não houve dados suficientes para análise.")
         return
@@ -1771,8 +1805,9 @@ def render_pagina_ruptura_por_marca():
     total_criticos = int((itens_marca["Status"] == "CRÍTICO").sum())
     total_alto = int((itens_marca["Status"] == "ALTO").sum())
     total_atencao = int((itens_marca["Status"] == "ATENÇÃO").sum())
+    total_em_aberto = float(pd.to_numeric(itens_marca.get("Saldo em Trânsito/ABERTO", 0), errors="coerce").fillna(0).sum())
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
         render_metric("Itens analisados", format_int_br(total_itens), "Lojas Dauto + Única")
     with c2:
@@ -1781,6 +1816,8 @@ def render_pagina_ruptura_por_marca():
         render_metric("Alto risco", format_int_br(total_alto), "Até 15 dias")
     with c4:
         render_metric("Atenção", format_int_br(total_atencao), "Até 30 dias")
+    with c5:
+        render_metric("Em aberto", format_num_br(total_em_aberto, 1), "Somado ao estoque")
 
     st.markdown("---")
     st.markdown('<div class="section-title">Ranking de marcas por risco</div>', unsafe_allow_html=True)
@@ -1829,7 +1866,7 @@ def render_pagina_ruptura_por_marca():
         ]
 
     colunas_itens = ["Código", "Descrição", "UN"] + meses_ref + [
-        "Giro Geral", "Média Giro Geral", "Estoque Geral", "Dias de Cobertura", "Necessidade 30 dias", "Status"
+        "Giro Geral", "Média Giro Geral", "Estoque Geral", "Saldo em Trânsito/ABERTO", "Estoque Considerado", "Dias de Cobertura", "Necessidade 30 dias", "Status"
     ]
     colunas_itens = [c for c in colunas_itens if c in itens_view.columns]
 
