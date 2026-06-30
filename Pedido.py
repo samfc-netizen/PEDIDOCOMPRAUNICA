@@ -1168,14 +1168,25 @@ def gerar_excel_autcom_tratamento(df_tratamento):
 
 def inicializar_pedido_editavel(tabela_resumo):
     colunas_base = [
-        "codigo", "descricao", "Código Fábrica", "Embalagem",
-        "Média Giro Lojas", "Estoque Lojas",
-        "Média Giro Única", "Estoque Única",
-        "Média Giro Geral",
+        "codigo",
+        "descricao",
         *[col_giro("Giro Geral", mes) for mes in MESES],
+        "Média Giro Geral",
+        "Estoque Lojas",
+        "Estoque Única",
         "Estoque Geral",
-        "Saldo em Trânsito/ABERTO", "Estoque Final", "Estoque Alvo",
-        "Sugestão Sistema", "Sugestão arredondada", "Preço Última Compra", "Data Última Compra",
+        "Saldo em Trânsito/ABERTO",
+        "Estoque Final",
+        "Estoque Alvo",
+        "Sugestão Sistema",
+        "Sugestão arredondada",
+        "Preço Última Compra",
+        "Data Última Compra",
+        "PEDIDO Final",
+        "Origem Sugestão",
+        "Valor Final do Pedido",
+        "Embalagem",
+        "Código Fábrica",
     ]
 
     base = tabela_resumo.copy()
@@ -1186,10 +1197,11 @@ def inicializar_pedido_editavel(tabela_resumo):
         if col not in base.columns:
             base[col] = 0 if col not in ["codigo", "descricao", "Código Fábrica", "Data Última Compra"] else ""
 
-    base = base[colunas_base].copy()
+    # garante existência das colunas calculadas antes de ordenar
     base["PEDIDO Final"] = pd.to_numeric(base["Sugestão arredondada"], errors="coerce").fillna(0).round(0).astype(int)
     base["Origem Sugestão"] = "Sugestão do sistema"
     base["Valor Final do Pedido"] = base["PEDIDO Final"] * pd.to_numeric(base["Preço Última Compra"], errors="coerce").fillna(0)
+    base = base[colunas_base].copy()
     return base
 
 def atualizar_valor_e_origem(df):
