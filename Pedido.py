@@ -1453,205 +1453,372 @@ def render_download_card(titulo, descricao):
         unsafe_allow_html=True,
     )
 
+
+
 # =========================================================
-# ANÁLISE DE RUPTURA POR MARCA - PDF GIRO GERAL
+# MULTIPAGE INDEPENDENTE - RUPTURA POR MARCA
 # =========================================================
 
-_UNIDADES_PDF_GIRO = {"UN", "UND", "UNID", "LT", "L", "GL", "KG", "CX", "PC", "PÇ", "MT", "M", "M2", "M²", "M3", "M³", "RL", "BD", "JG", "PAR", "PT", "SC", "TB", "FR", "KT", "KIT", "DC"}
+def _token_numero_br_para_float(token):
+    return br_to_float(token)
 
 
-def _token_numero_br(token):
-    return bool(re.fullmatch(r"-?\d{1,3}(?:\.\d{3})*,\d+|-?\d+,\d+|-?\d+(?:\.\d+)?", str(token).strip()))
+def _extrair_meses_cabecalho_marca(text):
+    meses = []
+    match = re.search(r"REFERENTE AOS MESES:\s*([^\n]+)", text, flags=re.IGNORECASE)
+    if match:
+        meses = re.findall(r"\d{2}/\d{4}", match.group(1))
+    if not meses:
+        meses = sorted(set(re.findall(r"\b\d{2}/\d{4}\b", text)))[:4]
+    return meses[:6] if meses else []
 
 
-def _detectar_meses_cabecalho(text):
-    """Detecta os quatro meses exibidos na tabela do PDF de Giro Geral."""
-    for line in text.splitlines():
-        if "COD." in line and "DESCRICAO" in line.upper() and "ESTOQUE" in line.upper():
-            meses = re.findall(r"\d{2}/\d{4}", line)
-            if len(meses) >= 4:
-                return meses[:4]
-    meses = re.findall(r"\d{2}/\d{4}", text[:5000])
-    meses_unicos = []
-    for mes in meses:
-        if mes not in meses_unicos:
-            meses_unicos.append(mes)
-    return meses_unicos[:4] if len(meses_unicos) >= 4 else ["Mês 1", "Mês 2", "Mês 3", "Mês 4"]
-
-
-def parse_linha_giro_marca(line, meses_detectados):
-    """Parser flexível para linha de produto do relatório de giro, preservando marca e unidade."""
-    if not re.match(r"^\d{5}\s+", line.strip()):
+def parse_linha_giro_marca_independente(line, meses_ref):
+    """
+    Parser independente para o relatório de Giro Geral por Marca.
+    Não interfere na lógica atual do dashboard.
+    """
+    line = str(line).strip()
+    if not re.match(r"^\d{5}\s+", line):
         return None
 
     partes = line.split()
-    if len(partes) < 12:
+    if len(partes) < 10:
         return None
 
     codigo = partes[0].zfill(5)
-    un_index = None
+    qtd_meses = len(meses_ref) if meses_ref else 4
 
-    # A unidade é o token imediatamente antes de uma sequência longa de números da tabela.
-    for i in range(2, len(partes) - 8):
-        prox = partes[i + 1:i + 8]
-        if partes[i].upper() in _UNIDADES_PDF_GIRO and len(prox) >= 7 and all(_token_numero_br(x) for x in prox[:7]):
+    un_index = None
+    for i in range(1, len(partes) - (qtd_meses + 3)):
+        proximos = partes[i + 1:i + 1 + qtd_meses + 3]
+        if len(proximos) >= qtd_meses + 3 and all(_eh_numero_br(t) for t in proximos[:qtd_meses + 3]):
             un_index = i
             break
 
     if un_index is None:
-        return None
+        # fallback para relatórios que usam UN como unidade principal
+        for i, token in enumerate(partes):
+            if token.upper() in ["UN", "LT", "GL", "CX", "PC", "MT", "KG", "DC"]:
+                proximos = partes[i + 1:i + 1 + qtd_meses + 3]
+                if len(proximos) >= qtd_meses + 3 and all(_eh_numero_br(t) for t in proximos[:qtd_meses + 3]):
+                    un_index = i
+                    break
 
-    depois = partes[un_index + 1:]
-    if len(depois) < 7:
+    if un_index is None:
         return None
 
     descricao = " ".join(partes[1:un_index]).strip()
-    unidade = partes[un_index].upper()
+    unidade = partes[un_index]
+    valores = partes[un_index + 1:]
 
-    valores_meses = [br_to_float(v) for v in depois[:4]]
-    media_pdf = br_to_float(depois[4]) if len(depois) > 4 else 0.0
-    previ30_pdf = br_to_float(depois[5]) if len(depois) > 5 else 0.0
-    estoque = br_to_float(depois[6]) if len(depois) > 6 else 0.0
+    if len(valores) < qtd_meses + 3:
+        return None
 
-    row = {
+    registro = {
         "codigo": codigo,
         "descricao": descricao,
         "unidade": unidade,
-        "media_pdf": media_pdf,
-        "previ30_pdf": previ30_pdf,
-        "estoque": estoque,
     }
-    for idx, mes in enumerate(meses_detectados[:4]):
-        row[mes] = valores_meses[idx] if idx < len(valores_meses) else 0.0
-    return row
+
+    for idx, mes in enumerate(meses_ref[:qtd_meses]):
+        registro[mes] = _token_numero_br_para_float(valores[idx])
+
+    registro["media_pdf"] = _token_numero_br_para_float(valores[qtd_meses])
+    registro["previsao_30_pdf"] = _token_numero_br_para_float(valores[qtd_meses + 1])
+    registro["estoque"] = _token_numero_br_para_float(valores[qtd_meses + 2])
+    return registro
 
 
-@st.cache_data(show_spinner="Analisando PDF por marca...")
-def parse_giro_estoque_por_marca_pdf_bytes(pdf_bytes):
-    texto = extract_text_from_pdf(BytesIO(pdf_bytes))
-    meses_detectados = _detectar_meses_cabecalho(texto)
+@st.cache_data(show_spinner="Lendo PDF de ruptura por marca...")
+def parse_pdf_ruptura_por_marca(bytes_pdf):
+    texto = ""
+    with pdfplumber.open(BytesIO(bytes_pdf)) as pdf:
+        for page in pdf.pages:
+            page_text = page.extract_text(x_tolerance=1, y_tolerance=3)
+            if page_text:
+                texto += page_text + "\n"
+
+    meses_ref = _extrair_meses_cabecalho_marca(texto)
+    if not meses_ref:
+        meses_ref = ["Mês 1", "Mês 2", "Mês 3", "Mês 4"]
+
     registros = []
     empresa_atual = None
-    marca_codigo = "SEM CÓDIGO"
-    marca_nome = "SEM MARCA"
+    marca_cod_atual = ""
+    marca_nome_atual = "SEM MARCA"
 
     for raw_line in texto.splitlines():
         line = raw_line.strip()
-        if not line:
-            continue
 
-        empresa_match = re.search(r"EMPRESA\s*:\s*(\d{3})\s*-", line)
+        empresa_match = re.search(r"EMPRESA\s*:\s*(\d{3})\s*-", line, flags=re.IGNORECASE)
         if empresa_match:
             empresa_atual = empresa_match.group(1)
             continue
 
-        marca_match = re.search(r"MARCA:\s*(\d+)\s*-\s*(.*)$", line)
+        marca_match = re.search(r"MARCA\s*:\s*([^\n]+)", line, flags=re.IGNORECASE)
         if marca_match:
-            marca_codigo = marca_match.group(1).strip()
-            marca_nome = marca_match.group(2).strip() or "."
+            marca_raw = marca_match.group(1).strip()
+            marca_partes = re.match(r"([^\-]+)\s*-\s*(.*)", marca_raw)
+            if marca_partes:
+                marca_cod_atual = marca_partes.group(1).strip()
+                marca_nome_atual = marca_partes.group(2).strip() or "SEM MARCA"
+            else:
+                marca_cod_atual = ""
+                marca_nome_atual = marca_raw or "SEM MARCA"
             continue
 
-        if empresa_atual not in LOJAS_MAP:
+        if not empresa_atual or empresa_atual not in LOJAS_MAP:
             continue
 
-        produto = parse_linha_giro_marca(line, meses_detectados)
+        produto = parse_linha_giro_marca_independente(line, meses_ref)
         if produto:
             produto["codigo_empresa"] = empresa_atual
             produto["loja"] = LOJAS_MAP.get(empresa_atual, empresa_atual)
             produto["tipo_unidade"] = "ÚNICA" if empresa_atual == CODIGO_UNICA else "LOJAS DAUTO"
-            produto["marca_codigo"] = marca_codigo
-            produto["marca"] = marca_nome
+            produto["marca_codigo"] = marca_cod_atual
+            produto["marca"] = marca_nome_atual if marca_nome_atual else "SEM MARCA"
             registros.append(produto)
 
-    return pd.DataFrame(registros), meses_detectados
+    df = pd.DataFrame(registros)
+    return df, meses_ref
 
 
-def classificar_risco_ruptura(cobertura_dias, estoque_geral, media_mensal):
+def classificar_status_ruptura(media_mensal, estoque_geral, dias_cobertura):
+    media_mensal = float(media_mensal or 0)
+    estoque_geral = float(estoque_geral or 0)
     if media_mensal <= 0:
         return "SEM GIRO"
-    if estoque_geral <= 0 or cobertura_dias <= 7:
+    if estoque_geral <= 0:
         return "CRÍTICO"
-    if cobertura_dias <= 15:
+    if dias_cobertura <= 7:
+        return "CRÍTICO"
+    if dias_cobertura <= 15:
         return "ALTO"
-    if cobertura_dias <= 30:
+    if dias_cobertura <= 30:
         return "ATENÇÃO"
     return "OK"
 
 
-def montar_analise_ruptura_por_marca(df_marca, meses_detectados):
-    if df_marca.empty:
+def montar_analise_ruptura_por_marca(df_ruptura, meses_ref):
+    if df_ruptura.empty:
         return pd.DataFrame(), pd.DataFrame()
 
-    meses_validos = [m for m in meses_detectados[:4] if m in df_marca.columns]
-    chaves = ["marca_codigo", "marca", "codigo", "descricao", "unidade"]
+    df = df_ruptura.copy()
+    for mes in meses_ref:
+        df[mes] = pd.to_numeric(df.get(mes, 0), errors="coerce").fillna(0)
+    df["estoque"] = pd.to_numeric(df.get("estoque", 0), errors="coerce").fillna(0)
 
-    agg_dict = {m: "sum" for m in meses_validos}
-    agg_dict["estoque"] = "sum"
-    itens = df_marca.groupby(chaves, as_index=False).agg(agg_dict)
+    agg_dict = {mes: "sum" for mes in meses_ref}
+    agg_dict.update({
+        "estoque": "sum",
+        "marca_codigo": "first",
+        "unidade": "first",
+    })
 
-    itens["Giro Total 4 meses"] = itens[meses_validos].sum(axis=1) if meses_validos else 0
-    itens["Média Mensal Geral"] = itens[meses_validos].mean(axis=1) if meses_validos else 0
-    itens["Previsão 30 dias"] = itens["Média Mensal Geral"]
-    itens["Estoque Geral"] = itens["estoque"]
-    itens["Cobertura em dias"] = itens.apply(
-        lambda r: 9999.0 if r["Média Mensal Geral"] <= 0 else (float(r["Estoque Geral"]) / (float(r["Média Mensal Geral"]) / 30.0)),
+    itens = df.groupby(["marca", "codigo", "descricao"], as_index=False).agg(agg_dict)
+    itens["Giro Geral"] = itens[meses_ref].sum(axis=1)
+    itens["Média Giro Geral"] = itens[meses_ref].mean(axis=1).round(2)
+    itens["Estoque Geral"] = itens["estoque"].round(2)
+    itens["Dias de Cobertura"] = itens.apply(
+        lambda r: round((float(r["Estoque Geral"]) / float(r["Média Giro Geral"]) * 30), 1) if float(r["Média Giro Geral"] or 0) > 0 else 9999,
         axis=1,
     )
-    itens["Falta p/ 30 dias"] = (itens["Previsão 30 dias"] - itens["Estoque Geral"]).clip(lower=0)
-    itens["Status Ruptura"] = itens.apply(
-        lambda r: classificar_risco_ruptura(r["Cobertura em dias"], r["Estoque Geral"], r["Média Mensal Geral"]),
+    itens["Status"] = itens.apply(
+        lambda r: classificar_status_ruptura(r["Média Giro Geral"], r["Estoque Geral"], r["Dias de Cobertura"]),
         axis=1,
     )
-    peso = {"CRÍTICO": 100, "ALTO": 60, "ATENÇÃO": 25, "OK": 0, "SEM GIRO": -1}
-    itens["Peso Risco"] = itens["Status Ruptura"].map(peso).fillna(0)
-    itens["Marca"] = itens["marca_codigo"].astype(str) + " - " + itens["marca"].astype(str)
-
-    risco = itens[itens["Status Ruptura"].isin(["CRÍTICO", "ALTO", "ATENÇÃO"])].copy()
-    resumo = itens.groupby(["marca_codigo", "marca", "Marca"], as_index=False).agg(
-        **{
-            "Itens analisados": ("codigo", "nunique"),
-            "Itens em risco": ("Status Ruptura", lambda s: int(s.isin(["CRÍTICO", "ALTO", "ATENÇÃO"]).sum())),
-            "Críticos": ("Status Ruptura", lambda s: int((s == "CRÍTICO").sum())),
-            "Alto risco": ("Status Ruptura", lambda s: int((s == "ALTO").sum())),
-            "Atenção": ("Status Ruptura", lambda s: int((s == "ATENÇÃO").sum())),
-            "Giro médio mensal": ("Média Mensal Geral", "sum"),
-            "Estoque geral": ("Estoque Geral", "sum"),
-            "Falta p/ 30 dias": ("Falta p/ 30 dias", "sum"),
-            "Peso Total": ("Peso Risco", "sum"),
-        }
+    itens["Necessidade 30 dias"] = itens.apply(
+        lambda r: max(math.ceil(float(r["Média Giro Geral"] or 0) - float(r["Estoque Geral"] or 0)), 0),
+        axis=1,
     )
-    resumo["% itens em risco"] = resumo.apply(lambda r: 0 if r["Itens analisados"] == 0 else r["Itens em risco"] / r["Itens analisados"] * 100, axis=1)
-    resumo = resumo.sort_values(["Peso Total", "Críticos", "Alto risco", "Itens em risco", "Falta p/ 30 dias"], ascending=False)
+    itens["Peso Risco"] = itens["Status"].map({"CRÍTICO": 4, "ALTO": 3, "ATENÇÃO": 2, "OK": 1, "SEM GIRO": 0}).fillna(0)
 
-    itens = itens.sort_values(["Peso Risco", "Falta p/ 30 dias", "Média Mensal Geral"], ascending=False)
-    return resumo, itens
+    resumo = itens.groupby("marca", as_index=False).agg(
+        Itens=("codigo", "count"),
+        Criticos=("Status", lambda s: int((s == "CRÍTICO").sum())),
+        Alto=("Status", lambda s: int((s == "ALTO").sum())),
+        Atencao=("Status", lambda s: int((s == "ATENÇÃO").sum())),
+        OK=("Status", lambda s: int((s == "OK").sum())),
+        Sem_Giro=("Status", lambda s: int((s == "SEM GIRO").sum())),
+        Giro_Geral=("Giro Geral", "sum"),
+        Media_Giro_Geral=("Média Giro Geral", "sum"),
+        Estoque_Geral=("Estoque Geral", "sum"),
+        Necessidade_30_dias=("Necessidade 30 dias", "sum"),
+        Score_Risco=("Peso Risco", "sum"),
+    )
+    resumo["% Itens em Risco"] = ((resumo["Criticos"] + resumo["Alto"] + resumo["Atencao"]) / resumo["Itens"].replace(0, pd.NA) * 100).fillna(0).round(1)
+    resumo["Dias Cobertura Marca"] = resumo.apply(
+        lambda r: round((float(r["Estoque_Geral"]) / float(r["Media_Giro_Geral"]) * 30), 1) if float(r["Media_Giro_Geral"] or 0) > 0 else 9999,
+        axis=1,
+    )
+    resumo = resumo.sort_values(["Score_Risco", "Criticos", "Alto", "% Itens em Risco"], ascending=[False, False, False, False])
+
+    resumo = resumo.rename(columns={
+        "marca": "Marca",
+        "Criticos": "Críticos",
+        "Atencao": "Atenção",
+        "Sem_Giro": "Sem Giro",
+        "Giro_Geral": "Giro Geral",
+        "Media_Giro_Geral": "Média Giro Geral",
+        "Estoque_Geral": "Estoque Geral",
+        "Necessidade_30_dias": "Necessidade 30 dias",
+        "Score_Risco": "Score Risco",
+        "Dias Cobertura Marca": "Dias de Cobertura",
+    })
+
+    itens = itens.rename(columns={
+        "marca": "Marca",
+        "codigo": "Código",
+        "descricao": "Descrição",
+        "unidade": "UN",
+    })
+    itens = itens.sort_values(["Peso Risco", "Dias de Cobertura", "Média Giro Geral"], ascending=[False, True, False])
+    return resumo.reset_index(drop=True), itens.reset_index(drop=True)
 
 
-def _cor_status_ruptura(valor):
-    cores = {
-        "CRÍTICO": "background-color: #fee2e2; color: #991b1b; font-weight: 800;",
-        "ALTO": "background-color: #ffedd5; color: #9a3412; font-weight: 800;",
-        "ATENÇÃO": "background-color: #fef9c3; color: #854d0e; font-weight: 800;",
-        "OK": "background-color: #dcfce7; color: #166534; font-weight: 800;",
-        "SEM GIRO": "background-color: #e5e7eb; color: #374151; font-weight: 800;",
-    }
-    return cores.get(str(valor), "")
+def colorir_status_ruptura(row):
+    status = str(row.get("Status", ""))
+    if status == "CRÍTICO":
+        return ["background-color: #fee2e2; color: #7f1d1d; font-weight: 700"] * len(row)
+    if status == "ALTO":
+        return ["background-color: #ffedd5; color: #7c2d12; font-weight: 650"] * len(row)
+    if status == "ATENÇÃO":
+        return ["background-color: #fef9c3; color: #713f12"] * len(row)
+    if status == "OK":
+        return ["background-color: #dcfce7; color: #14532d"] * len(row)
+    return ["background-color: #f1f5f9; color: #475569"] * len(row)
 
 
-def formatadores_ruptura(df):
-    fmt = {}
-    for c in df.columns:
-        if c in ["Cobertura em dias", "% itens em risco"]:
-            fmt[c] = lambda v: "—" if float(v) >= 9999 else format_num_br(v, 1)
-        elif c in ["Giro médio mensal", "Estoque geral", "Falta p/ 30 dias", "Média Mensal Geral", "Previsão 30 dias", "Estoque Geral", "Giro Total 4 meses"]:
-            fmt[c] = lambda v: format_num_br(v, 1)
-        elif c in ["Itens analisados", "Itens em risco", "Críticos", "Alto risco", "Atenção"]:
-            fmt[c] = lambda v: format_int_br(v)
-    return fmt
+def colorir_resumo_marca(row):
+    criticos = int(row.get("Críticos", 0) or 0)
+    alto = int(row.get("Alto", 0) or 0)
+    atencao = int(row.get("Atenção", 0) or 0)
+    if criticos > 0:
+        return ["background-color: #fee2e2; color: #7f1d1d; font-weight: 700"] * len(row)
+    if alto > 0:
+        return ["background-color: #ffedd5; color: #7c2d12; font-weight: 650"] * len(row)
+    if atencao > 0:
+        return ["background-color: #fef9c3; color: #713f12"] * len(row)
+    return [""] * len(row)
 
 
-def gerar_csv_ruptura(df):
-    return df.to_csv(index=False, sep=";", decimal=",", encoding="utf-8-sig").encode("utf-8-sig")
+def render_pagina_ruptura_por_marca():
+    st.markdown('<div class="section-title">🏷️ Ruptura por Marca</div>', unsafe_allow_html=True)
+    st.caption(
+        "Esta página funciona separada do pedido de compra. Envie aqui o PDF específico de Giro Geral por Marca. "
+        "A análise soma lojas Dauto + Única e ordena as marcas com maior risco de ruptura."
+    )
+
+    pdf_marca = st.file_uploader(
+        "PDF - Giro Geral por Marca",
+        type=["pdf"],
+        key="upload_pdf_ruptura_por_marca_independente",
+    )
+
+    if not pdf_marca:
+        st.info("Envie o PDF de Giro Geral por Marca para iniciar esta análise.")
+        return
+
+    try:
+        bytes_pdf = pdf_marca.getvalue()
+        df_ruptura, meses_ref = parse_pdf_ruptura_por_marca(bytes_pdf)
+    except Exception as e:
+        st.error(f"Não consegui ler o PDF de Ruptura por Marca. Erro: {e}")
+        return
+
+    if df_ruptura.empty:
+        st.error("Não consegui extrair os itens do PDF enviado. Verifique se é o relatório de Giro Geral por Marca.")
+        return
+
+    resumo_marca, itens_marca = montar_analise_ruptura_por_marca(df_ruptura, meses_ref)
+    if resumo_marca.empty:
+        st.warning("O PDF foi lido, mas não houve dados suficientes para análise.")
+        return
+
+    total_itens = int(len(itens_marca))
+    total_criticos = int((itens_marca["Status"] == "CRÍTICO").sum())
+    total_alto = int((itens_marca["Status"] == "ALTO").sum())
+    total_atencao = int((itens_marca["Status"] == "ATENÇÃO").sum())
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        render_metric("Itens analisados", format_int_br(total_itens), "Lojas Dauto + Única")
+    with c2:
+        render_metric("Críticos", format_int_br(total_criticos), "Sem estoque ou até 7 dias")
+    with c3:
+        render_metric("Alto risco", format_int_br(total_alto), "Até 15 dias")
+    with c4:
+        render_metric("Atenção", format_int_br(total_atencao), "Até 30 dias")
+
+    st.markdown("---")
+    st.markdown('<div class="section-title">Ranking de marcas por risco</div>', unsafe_allow_html=True)
+
+    busca_marca = st.text_input("Pesquisar marca", key="busca_marca_ruptura")
+    resumo_view = resumo_marca.copy()
+    if busca_marca:
+        resumo_view = resumo_view[resumo_view["Marca"].astype(str).str.lower().str.contains(busca_marca.lower(), na=False)]
+
+    st.dataframe(
+        resumo_view.style.apply(colorir_resumo_marca, axis=1).format(formatadores_para_tabela(resumo_view)),
+        use_container_width=True,
+        hide_index=True,
+        height=430,
+        column_config={"Marca": st.column_config.TextColumn("Marca", pinned=True, width="large")},
+    )
+
+    st.download_button(
+        "⬇️ Baixar ranking de marcas em CSV",
+        gerar_csv(resumo_marca),
+        "ranking_ruptura_por_marca.csv",
+        "text/csv",
+    )
+
+    st.markdown("---")
+    st.markdown('<div class="section-title">Drill por marca</div>', unsafe_allow_html=True)
+    marcas = resumo_marca["Marca"].astype(str).tolist()
+    marca_selecionada = st.selectbox("Selecione a marca para abrir os produtos", marcas, key="drill_marca_ruptura")
+
+    itens_view = itens_marca[itens_marca["Marca"].astype(str) == str(marca_selecionada)].copy()
+
+    colf1, colf2 = st.columns([1, 1])
+    with colf1:
+        status_opcoes = ["Todos", "CRÍTICO", "ALTO", "ATENÇÃO", "OK", "SEM GIRO"]
+        status_sel = st.selectbox("Filtrar status", status_opcoes, key="status_ruptura_marca")
+    with colf2:
+        busca_item = st.text_input("Pesquisar produto dentro da marca", key="busca_item_ruptura_marca")
+
+    if status_sel != "Todos":
+        itens_view = itens_view[itens_view["Status"] == status_sel]
+    if busca_item:
+        termo = busca_item.lower()
+        itens_view = itens_view[
+            itens_view["Código"].astype(str).str.lower().str.contains(termo, na=False)
+            | itens_view["Descrição"].astype(str).str.lower().str.contains(termo, na=False)
+        ]
+
+    colunas_itens = ["Código", "Descrição", "UN"] + meses_ref + [
+        "Giro Geral", "Média Giro Geral", "Estoque Geral", "Dias de Cobertura", "Necessidade 30 dias", "Status"
+    ]
+    colunas_itens = [c for c in colunas_itens if c in itens_view.columns]
+
+    st.dataframe(
+        itens_view[colunas_itens].style.apply(colorir_status_ruptura, axis=1).format(formatadores_para_tabela(itens_view[colunas_itens])),
+        use_container_width=True,
+        hide_index=True,
+        height=560,
+        column_config={
+            "Código": st.column_config.TextColumn("Código", pinned=True, width="small"),
+            "Descrição": st.column_config.TextColumn("Descrição", pinned=True, width="large"),
+        },
+    )
+
+    st.download_button(
+        "⬇️ Baixar drill da marca em CSV",
+        gerar_csv(itens_view[colunas_itens]),
+        f"drill_ruptura_{re.sub(r'[^A-Za-z0-9]+', '_', str(marca_selecionada))}.csv",
+        "text/csv",
+    )
 
 # =========================================================
 # APP STREAMLIT
@@ -1663,7 +1830,7 @@ render_header()
 st.sidebar.markdown("### 📊 Análise de Giro")
 pagina = st.sidebar.radio(
     "Navegação",
-    ["📦 Giro Consolidado", "🏷️ Ruptura por Marca", "🛒 Pedido de Compra", "📄 Exportações", "⚙️ Tratamento Final"],
+    ["📦 Giro Consolidado", "🛒 Pedido de Compra", "📄 Exportações", "🏷️ Ruptura por Marca", "⚙️ Tratamento Final"],
     label_visibility="collapsed",
 )
 
@@ -1688,6 +1855,11 @@ meses_alerta_sem_compra = st.sidebar.number_input(
 )
 
 st.sidebar.caption("Estoque Final = Estoque Atual Geral + Saldo em Trânsito/ABERTO")
+
+if pagina == "🏷️ Ruptura por Marca":
+    render_pagina_ruptura_por_marca()
+    st.stop()
+
 
 st.markdown('<div class="section-title">Upload dos arquivos</div>', unsafe_allow_html=True)
 st.caption("Envie o PDF de Giro para iniciar. Os demais arquivos enriquecem a análise e o pedido final.")
@@ -1845,104 +2017,6 @@ if pagina == "📦 Giro Consolidado":
                 "Cód. Empresa": st.column_config.TextColumn("Cód. Empresa", pinned=True),
                 "Unidade": st.column_config.TextColumn("Unidade", pinned=True),
             },
-        )
-
-elif pagina == "🏷️ Ruptura por Marca":
-    st.markdown('<div class="section-title">🏷️ Análise de Ruptura por Marca</div>', unsafe_allow_html=True)
-    st.caption(
-        "Esta visão soma o estoque e o giro de todas as lojas Dauto (004, 006, 012, 013, 014, 015, 016, 022 e 024) "
-        "com a Única (009), calcula a cobertura em dias e organiza as marcas pelo maior risco de ruptura."
-    )
-
-    try:
-        giro_pdf.seek(0)
-    except Exception:
-        pass
-
-    df_marca, meses_marca = parse_giro_estoque_por_marca_pdf_bytes(giro_pdf.getvalue())
-    if df_marca.empty:
-        st.error("Não consegui extrair a análise por marca desse PDF. Confira se o relatório está no layout de Giro de Estoque por Marca.")
-        st.stop()
-
-    resumo_marca, itens_marca = montar_analise_ruptura_por_marca(df_marca, meses_marca)
-    itens_risco = itens_marca[itens_marca["Status Ruptura"].isin(["CRÍTICO", "ALTO", "ATENÇÃO"])]
-
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        render_metric("Marcas com risco", format_int_br((resumo_marca["Itens em risco"] > 0).sum()), "Com pelo menos 1 item em risco")
-    with c2:
-        render_metric("Itens críticos", format_int_br((itens_marca["Status Ruptura"] == "CRÍTICO").sum()), "Estoque zerado ou até 7 dias")
-    with c3:
-        render_metric("Itens alto risco", format_int_br((itens_marca["Status Ruptura"] == "ALTO").sum()), "Cobertura até 15 dias")
-    with c4:
-        render_metric("Falta p/ 30 dias", format_num_br(itens_marca["Falta p/ 30 dias"].sum(), 1), "Necessidade teórica geral")
-
-    st.markdown("#### Ranking de marcas por risco de ruptura")
-    cols_resumo = ["Marca", "Itens analisados", "Itens em risco", "Críticos", "Alto risco", "Atenção", "% itens em risco", "Giro médio mensal", "Estoque geral", "Falta p/ 30 dias"]
-    resumo_view = resumo_marca[cols_resumo].copy()
-    resumo_view = resumo_view[resumo_view["Itens em risco"] > 0]
-
-    if resumo_view.empty:
-        st.success("Nenhuma marca apresentou item com risco de ruptura pelos critérios atuais.")
-    else:
-        st.dataframe(
-            resumo_view.style.format(formatadores_ruptura(resumo_view)).background_gradient(subset=["Itens em risco", "Críticos", "Alto risco", "Falta p/ 30 dias"]),
-            use_container_width=True,
-            hide_index=True,
-            height=430,
-        )
-
-    st.download_button(
-        "⬇️ Baixar ranking de marcas em CSV",
-        gerar_csv_ruptura(resumo_view if not resumo_view.empty else resumo_marca[cols_resumo]),
-        "ranking_ruptura_por_marca.csv",
-        "text/csv",
-    )
-
-    st.markdown("---")
-    st.markdown("#### Drill da marca")
-    marcas_opcoes = resumo_marca["Marca"].tolist()
-    marca_selecionada = st.selectbox("Selecione uma marca para ver os produtos", marcas_opcoes, key="drill_marca_ruptura")
-
-    somente_risco = st.toggle("Mostrar somente itens em risco", value=True)
-    detalhe_marca = itens_marca[itens_marca["Marca"] == marca_selecionada].copy()
-    if somente_risco:
-        detalhe_marca = detalhe_marca[detalhe_marca["Status Ruptura"].isin(["CRÍTICO", "ALTO", "ATENÇÃO"])]
-
-    cols_itens = ["Status Ruptura", "codigo", "descricao", "unidade"] + [m for m in meses_marca[:4] if m in detalhe_marca.columns] + [
-        "Média Mensal Geral", "Estoque Geral", "Cobertura em dias", "Falta p/ 30 dias"
-    ]
-    for col in cols_itens:
-        if col not in detalhe_marca.columns:
-            detalhe_marca[col] = 0
-
-    st.dataframe(
-        detalhe_marca[cols_itens].style.format(formatadores_ruptura(detalhe_marca)).applymap(_cor_status_ruptura, subset=["Status Ruptura"]),
-        use_container_width=True,
-        hide_index=True,
-        height=520,
-        column_config={
-            "Status Ruptura": st.column_config.TextColumn("Status", pinned=True),
-            "codigo": st.column_config.TextColumn("Código", pinned=True),
-            "descricao": st.column_config.TextColumn("Descrição", pinned=True),
-        },
-    )
-
-    st.download_button(
-        "⬇️ Baixar produtos da marca em CSV",
-        gerar_csv_ruptura(detalhe_marca[cols_itens]),
-        "drill_produtos_marca_ruptura.csv",
-        "text/csv",
-    )
-
-    st.markdown("---")
-    with st.expander("Critérios usados na classificação"):
-        st.markdown(
-            "**CRÍTICO:** estoque geral zerado/negativo ou cobertura até 7 dias.  "
-            "**ALTO:** cobertura acima de 7 e até 15 dias.  "
-            "**ATENÇÃO:** cobertura acima de 15 e até 30 dias.  "
-            "**OK:** cobertura acima de 30 dias.  "
-            "Itens sem giro ficam fora do risco de ruptura, pois não há consumo médio para projetar falta."
         )
 
 elif pagina == "🛒 Pedido de Compra":
