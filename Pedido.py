@@ -33,7 +33,8 @@ LOJAS_MAP = {
 
 CODIGOS_LOJAS = ["004", "006", "012", "013", "014", "015", "016", "022", "024"]
 CODIGO_UNICA = "009"
-MESES = ["01/2026", "02/2026", "03/2026", "04/2026"]
+MESES_PADRAO = ["01/2026", "02/2026", "03/2026", "04/2026"]
+MESES = MESES_PADRAO.copy()
 
 # =========================================================
 # FUNÇÕES AUXILIARES
@@ -169,11 +170,55 @@ def extract_text_from_pdf(uploaded_file):
                 text += page_text + "\n"
     return text
 
+
+MESES_ABREV_PT = {
+    "01": "Jan", "02": "Fev", "03": "Mar", "04": "Abr", "05": "Mai", "06": "Jun",
+    "07": "Jul", "08": "Ago", "09": "Set", "10": "Out", "11": "Nov", "12": "Dez",
+}
+
+
+def extrair_meses_giro_pdf(text):
+    """
+    Puxa os meses diretamente do PDF de Giro.
+    Prioriza o cabeçalho "REFERENTE AOS MESES" e, se não existir, procura a primeira
+    linha de cabeçalho com meses no formato MM/AAAA.
+    """
+    text = str(text or "")
+    padrao_ref = re.search(r"REFERENTE\s+AOS\s+MESES\s*:\s*([^\n]+)", text, flags=re.IGNORECASE)
+    if padrao_ref:
+        meses = re.findall(r"\b\d{2}/\d{4}\b", padrao_ref.group(1))
+        if meses:
+            return meses
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        meses = re.findall(r"\b\d{2}/\d{4}\b", line)
+        if len(meses) >= 2 and ("ESTOQUE" in line.upper() or "MEDIA" in line.upper() or "MÉDIA" in line.upper()):
+            return meses
+
+    meses = []
+    for mes in re.findall(r"\b\d{2}/\d{4}\b", text):
+        if mes not in meses:
+            meses.append(mes)
+    return meses[:4] if meses else MESES_PADRAO.copy()
+
+
+def label_mes_giro(mes):
+    try:
+        mm, yyyy = str(mes).split("/")
+        return f"{MESES_ABREV_PT.get(mm.zfill(2), mm)}/{str(yyyy)[-2:]}"
+    except Exception:
+        return str(mes)
+
+
+def col_giro(prefixo, mes):
+    return f"{prefixo} {label_mes_giro(mes)}"
+
 # =========================================================
 # LEITURA DO PDF DE GIRO DE ESTOQUE
 # =========================================================
 
-def parse_linha_giro(line):
+def parse_linha_giro(line, meses_ref=None):
     """
     Layout observado:
     COD DESCRICAO CÓD.FABRICA UN 01/2026 02/2026 03/2026 04/2026
@@ -193,7 +238,10 @@ def parse_linha_giro(line):
     antes_un = partes[1:un_index]
     depois_un = partes[un_index + 1:]
 
-    if len(depois_un) < 9:
+    meses_ref = meses_ref or MESES_PADRAO
+    qtd_meses = len(meses_ref)
+
+    if len(depois_un) < qtd_meses + 5:
         return None
 
     # Código de fábrica normalmente fica imediatamente antes do UN.
@@ -234,11 +282,8 @@ def parse_linha_giro(line):
         "codigo": codigo,
         "descricao": " ".join(descricao_tokens).strip(),
         "codigo_fabrica": codigo_fabrica_extraido,
-        "01/2026": br_to_float(depois_un[0]),
-        "02/2026": br_to_float(depois_un[1]),
-        "03/2026": br_to_float(depois_un[2]),
-        "04/2026": br_to_float(depois_un[3]),
-        "estoque": br_to_float(depois_un[6]),
+        **{mes: br_to_float(depois_un[i]) for i, mes in enumerate(meses_ref)},
+        "estoque": br_to_float(depois_un[qtd_meses + 2]) if len(depois_un) > qtd_meses + 2 else 0,
         "pr_ult_compra": pr_ult_compra,
         "dt_ult_compra": dt_ult_compra,
         "dt_ult_compra_txt": dt_ult_compra_txt,
@@ -247,7 +292,8 @@ def parse_linha_giro(line):
     }
 
 
-def parse_giro_estoque(text):
+def parse_giro_estoque(text, meses_ref=None):
+    meses_ref = meses_ref or extrair_meses_giro_pdf(text)
     registros = []
     empresa_atual = None
 
@@ -262,7 +308,7 @@ def parse_giro_estoque(text):
         if not empresa_atual or empresa_atual not in LOJAS_MAP:
             continue
 
-        produto = parse_linha_giro(line)
+        produto = parse_linha_giro(line, meses_ref=meses_ref)
         if produto:
             produto["codigo_empresa"] = empresa_atual
             produto["loja"] = LOJAS_MAP[empresa_atual]
@@ -667,38 +713,33 @@ def montar_tabela_consolidada(df_giro, df_transito=None, dias_estoque_alvo=60, m
     df_lojas = df_giro[df_giro["codigo_empresa"].isin(CODIGOS_LOJAS)].copy()
     df_unica = df_giro[df_giro["codigo_empresa"] == CODIGO_UNICA].copy()
 
+    meses_ref = [m for m in MESES if m in df_giro.columns]
+    if not meses_ref:
+        meses_ref = [m for m in MESES_PADRAO if m in df_giro.columns]
+
     agg = {
         "codigo_fabrica": "first",
         "embalagem": "first",
-        "01/2026": "sum",
-        "02/2026": "sum",
-        "03/2026": "sum",
-        "04/2026": "sum",
+        **{mes: "sum" for mes in meses_ref},
         "estoque": "sum",
     }
 
     lojas = df_lojas.groupby(["codigo", "descricao"], as_index=False).agg(agg) if not df_lojas.empty else pd.DataFrame(columns=["codigo", "descricao", *agg.keys()])
     unica = df_unica.groupby(["codigo", "descricao"], as_index=False).agg(agg) if not df_unica.empty else pd.DataFrame(columns=["codigo", "descricao", *agg.keys()])
 
-    lojas["Média Giro Lojas"] = lojas[MESES].mean(axis=1).round(1) if not lojas.empty else []
-    unica["Média Giro Única"] = unica[MESES].mean(axis=1).round(1) if not unica.empty else []
+    lojas["Média Giro Lojas"] = lojas[meses_ref].mean(axis=1).round(1) if not lojas.empty and meses_ref else []
+    unica["Média Giro Única"] = unica[meses_ref].mean(axis=1).round(1) if not unica.empty and meses_ref else []
 
     lojas = lojas.rename(columns={
         "codigo_fabrica": "Código Fábrica",
         "embalagem": "Embalagem",
-        "01/2026": "Giro Lojas Jan/26",
-        "02/2026": "Giro Lojas Fev/26",
-        "03/2026": "Giro Lojas Mar/26",
-        "04/2026": "Giro Lojas Abr/26",
+        **{mes: col_giro("Giro Lojas", mes) for mes in meses_ref},
         "estoque": "Estoque Lojas",
     })
     unica = unica.rename(columns={
         "codigo_fabrica": "Código Fábrica Única",
         "embalagem": "Embalagem Única",
-        "01/2026": "Giro Única Jan/26",
-        "02/2026": "Giro Única Fev/26",
-        "03/2026": "Giro Única Mar/26",
-        "04/2026": "Giro Única Abr/26",
+        **{mes: col_giro("Giro Única", mes) for mes in meses_ref},
         "estoque": "Estoque Única",
     })
 
@@ -723,16 +764,18 @@ def montar_tabela_consolidada(df_giro, df_transito=None, dias_estoque_alvo=60, m
         axis=1,
     )
 
-    for mes in ["Jan/26", "Fev/26", "Mar/26", "Abr/26"]:
+    colunas_giro_geral = []
+    for mes in meses_ref:
+        label = label_mes_giro(mes)
         for prefixo in ["Giro Lojas", "Giro Única"]:
-            col = f"{prefixo} {mes}"
+            col = f"{prefixo} {label}"
             if col not in resumo.columns:
                 resumo[col] = 0
-        resumo[f"Giro Geral {mes}"] = resumo[f"Giro Lojas {mes}"] + resumo[f"Giro Única {mes}"]
+        col_geral = f"Giro Geral {label}"
+        resumo[col_geral] = resumo[f"Giro Lojas {label}"] + resumo[f"Giro Única {label}"]
+        colunas_giro_geral.append(col_geral)
 
-    resumo["Média Giro Geral"] = resumo[[
-        "Giro Geral Jan/26", "Giro Geral Fev/26", "Giro Geral Mar/26", "Giro Geral Abr/26"
-    ]].mean(axis=1).round(1)
+    resumo["Média Giro Geral"] = resumo[colunas_giro_geral].mean(axis=1).round(1) if colunas_giro_geral else 0
 
     for col in ["Estoque Lojas", "Estoque Única", "Média Giro Lojas", "Média Giro Única"]:
         if col not in resumo.columns:
@@ -768,21 +811,18 @@ def montar_detalhe_produto(df_giro, codigo_produto):
     if detalhe.empty:
         return pd.DataFrame()
 
-    detalhe["Média Giro"] = detalhe[MESES].mean(axis=1).round(1)
+    meses_ref = [m for m in MESES if m in detalhe.columns]
+    detalhe["Média Giro"] = detalhe[meses_ref].mean(axis=1).round(1) if meses_ref else 0
+    rename_meses = {mes: label_mes_giro(mes) for mes in meses_ref}
     detalhe = detalhe.rename(columns={
         "loja": "Unidade",
         "codigo_empresa": "Cód. Empresa",
-        "01/2026": "Jan/26",
-        "02/2026": "Fev/26",
-        "03/2026": "Mar/26",
-        "04/2026": "Abr/26",
+        **rename_meses,
         "estoque": "Saldo em Estoque",
     })
 
-    return detalhe[[
-        "Cód. Empresa", "Unidade", "Jan/26", "Fev/26", "Mar/26", "Abr/26",
-        "Média Giro", "Saldo em Estoque",
-    ]].sort_values(["Cód. Empresa", "Unidade"])
+    colunas = ["Cód. Empresa", "Unidade"] + [label_mes_giro(m) for m in meses_ref] + ["Média Giro", "Saldo em Estoque"]
+    return detalhe[colunas].sort_values(["Cód. Empresa", "Unidade"])
 
 # =========================================================
 # FORMATAÇÃO / EXPORTAÇÃO
@@ -1131,7 +1171,9 @@ def inicializar_pedido_editavel(tabela_resumo):
         "codigo", "descricao", "Código Fábrica", "Embalagem",
         "Média Giro Lojas", "Estoque Lojas",
         "Média Giro Única", "Estoque Única",
-        "Média Giro Geral", "Estoque Geral",
+        "Média Giro Geral",
+        *[col_giro("Giro Geral", mes) for mes in MESES],
+        "Estoque Geral",
         "Saldo em Trânsito/ABERTO", "Estoque Final", "Estoque Alvo",
         "Sugestão Sistema", "Sugestão arredondada", "Preço Última Compra", "Data Última Compra",
     ]
@@ -1996,7 +2038,8 @@ if not giro_pdf:
 
 with st.spinner("Lendo Giro de Estoque..."):
     texto_giro = extract_text_from_pdf(giro_pdf)
-    df_giro = parse_giro_estoque(texto_giro)
+    MESES = extrair_meses_giro_pdf(texto_giro)
+    df_giro = parse_giro_estoque(texto_giro, MESES)
 
 if df_giro.empty:
     st.error("Não consegui extrair os dados do Giro de Estoque.")
@@ -2028,11 +2071,11 @@ if st.session_state.get("assinatura_base_pedido") != assinatura_base:
 
 colunas_consolidadas = [
     "codigo", "descricao", "Código Fábrica", "Embalagem",
-    "Giro Lojas Jan/26", "Giro Lojas Fev/26", "Giro Lojas Mar/26", "Giro Lojas Abr/26",
+    *[col_giro("Giro Lojas", mes) for mes in MESES],
     "Média Giro Lojas", "Estoque Lojas",
-    "Giro Única Jan/26", "Giro Única Fev/26", "Giro Única Mar/26", "Giro Única Abr/26",
+    *[col_giro("Giro Única", mes) for mes in MESES],
     "Média Giro Única", "Estoque Única",
-    "Giro Geral Jan/26", "Giro Geral Fev/26", "Giro Geral Mar/26", "Giro Geral Abr/26",
+    *[col_giro("Giro Geral", mes) for mes in MESES],
     "Média Giro Geral", "Estoque Atual Geral", "Estoque Geral", "Saldo em Trânsito/ABERTO", "Estoque Final",
     "Estoque Alvo", "Sugestão Sistema", "Sugestão arredondada", "Data Última Compra", "Preço Última Compra",
 ]
@@ -2103,7 +2146,8 @@ elif pagina == "🛒 Pedido de Compra":
         "codigo", "descricao", "Código Fábrica", "Embalagem",
         "Média Giro Lojas", "Estoque Lojas",
         "Média Giro Única", "Estoque Única",
-        "Média Giro Geral", "Estoque Geral", "Saldo em Trânsito/ABERTO", "Estoque Final",
+        "Média Giro Geral", *[col_giro("Giro Geral", mes) for mes in MESES],
+        "Estoque Geral", "Saldo em Trânsito/ABERTO", "Estoque Final",
         "Estoque Alvo", "Sugestão Sistema", "Sugestão arredondada", "Preço Última Compra", "Data Última Compra",
         "PEDIDO Final", "Origem Sugestão", "Valor Final do Pedido",
     ]
@@ -2164,7 +2208,8 @@ elif pagina == "🛒 Pedido de Compra":
         disabled=[
             "codigo", "descricao", "Código Fábrica", "Embalagem",
             "Média Giro Lojas", "Estoque Lojas", "Média Giro Única", "Estoque Única",
-            "Média Giro Geral", "Estoque Geral", "Saldo em Trânsito/ABERTO", "Estoque Final",
+            "Média Giro Geral", *[col_giro("Giro Geral", mes) for mes in MESES],
+            "Estoque Geral", "Saldo em Trânsito/ABERTO", "Estoque Final",
             "Estoque Alvo", "Sugestão Sistema", "Sugestão arredondada", "Preço Última Compra", "Data Última Compra",
             "Origem Sugestão", "Valor Final do Pedido",
         ],
