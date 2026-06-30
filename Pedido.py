@@ -1532,53 +1532,78 @@ def parse_linha_giro_marca_independente(line, meses_ref):
 
 @st.cache_data(show_spinner="Lendo PDF de ruptura por marca...")
 def parse_pdf_ruptura_por_marca(bytes_pdf):
-    texto = ""
-    with pdfplumber.open(BytesIO(bytes_pdf)) as pdf:
-        for page in pdf.pages:
-            page_text = page.extract_text(x_tolerance=1, y_tolerance=3)
-            if page_text:
-                texto += page_text + "\n"
+    """
+    Leitor otimizado para PDF grande.
 
-    meses_ref = _extrair_meses_cabecalho_marca(texto)
-    if not meses_ref:
-        meses_ref = ["Mês 1", "Mês 2", "Mês 3", "Mês 4"]
-
+    O relatório de Giro Geral por Marca pode ter mais de 1.500 páginas.
+    pdfplumber é bom para tabelas, mas fica muito lento nesse volume.
+    Aqui usamos PyMuPDF primeiro, que extrai texto página a página com muito mais velocidade,
+    e só caímos para pdfplumber se PyMuPDF não estiver disponível.
+    """
     registros = []
     empresa_atual = None
     marca_cod_atual = ""
     marca_nome_atual = "SEM MARCA"
+    meses_ref = []
 
-    for raw_line in texto.splitlines():
-        line = raw_line.strip()
+    def processar_texto_pagina(page_text):
+        nonlocal empresa_atual, marca_cod_atual, marca_nome_atual, meses_ref, registros
 
-        empresa_match = re.search(r"EMPRESA\s*:\s*(\d{3})\s*-", line, flags=re.IGNORECASE)
-        if empresa_match:
-            empresa_atual = empresa_match.group(1)
-            continue
+        if not meses_ref:
+            meses_extraidos = _extrair_meses_cabecalho_marca(page_text or "")
+            if meses_extraidos:
+                meses_ref = meses_extraidos
 
-        marca_match = re.search(r"MARCA\s*:\s*([^\n]+)", line, flags=re.IGNORECASE)
-        if marca_match:
-            marca_raw = marca_match.group(1).strip()
-            marca_partes = re.match(r"([^\-]+)\s*-\s*(.*)", marca_raw)
-            if marca_partes:
-                marca_cod_atual = marca_partes.group(1).strip()
-                marca_nome_atual = marca_partes.group(2).strip() or "SEM MARCA"
-            else:
-                marca_cod_atual = ""
-                marca_nome_atual = marca_raw or "SEM MARCA"
-            continue
+        if not meses_ref:
+            return
 
-        if not empresa_atual or empresa_atual not in LOJAS_MAP:
-            continue
+        for raw_line in str(page_text or "").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
 
-        produto = parse_linha_giro_marca_independente(line, meses_ref)
-        if produto:
-            produto["codigo_empresa"] = empresa_atual
-            produto["loja"] = LOJAS_MAP.get(empresa_atual, empresa_atual)
-            produto["tipo_unidade"] = "ÚNICA" if empresa_atual == CODIGO_UNICA else "LOJAS DAUTO"
-            produto["marca_codigo"] = marca_cod_atual
-            produto["marca"] = marca_nome_atual if marca_nome_atual else "SEM MARCA"
-            registros.append(produto)
+            empresa_match = re.search(r"EMPRESA\s*:\s*(\d{3})\s*-", line, flags=re.IGNORECASE)
+            if empresa_match:
+                empresa_atual = empresa_match.group(1)
+                continue
+
+            marca_match = re.search(r"MARCA\s*:\s*([^\n]+)", line, flags=re.IGNORECASE)
+            if marca_match:
+                marca_raw = marca_match.group(1).strip()
+                marca_partes = re.match(r"([^\-]+)\s*-\s*(.*)", marca_raw)
+                if marca_partes:
+                    marca_cod_atual = marca_partes.group(1).strip()
+                    marca_nome_atual = marca_partes.group(2).strip() or "SEM MARCA"
+                else:
+                    marca_cod_atual = ""
+                    marca_nome_atual = marca_raw or "SEM MARCA"
+                continue
+
+            if not empresa_atual or empresa_atual not in LOJAS_MAP:
+                continue
+
+            produto = parse_linha_giro_marca_independente(line, meses_ref)
+            if produto:
+                produto["codigo_empresa"] = empresa_atual
+                produto["loja"] = LOJAS_MAP.get(empresa_atual, empresa_atual)
+                produto["tipo_unidade"] = "ÚNICA" if empresa_atual == CODIGO_UNICA else "LOJAS DAUTO"
+                produto["marca_codigo"] = marca_cod_atual
+                produto["marca"] = marca_nome_atual if marca_nome_atual else "SEM MARCA"
+                registros.append(produto)
+
+    try:
+        import fitz  # PyMuPDF
+        with fitz.open(stream=bytes_pdf, filetype="pdf") as doc:
+            for page in doc:
+                processar_texto_pagina(page.get_text("text"))
+    except Exception:
+        with pdfplumber.open(BytesIO(bytes_pdf)) as pdf:
+            for page in pdf.pages:
+                page_text = page.extract_text(x_tolerance=1, y_tolerance=3)
+                processar_texto_pagina(page_text)
+
+    if not meses_ref:
+        meses_ref = ["Mês 1", "Mês 2", "Mês 3", "Mês 4"]
 
     df = pd.DataFrame(registros)
     return df, meses_ref
