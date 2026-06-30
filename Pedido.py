@@ -1593,14 +1593,18 @@ def parse_pdf_ruptura_por_marca(bytes_pdf):
 
     try:
         import fitz  # PyMuPDF
+    except Exception as e:
+        raise RuntimeError(
+            "Para esta página, instale o PyMuPDF. Rode: pip install pymupdf. "
+            "O pdfplumber é lento demais para este relatório com muitas páginas."
+        ) from e
+
+    try:
         with fitz.open(stream=bytes_pdf, filetype="pdf") as doc:
             for page in doc:
-                processar_texto_pagina(page.get_text("text"))
-    except Exception:
-        with pdfplumber.open(BytesIO(bytes_pdf)) as pdf:
-            for page in pdf.pages:
-                page_text = page.extract_text(x_tolerance=1, y_tolerance=3)
-                processar_texto_pagina(page_text)
+                processar_texto_pagina(page.get_text("text", sort=True))
+    except Exception as e:
+        raise RuntimeError(f"Falha ao extrair texto do PDF com PyMuPDF: {e}") from e
 
     if not meses_ref:
         meses_ref = ["Mês 1", "Mês 2", "Mês 3", "Mês 4"]
@@ -1744,6 +1748,8 @@ def render_pagina_ruptura_por_marca():
     if not pdf_marca:
         st.info("Envie o PDF de Giro Geral por Marca para iniciar esta análise.")
         return
+
+    st.info("Leitura otimizada ativada: esta página usa PyMuPDF. Não usa pdfplumber neste relatório grande.")
 
     try:
         bytes_pdf = pdf_marca.getvalue()
