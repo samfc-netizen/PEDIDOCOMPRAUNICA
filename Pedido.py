@@ -942,6 +942,35 @@ def colorir_colunas_pedido(col):
     return [""] * len(col)
 
 
+def colunas_giro_geral_mensal(df):
+    return [c for c in df.columns if str(c).startswith("Giro Geral ")]
+
+
+def estilos_alerta_giro_fora_curva(row):
+    estilos = pd.Series("", index=row.index)
+    cols_giro = colunas_giro_geral_mensal(pd.DataFrame(columns=row.index))
+    if len(cols_giro) < 2:
+        return estilos
+
+    valores = pd.to_numeric(row[cols_giro], errors="coerce").fillna(0)
+    positivos = valores[valores > 0]
+
+    colunas_alerta = set()
+    if len(positivos) == 1:
+        colunas_alerta.add(positivos.index[0])
+    elif len(positivos) >= 2:
+        for col, valor in valores.items():
+            if valor <= 0:
+                continue
+            outros = valores.drop(index=col)
+            media_outros = outros[outros > 0].mean()
+            if pd.notna(media_outros) and media_outros > 0 and valor >= media_outros * 2.2:
+                colunas_alerta.add(col)
+
+    for col in colunas_alerta:
+        estilos[col] = "color: #c2410c; font-weight: 700"
+    return estilos
+
 def formatadores_para_tabela(df):
     fmt = {}
     dinheiro = [c for c in df.columns if "Preço" in c or "Valor" in c]
@@ -957,7 +986,7 @@ def formatadores_para_tabela(df):
 
 
 def render_tabela_interativa_colorida(df, height=650):
-    styled = df.style.apply(colorir_colunas_consolidada, axis=0).format(formatadores_para_tabela(df))
+    styled = df.style.apply(colorir_colunas_consolidada, axis=0).apply(estilos_alerta_giro_fora_curva, axis=1).format(formatadores_para_tabela(df))
     st.dataframe(
         styled,
         use_container_width=True,
@@ -2255,7 +2284,7 @@ elif pagina == "🛒 Pedido de Compra":
         st.session_state["pedido_editado"] = pedido_base_completo
 
     pedido_view = pedido_view[colunas_sugestao].copy()
-    pedido_style = pedido_view.style.apply(colorir_colunas_pedido, axis=0).format(formatadores_para_tabela(pedido_view))
+    pedido_style = pedido_view.style.apply(colorir_colunas_pedido, axis=0).apply(estilos_alerta_giro_fora_curva, axis=1).format(formatadores_para_tabela(pedido_view))
 
     pedido_editado = st.data_editor(
         pedido_style,
