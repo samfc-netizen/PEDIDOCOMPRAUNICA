@@ -1269,6 +1269,384 @@ def gerar_excel_autcom_tratamento(df_tratamento):
     output.seek(0)
     return output.getvalue()
 
+def gerar_excel_fornecedor_tratamento(df_tratamento):
+    """
+    Gera Excel para envio ao fornecedor a partir da planilha de Tratamento Final:
+    A = codigo, B = descricao, C = Codigo de fabrica, D = quantidade.
+    """
+    if Workbook is None:
+        raise RuntimeError("A biblioteca openpyxl não está instalada. Rode: python -m pip install openpyxl")
+
+    df = df_tratamento.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    colunas_norm = {normalizar_coluna(c): c for c in df.columns}
+
+    col_codigo = colunas_norm.get("ZX") or colunas_norm.get("CODIGO") or colunas_norm.get("CÓDIGO")
+    col_descricao = colunas_norm.get("DESCRICAO") or colunas_norm.get("DESCRIÇÃO") or colunas_norm.get("DESCRICAO DO ITEM") or colunas_norm.get("DESCRIÇÃO DO ITEM")
+    col_fabrica = (
+        colunas_norm.get("CÓDIGO FÁBRICA") or colunas_norm.get("CODIGO FABRICA") or
+        colunas_norm.get("CÓD. FÁBRICA") or colunas_norm.get("COD. FABRICA") or
+        colunas_norm.get("CÓDIGO DE FÁBRICA") or colunas_norm.get("CODIGO DE FABRICA")
+    )
+    col_qtd = colunas_norm.get("PEDIDO FINAL") or colunas_norm.get("QUANTIDADE") or colunas_norm.get("QTD") or colunas_norm.get("QTDE")
+
+    faltantes = []
+    if not col_codigo:
+        faltantes.append("codigo/zx")
+    if not col_descricao:
+        faltantes.append("descricao")
+    if not col_fabrica:
+        faltantes.append("Código Fábrica")
+    if not col_qtd:
+        faltantes.append("PEDIDO Final/Quantidade")
+    if faltantes:
+        raise ValueError("A planilha enviada não possui as colunas obrigatórias para fornecedor: " + ", ".join(faltantes))
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Fornecedor"
+    ws.append(["Código", "Descrição", "Código de Fábrica", "Quantidade"])
+
+    for _, row in df.iterrows():
+        qtd = br_to_float(row.get(col_qtd, 0))
+        try:
+            qtd = int(round(float(qtd)))
+        except Exception:
+            qtd = 0
+        if qtd <= 0:
+            continue
+
+        codigo_raw = str(row.get(col_codigo, "")).strip()
+        codigo_match = re.search(r"(\d+)", codigo_raw)
+        codigo = codigo_match.group(1).zfill(5) if codigo_match else codigo_raw
+
+        ws.append([
+            codigo,
+            str(row.get(col_descricao, "")).strip(),
+            str(row.get(col_fabrica, "")).strip(),
+            qtd,
+        ])
+
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    larguras = {"A": 14, "B": 48, "C": 22, "D": 14}
+    for col, largura in larguras.items():
+        ws.column_dimensions[col].width = largura
+    for cell in ws[1]:
+        cell.font = cell.font.copy(bold=True)
+    for cell in ws["D"]:
+        cell.number_format = '0'
+
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+
+def _coluna_por_candidatos(df, candidatos):
+    colunas_norm = {normalizar_coluna(c): c for c in df.columns}
+    for candidato in candidatos:
+        col = colunas_norm.get(normalizar_coluna(candidato))
+        if col:
+            return col
+    return None
+
+
+def ler_arquivo_comparativo(uploaded_file):
+    if uploaded_file is None:
+        return pd.DataFrame()
+
+    nome = str(getattr(uploaded_file, "name", "")).lower()
+    try:
+        uploaded_file.seek(0)
+    except Exception:
+        pass
+
+    if nome.endswith(".pdf"):
+        linhas = []
+        with pdfplumber.open(uploaded_file) as pdf:
+            for page in pdf.pages:
+                tabelas = page.extract_tables() or []
+                for tabela in tabelas:
+                    for linha in tabela:
+                        if linha and any(str(c or "").strip() for c in linha):
+                            linhas.append([str(c or "").strip() for c in linha])
+        if not linhas:
+            return pd.DataFrame()
+
+        max_cols = max(len(linha) for linha in linhas)
+        linhas = [linha + [""] * (max_cols - len(linha)) for linha in linhas]
+        header_idx = 0
+        for i, linha in enumerate(linhas[:10]):
+            linha_norm = " ".join(normalizar_coluna(c) for c in linha)
+            if any(p in linha_norm for p in ["COD", "CÓD", "DESCR", "QTD", "QTDE", "QUANT"]):
+                header_idx = i
+                break
+        headers = [str(c).strip() or f"COLUNA {i+1}" for i, c in enumerate(linhas[header_idx])]
+        return pd.DataFrame(linhas[header_idx + 1:], columns=headers)
+
+    return ler_planilha_tratamento_pedido(uploaded_file)
+
+
+def normalizar_pedido_comparativo(df, origem):
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+
+    col_fabrica = _coluna_por_candidatos(df, [
+        "Código Fábrica", "Codigo Fabrica", "Cód. Fábrica", "Cod. Fabrica",
+        "Código de Fábrica", "Codigo de Fabrica", "Cod Fabrica", "Cód Fabrica",
+        "Referência", "Referencia", "Ref", "Código Fornecedor", "Codigo Fornecedor",
+    ])
+    col_descricao = _coluna_por_candidatos(df, [
+        "descricao", "descrição", "descrição do item", "descricao do item", "produto", "item", "nome",
+    ])
+    col_qtd = _coluna_por_candidatos(df, [
+        "PEDIDO Final", "Quantidade", "Qtd", "Qtde", "Quant", "Quantidade Pedido", "Qtd Pedido",
+    ])
+    col_preco = _coluna_por_candidatos(df, [
+        "Preço Última Compra", "Preco Ultima Compra", "Preço", "Preco", "Valor Unitário",
+        "Valor Unitario", "Vlr Unit", "Vr.Unit", "VR.UNIT", "Unitário", "Unitario",
+    ])
+    col_total = _coluna_por_candidatos(df, [
+        "Valor Final do Pedido", "Valor Total", "Total", "Total Geral", "Valor", "Vlr Total",
+    ])
+
+    faltantes = []
+    if not col_descricao:
+        faltantes.append("descrição")
+    if not col_qtd:
+        faltantes.append("quantidade")
+    if faltantes:
+        raise ValueError(f"O arquivo {origem} não possui coluna reconhecida de " + ", ".join(faltantes) + ".")
+
+    out = pd.DataFrame()
+    out["origem"] = origem
+    out["codigo_fabrica"] = df[col_fabrica].astype(str).str.strip() if col_fabrica else ""
+    out["descricao"] = df[col_descricao].astype(str).str.strip() if col_descricao else ""
+    out["quantidade"] = df[col_qtd].apply(br_to_float)
+    out["preco_unitario"] = df[col_preco].apply(numero_planilha_para_float) if col_preco else 0.0
+    out["valor_total"] = df[col_total].apply(numero_planilha_para_float) if col_total else 0.0
+    out.loc[(out["valor_total"] <= 0) & (out["preco_unitario"] > 0), "valor_total"] = out["quantidade"] * out["preco_unitario"]
+    out.loc[(out["preco_unitario"] <= 0) & (out["valor_total"] > 0) & (out["quantidade"] > 0), "preco_unitario"] = out["valor_total"] / out["quantidade"]
+    out["descricao_chave"] = out["descricao"].str.upper().str.replace(r"[^A-Z0-9 ]+", " ", regex=True).str.replace(r"\s+", " ", regex=True).str.strip()
+    out = out[(out["quantidade"] > 0) | (out["preco_unitario"] > 0) | (out["valor_total"] > 0)].copy()
+    return out
+
+
+def agregar_pedido_comparativo(df):
+    if df.empty:
+        return df.copy()
+    df = df.copy()
+    df["codigo_fabrica"] = df["codigo_fabrica"].fillna("").astype(str).str.strip()
+    df["chave"] = df["codigo_fabrica"].where(df["codigo_fabrica"] != "", "DESC:" + df["descricao_chave"])
+    agg = df.groupby("chave", as_index=False).agg(
+        codigo_fabrica=("codigo_fabrica", "first"),
+        descricao=("descricao", "first"),
+        descricao_chave=("descricao_chave", "first"),
+        quantidade=("quantidade", "sum"),
+        valor_total=("valor_total", "sum"),
+    )
+    agg["preco_unitario"] = agg.apply(
+        lambda r: float(r["valor_total"]) / float(r["quantidade"]) if float(r["quantidade"] or 0) > 0 and float(r["valor_total"] or 0) > 0 else 0,
+        axis=1,
+    )
+    return agg
+
+
+def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw):
+    unica = agregar_pedido_comparativo(normalizar_pedido_comparativo(df_unica_raw, "Única"))
+    fornecedor = agregar_pedido_comparativo(normalizar_pedido_comparativo(df_fornecedor_raw, "Fornecedor"))
+
+    usados_fornecedor = set()
+    linhas = []
+    descricoes_fornecedor = fornecedor["descricao_chave"].fillna("").tolist() if not fornecedor.empty else []
+
+    for _, row in unica.iterrows():
+        match = None
+        metodo = ""
+        chave = str(row.get("chave", ""))
+        cod_fab = str(row.get("codigo_fabrica", "")).strip()
+
+        if cod_fab:
+            candidatos = fornecedor[fornecedor["codigo_fabrica"].astype(str).str.strip() == cod_fab]
+            candidatos = candidatos[~candidatos.index.isin(usados_fornecedor)]
+            if not candidatos.empty:
+                match = candidatos.iloc[0]
+                usados_fornecedor.add(match.name)
+                metodo = "Código de fábrica"
+
+        if match is None and str(row.get("descricao_chave", "")).strip() and descricoes_fornecedor:
+            candidato_desc = difflib.get_close_matches(str(row["descricao_chave"]), descricoes_fornecedor, n=1, cutoff=0.72)
+            if candidato_desc:
+                candidatos = fornecedor[fornecedor["descricao_chave"] == candidato_desc[0]]
+                candidatos = candidatos[~candidatos.index.isin(usados_fornecedor)]
+                if not candidatos.empty:
+                    match = candidatos.iloc[0]
+                    usados_fornecedor.add(match.name)
+                    metodo = "Descrição aproximada"
+
+        if match is None:
+            linhas.append({
+                "Status": "Não encontrado no fornecedor",
+                "Método": "Sem correspondência",
+                "Código Fábrica Única": cod_fab,
+                "Descrição Única": row.get("descricao", ""),
+                "Qtd Única": row.get("quantidade", 0),
+                "Preço Única": row.get("preco_unitario", 0),
+                "Valor Única": row.get("valor_total", 0),
+                "Código Fábrica Fornecedor": "",
+                "Descrição Fornecedor": "",
+                "Qtd Fornecedor": 0,
+                "Preço Fornecedor": 0,
+                "Valor Fornecedor": 0,
+                "Diferença Qtd": -float(row.get("quantidade", 0) or 0),
+                "Diferença Preço": -float(row.get("preco_unitario", 0) or 0),
+                "Diferença Valor": -float(row.get("valor_total", 0) or 0),
+            })
+            continue
+
+        dif_qtd = float(match.get("quantidade", 0) or 0) - float(row.get("quantidade", 0) or 0)
+        dif_preco = float(match.get("preco_unitario", 0) or 0) - float(row.get("preco_unitario", 0) or 0)
+        dif_valor = float(match.get("valor_total", 0) or 0) - float(row.get("valor_total", 0) or 0)
+        status = "OK" if abs(dif_qtd) < 0.0001 and abs(dif_preco) < 0.01 and abs(dif_valor) < 0.01 else "Divergente"
+        linhas.append({
+            "Status": status,
+            "Método": metodo,
+            "Código Fábrica Única": cod_fab,
+            "Descrição Única": row.get("descricao", ""),
+            "Qtd Única": row.get("quantidade", 0),
+            "Preço Única": row.get("preco_unitario", 0),
+            "Valor Única": row.get("valor_total", 0),
+            "Código Fábrica Fornecedor": match.get("codigo_fabrica", ""),
+            "Descrição Fornecedor": match.get("descricao", ""),
+            "Qtd Fornecedor": match.get("quantidade", 0),
+            "Preço Fornecedor": match.get("preco_unitario", 0),
+            "Valor Fornecedor": match.get("valor_total", 0),
+            "Diferença Qtd": dif_qtd,
+            "Diferença Preço": dif_preco,
+            "Diferença Valor": dif_valor,
+        })
+
+    extras = fornecedor[~fornecedor.index.isin(usados_fornecedor)].copy()
+    for _, row in extras.iterrows():
+        linhas.append({
+            "Status": "Somente fornecedor",
+            "Método": "Sem correspondência",
+            "Código Fábrica Única": "",
+            "Descrição Única": "",
+            "Qtd Única": 0,
+            "Preço Única": 0,
+            "Valor Única": 0,
+            "Código Fábrica Fornecedor": row.get("codigo_fabrica", ""),
+            "Descrição Fornecedor": row.get("descricao", ""),
+            "Qtd Fornecedor": row.get("quantidade", 0),
+            "Preço Fornecedor": row.get("preco_unitario", 0),
+            "Valor Fornecedor": row.get("valor_total", 0),
+            "Diferença Qtd": row.get("quantidade", 0),
+            "Diferença Preço": row.get("preco_unitario", 0),
+            "Diferença Valor": row.get("valor_total", 0),
+        })
+
+    return pd.DataFrame(linhas)
+
+
+def colorir_comparativo_pedidos(row):
+    status = str(row.get("Status", ""))
+    if status == "OK":
+        return ["background-color: #eaf7ea"] * len(row)
+    if status == "Divergente":
+        return ["background-color: #fff7ed"] * len(row)
+    return ["background-color: #ffe8e8; font-weight: 600"] * len(row)
+
+
+def gerar_excel_comparativo_pedidos(df_comparativo):
+    if Workbook is None:
+        raise RuntimeError("A biblioteca openpyxl não está instalada. Rode: python -m pip install openpyxl")
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Comparativo"
+    ws.append(list(df_comparativo.columns))
+    for _, row in df_comparativo.iterrows():
+        ws.append([row.get(col, "") for col in df_comparativo.columns])
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    for cell in ws[1]:
+        cell.font = cell.font.copy(bold=True)
+    for idx, col in enumerate(df_comparativo.columns, start=1):
+        letter = ws.cell(row=1, column=idx).column_letter
+        if "Descrição" in col:
+            ws.column_dimensions[letter].width = 42
+        elif "Preço" in col or "Valor" in col:
+            ws.column_dimensions[letter].width = 16
+            for cell in ws[letter][1:]:
+                cell.number_format = 'R$ #,##0.00'
+        elif "Qtd" in col:
+            ws.column_dimensions[letter].width = 13
+            for cell in ws[letter][1:]:
+                cell.number_format = '#,##0.0'
+        else:
+            ws.column_dimensions[letter].width = 22
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+
+def render_pagina_comparativo_pedidos():
+    st.markdown('<div class="section-title">Comparativo de Pedidos</div>', unsafe_allow_html=True)
+    st.caption("Compare o pedido da Única com o pedido enviado pelo fornecedor usando Código de Fábrica; quando faltar, o sistema tenta descrição aproximada.")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        pedido_unica = st.file_uploader("Planilha do pedido da Única", type=["xlsx", "xls", "csv"], key="upload_comparativo_unica")
+    with col2:
+        pedido_fornecedor = st.file_uploader("Pedido do fornecedor", type=["xlsx", "xls", "csv", "pdf"], key="upload_comparativo_fornecedor")
+
+    if not pedido_unica or not pedido_fornecedor:
+        st.info("Envie a planilha da Única e o arquivo do fornecedor para gerar o comparativo.")
+        return
+
+    try:
+        df_unica = ler_arquivo_comparativo(pedido_unica)
+        df_fornecedor = ler_arquivo_comparativo(pedido_fornecedor)
+        if df_unica.empty or df_fornecedor.empty:
+            st.error("Não consegui ler uma das bases enviadas. Verifique se o arquivo possui tabela com descrição, quantidade e preço/valor.")
+            return
+
+        comparativo = montar_comparativo_pedidos(df_unica, df_fornecedor)
+        st.success(f"Comparativo gerado com {len(comparativo)} linha(s).")
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("OK", int((comparativo["Status"] == "OK").sum()))
+        c2.metric("Divergentes", int((comparativo["Status"] == "Divergente").sum()))
+        c3.metric("Não encontrados", int((comparativo["Status"] == "Não encontrado no fornecedor").sum()))
+        c4.metric("Somente fornecedor", int((comparativo["Status"] == "Somente fornecedor").sum()))
+
+        termo = st.text_input("Pesquisar no comparativo", key="busca_comparativo_pedidos").strip().lower()
+        view = comparativo.copy()
+        if termo:
+            filtro = pd.Series(False, index=view.index)
+            for col in ["Código Fábrica Única", "Descrição Única", "Código Fábrica Fornecedor", "Descrição Fornecedor", "Status"]:
+                filtro = filtro | view[col].astype(str).str.lower().str.contains(termo, na=False)
+            view = view[filtro].copy()
+
+        st.dataframe(
+            view.style.apply(colorir_comparativo_pedidos, axis=1).format(formatadores_para_tabela(view)),
+            use_container_width=True,
+            hide_index=True,
+            height=620,
+        )
+
+        st.download_button(
+            "Baixar comparativo em Excel",
+            gerar_excel_comparativo_pedidos(comparativo),
+            "comparativo_pedidos.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+        )
+    except Exception as e:
+        st.error(str(e))
+
 def inicializar_pedido_editavel(tabela_resumo):
     colunas_base = colunas_pedido_compras(MESES)
 
@@ -2035,7 +2413,7 @@ render_header()
 st.sidebar.markdown("### 📊 Análise de Giro")
 pagina = st.sidebar.radio(
     "Navegação",
-    ["📦 Giro Consolidado", "🛒 Pedido de Compra", "📄 Exportações", "🏷️ Ruptura por Marca", "⚙️ Tratamento Final"],
+    ["📦 Giro Consolidado", "🛒 Pedido de Compra", "📄 Exportações", "🏷️ Ruptura por Marca", "⚖️ Comparativo de Pedidos", "⚙️ Tratamento Final"],
     label_visibility="collapsed",
 )
 
@@ -2063,6 +2441,10 @@ st.sidebar.caption("Estoque Final = Estoque Atual Geral + Saldo em Trânsito/ABE
 
 if pagina == "🏷️ Ruptura por Marca":
     render_pagina_ruptura_por_marca()
+    st.stop()
+
+if pagina == "⚖️ Comparativo de Pedidos":
+    render_pagina_comparativo_pedidos()
     st.stop()
 
 
@@ -2115,13 +2497,22 @@ if pagina == "⚙️ Tratamento Final":
             st.dataframe(df_tratamento.head(50), use_container_width=True, hide_index=True, height=360)
 
         excel_tratamento = gerar_excel_autcom_tratamento(df_tratamento)
-        st.download_button(
-            "⬇️ Baixar pedido tratado para importação no Autcom",
-            excel_tratamento,
-            "pedido_tratado_importacao_autcom.xlsx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary",
-        )
+        col_dl_autcom, col_dl_fornecedor = st.columns(2)
+        with col_dl_autcom:
+            st.download_button(
+                "⬇️ Baixar pedido tratado para importação no Autcom",
+                excel_tratamento,
+                "pedido_tratado_importacao_autcom.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
+            )
+        with col_dl_fornecedor:
+            st.download_button(
+                "⬇️ Baixar pedido para envio ao fornecedor",
+                gerar_excel_fornecedor_tratamento(df_tratamento),
+                "pedido_envio_fornecedor.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
     except Exception as e:
         st.error(str(e))
 
