@@ -859,27 +859,11 @@ def montar_tabela_consolidada(df_giro, df_transito=None, dias_estoque_alvo=60, m
     if df_transito is not None and not df_transito.empty:
         df_transito = df_transito.copy()
         df_transito["codigo"] = df_transito["codigo"].astype(str).str.extract(r"(\d+)", expand=False).fillna("").str.zfill(5)
-        resumo = pd.merge(resumo, df_transito, on="codigo", how="outer", suffixes=("", "_transito"))
-        if "descricao_transito" in resumo.columns:
-            resumo["descricao"] = resumo["descricao"].replace(0, "").fillna("")
-            resumo["descricao"] = resumo["descricao"].where(resumo["descricao"].astype(str).str.strip() != "", resumo["descricao_transito"].fillna(""))
-            resumo = resumo.drop(columns=["descricao_transito"], errors="ignore")
+        resumo = pd.merge(resumo, df_transito.drop(columns=["descricao"], errors="ignore"), on="codigo", how="left")
     else:
         resumo["Saldo em Trânsito/ABERTO"] = 0
 
-    for col in ["descricao", "Código Fábrica"]:
-        if col not in resumo.columns:
-            resumo[col] = ""
-        resumo[col] = resumo[col].replace(0, "").fillna("")
-
-    for col in [
-        "Estoque Lojas", "Estoque Única", "Média Giro Lojas", "Média Giro Única",
-        "Média Giro Geral", "Estoque Atual Geral", "Estoque Geral", "Embalagem", "Saldo em Trânsito/ABERTO",
-        *colunas_giro_geral,
-    ]:
-        if col not in resumo.columns:
-            resumo[col] = 0
-        resumo[col] = pd.to_numeric(resumo[col], errors="coerce").fillna(0)
+    resumo["Saldo em Trânsito/ABERTO"] = pd.to_numeric(resumo["Saldo em Trânsito/ABERTO"], errors="coerce").fillna(0)
     resumo["Estoque Final"] = resumo["Estoque Atual Geral"] + resumo["Saldo em Trânsito/ABERTO"]
     resumo["Estoque Alvo"] = resumo["Média Giro Geral"] * (dias_estoque_alvo / 30)
     resumo["Sugestão Sistema"] = (resumo["Estoque Alvo"] - resumo["Estoque Final"]).apply(lambda x: max(math.ceil(x), 0)).astype(int)
