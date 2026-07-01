@@ -214,6 +214,35 @@ def label_mes_giro(mes):
 def col_giro(prefixo, mes):
     return f"{prefixo} {label_mes_giro(mes)}"
 
+
+def colunas_pedido_compras(meses_ref=None):
+    """
+    Ordem oficial da tela Pedido de Compra e do download Pedido Editável.
+    Mantém Código Fábrica e Embalagem no final, conforme solicitado.
+    """
+    meses_ref = meses_ref or MESES
+    return [
+        "codigo",
+        "descricao",
+        *[col_giro("Giro Geral", mes) for mes in meses_ref],
+        "Média Giro Geral",
+        "Estoque Lojas",
+        "Estoque Única",
+        "Estoque Geral",
+        "Saldo em Trânsito/ABERTO",
+        "Estoque Final",
+        "Estoque Alvo",
+        "Sugestão Sistema",
+        "Sugestão arredondada",
+        "Preço Última Compra",
+        "Data Última Compra",
+        "PEDIDO Final",
+        "Origem Sugestão",
+        "Valor Final do Pedido",
+        "Embalagem",
+        "Código Fábrica",
+    ]
+
 # =========================================================
 # LEITURA DO PDF DE GIRO DE ESTOQUE
 # =========================================================
@@ -892,7 +921,7 @@ def render_tabela_interativa_colorida(df, height=650):
         column_config={
             "codigo": st.column_config.TextColumn("Código", width="small", pinned=True),
             "descricao": st.column_config.TextColumn("Descrição", width="large", pinned=True),
-            "Código Fábrica": st.column_config.TextColumn("Código Fábrica", width="medium", pinned=True),
+            "Código Fábrica": st.column_config.TextColumn("Código Fábrica", width="medium"),
         },
     )
 
@@ -989,7 +1018,7 @@ def gerar_excel_pedido_editavel(df):
         ws.cell(row=2, column=idx_total).number_format = 'R$ #,##0.00'
 
     # Congela cabeçalho e as primeiras colunas de identificação.
-    ws.freeze_panes = "E2"
+    ws.freeze_panes = "C2"
     ws.auto_filter.ref = ws.dimensions
 
     for col_idx, col_name in enumerate(df_export.columns, start=1):
@@ -1167,27 +1196,7 @@ def gerar_excel_autcom_tratamento(df_tratamento):
     return output.getvalue()
 
 def inicializar_pedido_editavel(tabela_resumo):
-    colunas_base = [
-        "codigo",
-        "descricao",
-        *[col_giro("Giro Geral", mes) for mes in MESES],
-        "Média Giro Geral",
-        "Estoque Lojas",
-        "Estoque Única",
-        "Estoque Geral",
-        "Saldo em Trânsito/ABERTO",
-        "Estoque Final",
-        "Estoque Alvo",
-        "Sugestão Sistema",
-        "Sugestão arredondada",
-        "Preço Última Compra",
-        "Data Última Compra",
-        "PEDIDO Final",
-        "Origem Sugestão",
-        "Valor Final do Pedido",
-        "Embalagem",
-        "Código Fábrica",
-    ]
+    colunas_base = colunas_pedido_compras(MESES)
 
     base = tabela_resumo.copy()
     if "Estoque Geral" not in base.columns and "Estoque Atual Geral" in base.columns:
@@ -2154,15 +2163,7 @@ elif pagina == "🛒 Pedido de Compra":
         pedido_base_completo["Estoque Geral"] = pedido_base_completo["Estoque Atual Geral"]
     pedido_base_completo = atualizar_valor_e_origem(pedido_base_completo)
 
-    colunas_sugestao = [
-        "codigo", "descricao", "Código Fábrica", "Embalagem",
-        "Média Giro Lojas", "Estoque Lojas",
-        "Média Giro Única", "Estoque Única",
-        "Média Giro Geral", *[col_giro("Giro Geral", mes) for mes in MESES],
-        "Estoque Geral", "Saldo em Trânsito/ABERTO", "Estoque Final",
-        "Estoque Alvo", "Sugestão Sistema", "Sugestão arredondada", "Preço Última Compra", "Data Última Compra",
-        "PEDIDO Final", "Origem Sugestão", "Valor Final do Pedido",
-    ]
+    colunas_sugestao = colunas_pedido_compras(MESES)
     for col in colunas_sugestao:
         if col not in pedido_base_completo.columns:
             pedido_base_completo[col] = 0 if col not in ["codigo", "descricao", "Código Fábrica", "Data Última Compra", "Origem Sugestão"] else ""
@@ -2218,17 +2219,20 @@ elif pagina == "🛒 Pedido de Compra":
         height=650,
         key="editor_pedido_final",
         disabled=[
-            "codigo", "descricao", "Código Fábrica", "Embalagem",
-            "Média Giro Lojas", "Estoque Lojas", "Média Giro Única", "Estoque Única",
-            "Média Giro Geral", *[col_giro("Giro Geral", mes) for mes in MESES],
-            "Estoque Geral", "Saldo em Trânsito/ABERTO", "Estoque Final",
-            "Estoque Alvo", "Sugestão Sistema", "Sugestão arredondada", "Preço Última Compra", "Data Última Compra",
+            "codigo", "descricao",
+            *[col_giro("Giro Geral", mes) for mes in MESES],
+            "Média Giro Geral",
+            "Estoque Lojas", "Estoque Única", "Estoque Geral",
+            "Saldo em Trânsito/ABERTO", "Estoque Final", "Estoque Alvo",
+            "Sugestão Sistema", "Sugestão arredondada",
+            "Preço Última Compra", "Data Última Compra",
             "Origem Sugestão", "Valor Final do Pedido",
+            "Embalagem", "Código Fábrica",
         ],
         column_config={
             "codigo": st.column_config.TextColumn("Código", pinned=True),
             "descricao": st.column_config.TextColumn("Descrição", width="large", pinned=True),
-            "Código Fábrica": st.column_config.TextColumn("Código Fábrica", pinned=True),
+            "Código Fábrica": st.column_config.TextColumn("Código Fábrica", width="medium"),
             "Embalagem": st.column_config.NumberColumn("Embalagem", min_value=0, step=1, format="%d"),
             "Média Giro Lojas": st.column_config.NumberColumn("Média Giro Lojas", format="%.1f"),
             "Estoque Lojas": st.column_config.NumberColumn("Estoque Lojas", format="%.1f"),
@@ -2303,6 +2307,12 @@ elif pagina == "🛒 Pedido de Compra":
             excel_editavel_bytes,
             "pedido_editavel.xlsx",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        st.download_button(
+            "⬇️ Baixar pedido editável em CSV",
+            gerar_csv(pedido_editado[colunas_pedido_compras(MESES)]),
+            "pedido_editavel.csv",
+            "text/csv",
         )
     except RuntimeError as e:
         st.error(str(e))
