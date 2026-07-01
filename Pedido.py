@@ -371,6 +371,20 @@ def _eh_numero_br(valor):
     return bool(_NUMERO_BR_RE.match(str(valor).strip()))
 
 
+def extrair_descricao_pedido_aberto_tokens(tokens, un_index):
+    if not tokens or un_index is None or un_index <= 0:
+        return ""
+
+    descricao_tokens = []
+    primeiro = str(tokens[0]).strip()
+    match_primeiro = re.match(r"^\d{5}[-\s]*(.*)$", primeiro)
+    if match_primeiro and match_primeiro.group(1).strip():
+        descricao_tokens.append(match_primeiro.group(1).strip(" -"))
+
+    descricao_tokens.extend(str(t).strip() for t in tokens[1:un_index] if str(t).strip())
+    return " ".join(descricao_tokens).strip()
+
+
 def encontrar_indice_aberto_no_cabecalho(text):
     """
     No relatório de Pedidos de Compra, após a unidade UN, a sequência numérica é:
@@ -409,13 +423,14 @@ def parse_linha_pedido_aberto(line, indice_aberto=None):
     if un_index is None:
         return None
 
+    descricao = extrair_descricao_pedido_aberto_tokens(partes, un_index)
     valores_numericos = [p for p in partes[un_index + 1:] if _eh_numero_br(p)]
     idx_aberto = 5 if indice_aberto is None else int(indice_aberto)
 
     if len(valores_numericos) > idx_aberto:
-        return {"codigo": codigo, "Saldo em Trânsito/ABERTO": br_to_float(valores_numericos[idx_aberto])}
+        return {"codigo": codigo, "descricao": descricao, "Saldo em Trânsito/ABERTO": br_to_float(valores_numericos[idx_aberto])}
 
-    return {"codigo": codigo, "Saldo em Trânsito/ABERTO": 0.0}
+    return {"codigo": codigo, "descricao": descricao, "Saldo em Trânsito/ABERTO": 0.0}
 
 
 def parse_pedidos_compra_aberto(text):
@@ -428,9 +443,12 @@ def parse_pedidos_compra_aberto(text):
             registros.append(produto)
 
     if not registros:
-        return pd.DataFrame(columns=["codigo", "Saldo em Trânsito/ABERTO"])
+        return pd.DataFrame(columns=["codigo", "descricao", "Saldo em Trânsito/ABERTO"])
 
-    return pd.DataFrame(registros).groupby("codigo", as_index=False)["Saldo em Trânsito/ABERTO"].sum()
+    return pd.DataFrame(registros).groupby("codigo", as_index=False).agg({
+        "descricao": "first",
+        "Saldo em Trânsito/ABERTO": "sum",
+    })
 
 
 def parse_pedidos_compra_aberto_pdf(uploaded_file):
@@ -492,6 +510,12 @@ def parse_pedidos_compra_aberto_pdf(uploaded_file):
                         continue
 
                     codigo = match_codigo.group(1).zfill(5)
+                    un_index = None
+                    for i, token in enumerate(textos):
+                        if token.upper() in ["UN", "UND", "UNID", "UNIDADE"]:
+                            un_index = i
+                            break
+                    descricao = extrair_descricao_pedido_aberto_tokens(textos, un_index)
                     candidatos = []
 
                     for w in linha_words[1:]:
@@ -509,6 +533,7 @@ def parse_pedidos_compra_aberto_pdf(uploaded_file):
                         candidatos.sort(key=lambda x: x[0])
                         registros.append({
                             "codigo": codigo,
+                            "descricao": descricao,
                             "Saldo em Trânsito/ABERTO": br_to_float(candidatos[0][1]),
                         })
 
@@ -516,7 +541,10 @@ def parse_pedidos_compra_aberto_pdf(uploaded_file):
         registros = []
 
     if registros:
-        return pd.DataFrame(registros).groupby("codigo", as_index=False)["Saldo em Trânsito/ABERTO"].sum()
+        return pd.DataFrame(registros).groupby("codigo", as_index=False).agg({
+            "descricao": "first",
+            "Saldo em Trânsito/ABERTO": "sum",
+        })
 
     try:
         uploaded_file.seek(0)
@@ -829,11 +857,29 @@ def montar_tabela_consolidada(df_giro, df_transito=None, dias_estoque_alvo=60, m
     resumo["Estoque Geral"] = resumo["Estoque Atual Geral"]
 
     if df_transito is not None and not df_transito.empty:
-        resumo = pd.merge(resumo, df_transito, on="codigo", how="left")
+        df_transito = df_transito.copy()
+        df_transito["codigo"] = df_transito["codigo"].astype(str).str.extract(r"(\d+)", expand=False).fillna("").str.zfill(5)
+        resumo = pd.merge(resumo, df_transito, on="codigo", how="outer", suffixes=("", "_transito"))
+        if "descricao_transito" in resumo.columns:
+            resumo["descricao"] = resumo["descricao"].replace(0, "").fillna("")
+            resumo["descricao"] = resumo["descricao"].where(resumo["descricao"].astype(str).str.strip() != "", resumo["descricao_transito"].fillna(""))
+            resumo = resumo.drop(columns=["descricao_transito"], errors="ignore")
     else:
         resumo["Saldo em Trânsito/ABERTO"] = 0
 
-    resumo["Saldo em Trânsito/ABERTO"] = resumo["Saldo em Trânsito/ABERTO"].fillna(0)
+    for col in ["descricao", "Código Fábrica"]:
+        if col not in resumo.columns:
+            resumo[col] = ""
+        resumo[col] = resumo[col].replace(0, "").fillna("")
+
+    for col in [
+        "Estoque Lojas", "Estoque Única", "Média Giro Lojas", "Média Giro Única",
+        "Média Giro Geral", "Estoque Atual Geral", "Estoque Geral", "Embalagem", "Saldo em Trânsito/ABERTO",
+        *colunas_giro_geral,
+    ]:
+        if col not in resumo.columns:
+            resumo[col] = 0
+        resumo[col] = pd.to_numeric(resumo[col], errors="coerce").fillna(0)
     resumo["Estoque Final"] = resumo["Estoque Atual Geral"] + resumo["Saldo em Trânsito/ABERTO"]
     resumo["Estoque Alvo"] = resumo["Média Giro Geral"] * (dias_estoque_alvo / 30)
     resumo["Sugestão Sistema"] = (resumo["Estoque Alvo"] - resumo["Estoque Final"]).apply(lambda x: max(math.ceil(x), 0)).astype(int)
