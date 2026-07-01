@@ -180,21 +180,36 @@ MESES_ABREV_PT = {
 def extrair_meses_giro_pdf(text):
     """
     Puxa os meses diretamente do PDF de Giro.
-    Prioriza o cabeçalho "REFERENTE AOS MESES" e, se não existir, procura a primeira
-    linha de cabeçalho com meses no formato MM/AAAA.
+    Prioriza a ordem real das colunas da tabela, porque alguns relatórios exibem
+    "REFERENTE AOS MESES" em ordem decrescente, mas as colunas de giro aparecem em
+    ordem crescente no cabeçalho.
     """
     text = str(text or "")
+
+    # Ordem usada para mapear os valores de cada linha do produto.
+    # Ex.: o PDF pode dizer "REFERENTE AOS MESES: 06, 05, 04, 03", mas a tabela
+    # estar visualmente como "03/2026 04/2026 05/2026 06/2026".
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        line_upper = line.upper()
+        if "COD" not in line_upper or "MEDIA" not in line_upper:
+            continue
+
+        meses_linha = re.findall(r"\b\d{2}/\d{4}\b", line)
+        if len(meses_linha) >= 2:
+            return meses_linha
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        meses_linha = re.findall(r"\b\d{2}/\d{4}\b", line)
+        if len(meses_linha) >= 2 and ("ESTOQUE" in line.upper() or "MEDIA" in line.upper() or "MÉDIA" in line.upper()):
+            return meses_linha
+
     padrao_ref = re.search(r"REFERENTE\s+AOS\s+MESES\s*:\s*([^\n]+)", text, flags=re.IGNORECASE)
     if padrao_ref:
         meses = re.findall(r"\b\d{2}/\d{4}\b", padrao_ref.group(1))
         if meses:
-            return meses
-
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        meses = re.findall(r"\b\d{2}/\d{4}\b", line)
-        if len(meses) >= 2 and ("ESTOQUE" in line.upper() or "MEDIA" in line.upper() or "MÉDIA" in line.upper()):
-            return meses
+            return sorted(meses, key=lambda mes: (int(mes.split("/")[1]), int(mes.split("/")[0])))
 
     meses = []
     for mes in re.findall(r"\b\d{2}/\d{4}\b", text):
