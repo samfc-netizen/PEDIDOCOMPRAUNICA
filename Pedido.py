@@ -67,6 +67,13 @@ def numero_planilha_para_float(value):
     """
     if value is None:
         return 0.0
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            if pd.isna(value):
+                return 0.0
+            return float(value)
+        except Exception:
+            pass
 
     txt = str(value).strip()
     if txt == "" or txt.lower() in ["nan", "none", "-"]:
@@ -86,12 +93,19 @@ def numero_planilha_para_float(value):
         # padrão brasileiro simples: 28,12
         txt = txt.replace(".", "").replace(",", ".")
     elif "." in txt:
-        # mantém ponto como decimal quando houver até 2 casas decimais
+        # Mantém ponto como decimal quando parecer número decimal.
+        # Também cobre floats lidos como texto pelo Excel, ex.: 25.940000000000001.
         partes = txt.split(".")
-        if len(partes) == 2 and len(partes[1]) <= 2:
-            pass
+        if len(partes) == 2:
+            int_part, dec_part = partes[0], partes[1]
+            if len(dec_part) <= 2 or len(dec_part) > 3:
+                pass
+            elif len(int_part) <= 2:
+                pass
+            else:
+                txt = txt.replace(".", "")
         else:
-            # caso venha como milhar: 1.234 ou 1.234.567
+            # caso venha como milhar: 1.234.567
             txt = txt.replace(".", "")
 
     try:
@@ -1536,6 +1550,233 @@ def extrair_itens_pdf_por_codigos(uploaded_file, codigos_referencia=None):
     return pd.DataFrame(registros)
 
 
+
+def _particionar_blocos_itens_pdf(texto):
+    """
+    Divide texto de PDF em blocos de itens quando existe uma linha iniciando com:
+    Item Abrev. Unid. Produto...
+    Ex.: 1 86007 261 05.66.H003
+    """
+    linhas = [str(l or "").strip() for l in str(texto or "").splitlines() if str(l or "").strip()]
+    blocos = []
+    atual = []
+    padrao_inicio = re.compile(r"^\d{1,4}\s+\d{3,6}\s+\d{3,6}\s+[A-Z0-9][A-Z0-9\.\-/]*", re.IGNORECASE)
+
+    for linha in linhas:
+        if padrao_inicio.match(linha):
+            if atual:
+                blocos.append(atual)
+            atual = [linha]
+        elif atual:
+            # evita puxar rodapé/cabeçalho grande depois do fim do item
+            if re.match(r"^(Página|Pedido:|Cliente:|Item\s+Abrev|Total do Pedido)", linha, flags=re.IGNORECASE):
+                if re.match(r"^Total do Pedido", linha, flags=re.IGNORECASE):
+                    blocos.append(atual)
+                    atual = []
+                continue
+            atual.append(linha)
+    if atual:
+        blocos.append(atual)
+    return blocos
+
+
+def _codigo_fabrica_do_bloco_pdf(bloco):
+    if not bloco:
+        return "", "", ""
+    primeira = str(bloco[0]).strip()
+    m = re.match(r"^(\d{1,4})\s+(\d{3,6})\s+(\d{3,6})\s+([A-Z0-9][A-Z0-9\.\-/]*)", primeira, flags=re.IGNORECASE)
+    if not m:
+        return "", "", ""
+
+    item, abrev, unid, produto = m.group(1), m.group(2), m.group(3), m.group(4)
+    produto_completo = produto
+
+    # Alguns PDFs quebram o final do código do produto na(s) linha(s) seguinte(s).
+    # Ex.: 05.66.H003\n5 => 05.66.H0035; 05.00.M350\n0 => 05.00.M3500.
+    for linha in bloco[1:4]:
+        token = str(linha).strip()
+        if re.fullmatch(r"[A-Z0-9]{1,3}", token, flags=re.IGNORECASE):
+            produto_completo += token
+            break
+        # quando já começou descrição, para
+        if re.search(r"[A-ZÁÉÍÓÚÃÕÇ]{3,}", token, flags=re.IGNORECASE) and not re.fullmatch(r"[A-Z0-9\.\-/]+", token, flags=re.IGNORECASE):
+            break
+
+    codigo_original = f"{produto_completo}-{unid}"
+    return codigo_original, normalizar_codigo_fabrica(codigo_original), unid
+
+
+def _descricao_do_bloco_pdf(bloco):
+    if not bloco:
+        return ""
+    partes = []
+    for linha in bloco[1:]:
+        t = str(linha).strip()
+        if not t:
+            continue
+        if re.fullmatch(r"[A-Z0-9]{1,3}", t, flags=re.IGNORECASE):
+            continue
+        if re.fullmatch(r"\d+(?:[\.,]\d+)?", t):
+            continue
+        # remove a cauda numérica de quantidade/preço/total da última linha
+        t = re.sub(r"\s+\d+(?:[\.,]\d+)?\s+\d+(?:[\.,]\d+)?\s+\d{1,3}(?:\.\d{3})*,\d+\s*$", "", t).strip()
+        if re.search(r"[A-ZÁÉÍÓÚÃÕÇ]{3,}", t, flags=re.IGNORECASE):
+            partes.append(t)
+    return " ".join(partes).strip()[:180]
+
+
+def _qtd_preco_total_do_bloco_pdf(bloco):
+    texto = " ".join(str(x or "").strip() for x in bloco)
+    nums = _tokens_numericos_linha(texto)
+    valores = [float(v) for _, _, v in nums if pd.notna(v)]
+    if len(valores) < 3:
+        return 0.0, 0.0, 0.0
+
+    # Nos pedidos de fornecedor, normalmente os 3 últimos números do bloco são:
+    # quantidade, preço unitário e preço total. Valida qtd x preço ~= total.
+    for i in range(len(valores) - 3, -1, -1):
+        qtd, preco, total = valores[i], valores[i + 1], valores[i + 2]
+        if qtd > 0 and preco > 0 and total > 0:
+            if abs(qtd * preco - total) <= max(0.10, abs(total) * 0.03):
+                return qtd, preco, total
+    qtd, preco, total = valores[-3], valores[-2], valores[-1]
+    return qtd, preco, total
+
+
+def extrair_itens_pdf_por_blocos(uploaded_file, codigos_referencia=None):
+    """
+    Parser complementar para PDFs em que as colunas ficam visualmente desalinhadas.
+    Exemplo real Sherwin/Lazzuril:
+    - Excel: 05.66.H0035-261
+    - PDF: linha do produto 05.66.H003 / linha do item com UNID 261 / linha seguinte 5 0
+    O parser monta Código de Fábrica como Produto-Unid e valida contra os códigos do Excel.
+    """
+    referencias = set()
+    for c in (codigos_referencia or []):
+        norm = normalizar_codigo_fabrica(c)
+        if norm:
+            referencias.add(norm)
+
+    try:
+        uploaded_file.seek(0)
+    except Exception:
+        pass
+
+    textos_paginas = []
+    try:
+        with pdfplumber.open(uploaded_file) as pdf:
+            for page in pdf.pages:
+                textos_paginas.append(page.extract_text(x_tolerance=1, y_tolerance=3) or "")
+    except Exception:
+        return pd.DataFrame()
+
+    padrao_item = re.compile(r"^(\d{1,4})\s+(\d{3,6})\s+(\d{3,6})\s+(.+)$", flags=re.IGNORECASE)
+    padrao_cod_produto = re.compile(r"\b[A-Z0-9]{1,4}(?:\.[A-Z0-9]{1,8}){1,4}[A-Z0-9]*\b", flags=re.IGNORECASE)
+
+    registros = []
+    vistos = set()
+
+    for texto in textos_paginas:
+        linhas = [str(l or "").strip() for l in str(texto or "").splitlines() if str(l or "").strip()]
+        for i, linha in enumerate(linhas):
+            m = padrao_item.match(linha)
+            if not m:
+                continue
+
+            item, abrev, unid, resto = m.group(1), m.group(2), m.group(3), m.group(4)
+            nums_linha = _tokens_numericos_linha(linha)
+            # item, abrev e unid também entram como número; os três últimos são qtd/preço/total.
+            if len(nums_linha) < 6:
+                continue
+            qtd = float(nums_linha[-3][2])
+            preco = float(nums_linha[-2][2])
+            total = float(nums_linha[-1][2])
+            if qtd <= 0 or preco <= 0:
+                continue
+
+            pos_qtd = nums_linha[-3][0]
+            prefixo = linha[:pos_qtd].strip()
+            prefixo_sem_inicio = re.sub(r"^\d{1,4}\s+\d{3,6}\s+\d{3,6}\s+", "", prefixo).strip()
+
+            prev1 = linhas[i - 1] if i - 1 >= 0 else ""
+            prev2 = linhas[i - 2] if i - 2 >= 0 else ""
+            next1 = linhas[i + 1] if i + 1 < len(linhas) else ""
+
+            cod_base = ""
+            desc_partes = []
+
+            cods_no_prefixo = padrao_cod_produto.findall(prefixo_sem_inicio)
+            if cods_no_prefixo:
+                cod_base = cods_no_prefixo[-1]
+                desc_prefixo = prefixo_sem_inicio.replace(cod_base, " ").strip()
+                if desc_prefixo:
+                    desc_partes.append(desc_prefixo)
+            else:
+                # Produto pode estar na linha anterior, junto com litragem e parte da descrição.
+                for prev in [prev1, prev2]:
+                    cods_prev = padrao_cod_produto.findall(prev)
+                    if cods_prev:
+                        cod_base = cods_prev[0]
+                        desc_prev = prev.replace(cod_base, " ").strip()
+                        desc_prev = re.sub(r"^\d+(?:[\.,]\d+)?\s*", "", desc_prev).strip()
+                        if desc_prev:
+                            desc_partes.append(desc_prev)
+                        break
+                if prefixo_sem_inicio:
+                    desc_partes.append(prefixo_sem_inicio)
+
+            if not cod_base:
+                continue
+
+            # Gera variações com complemento quebrado na linha seguinte.
+            candidatos_produto = [cod_base]
+            next_tokens = str(next1 or "").split()
+            if next_tokens:
+                primeiro_next = re.sub(r"[^A-Z0-9]", "", _texto_sem_acentos(next_tokens[0]).upper())
+                if primeiro_next and len(primeiro_next) <= 3:
+                    candidatos_produto.append(cod_base + primeiro_next)
+
+            escolhido_original = ""
+            escolhido_norm = ""
+            for prod in candidatos_produto:
+                original = f"{prod}-{unid}"
+                norm = normalizar_codigo_fabrica(original)
+                if referencias and norm in referencias:
+                    escolhido_original = original
+                    escolhido_norm = norm
+                    break
+            if not escolhido_original:
+                original = f"{candidatos_produto[-1]}-{unid}"
+                norm = normalizar_codigo_fabrica(original)
+                escolhido_original = original
+                escolhido_norm = norm
+
+            # Complementa descrição com a linha seguinte quando ela é descrição, removendo quebra de código/litragem.
+            if next1:
+                prox = str(next1).strip()
+                prox_limpo = re.sub(r"^\d{1,3}\s+", "", prox).strip()
+                prox_limpo = re.sub(r"^\d+(?:[\.,]\d+)?\s+", "", prox_limpo).strip()
+                if re.search(r"[A-ZÁÉÍÓÚÃÕÇ]{3,}", prox_limpo, flags=re.IGNORECASE):
+                    desc_partes.append(prox_limpo)
+
+            descricao = " ".join([d for d in desc_partes if d]).strip()
+            descricao = re.sub(r"\s+", " ", descricao)[:180]
+
+            chave = (escolhido_norm, round(qtd, 4), round(preco, 4), round(total, 4))
+            if chave in vistos:
+                continue
+            vistos.add(chave)
+            registros.append({
+                "Código Fábrica": escolhido_original,
+                "Descrição": descricao,
+                "Quantidade": qtd,
+                "Valor Unitário": preco,
+                "Valor Total": total,
+                "Linha PDF": linha,
+            })
+
+    return pd.DataFrame(registros)
+
 def ler_arquivo_comparativo(uploaded_file, codigos_referencia=None):
     if uploaded_file is None:
         return pd.DataFrame()
@@ -1547,7 +1788,9 @@ def ler_arquivo_comparativo(uploaded_file, codigos_referencia=None):
         pass
 
     if nome.endswith(".pdf"):
-        df_pdf = extrair_itens_pdf_por_codigos(uploaded_file, codigos_referencia=codigos_referencia)
+        df_pdf = extrair_itens_pdf_por_blocos(uploaded_file, codigos_referencia=codigos_referencia)
+        if df_pdf.empty:
+            df_pdf = extrair_itens_pdf_por_codigos(uploaded_file, codigos_referencia=codigos_referencia)
         if not df_pdf.empty:
             return df_pdf
 
@@ -1637,7 +1880,12 @@ def normalizar_pedido_comparativo(df, origem):
     out.loc[(out["valor_total"] <= 0) & (out["preco_unitario"] > 0), "valor_total"] = out["quantidade"] * out["preco_unitario"]
     out.loc[(out["preco_unitario"] <= 0) & (out["valor_total"] > 0) & (out["quantidade"] > 0), "preco_unitario"] = out["valor_total"] / out["quantidade"]
     out["descricao_chave"] = out["descricao"].apply(normalizar_descricao_chave)
-    out = out[(out["quantidade"] > 0) | (out["preco_unitario"] > 0) | (out["valor_total"] > 0)].copy()
+    if str(origem).strip().lower() in ["única", "unica"]:
+        # Na planilha da Única, só entram no comparativo os itens realmente pedidos.
+        # Itens com PEDIDO Final vazio/zero não devem virar "não encontrado".
+        out = out[out["quantidade"] > 0].copy()
+    else:
+        out = out[(out["quantidade"] > 0) | (out["preco_unitario"] > 0) | (out["valor_total"] > 0)].copy()
     return out
 
 
