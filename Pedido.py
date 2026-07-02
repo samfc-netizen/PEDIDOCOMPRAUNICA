@@ -278,35 +278,103 @@ def colunas_pedido_compras(meses_ref=None):
 # LEITURA DO PDF DE GIRO DE ESTOQUE
 # =========================================================
 
+def _token_numero_giro(valor):
+    """
+    Identifica números válidos nas colunas numéricas do relatório de giro.
+    Evita tratar pedaços da descrição/código de fábrica como giro.
+    """
+    txt = str(valor or "").strip()
+    if txt == "":
+        return False
+    return bool(re.fullmatch(r"-?\d+(?:\.\d{3})*,\d{1,4}|-?\d+,\d{1,4}|-?\d+", txt))
+
+
+def _encontrar_unidade_giro(partes, qtd_meses):
+    """
+    No PDF de giro, algumas descrições contêm a palavra/tipo 'UN' antes da unidade real.
+    Exemplo real:
+    85582 ... 0.5L UN 1263 T UN 0,00 0,00 0,00 ...
+    A unidade correta é o último UN antes da sequência dos meses.
+
+    Esta função procura a unidade que vem imediatamente antes de uma sequência numérica
+    com a quantidade de meses do cabeçalho. Assim o sistema não puxa '1263' da descrição
+    como se fosse giro de abril.
+    """
+    candidatos = []
+
+    for i, token in enumerate(partes):
+        token_upper = str(token).strip().upper()
+        unidade_explicita = token_upper in ["UN", "UND", "UNID", "UNIDADE"]
+
+        # Alguns PDFs colam a unidade no fim do texto, ex.: "...-STUN 2,45 1,00..."
+        unidade_colada = (
+            not unidade_explicita
+            and len(token_upper) > 2
+            and token_upper.endswith("UN")
+            and not _token_numero_giro(token_upper)
+        )
+
+        if not unidade_explicita and not unidade_colada:
+            continue
+
+        proximos = partes[i + 1:i + 1 + qtd_meses]
+        if len(proximos) < qtd_meses:
+            continue
+
+        if all(_token_numero_giro(v) for v in proximos):
+            candidatos.append((i, unidade_colada))
+
+    if not candidatos:
+        return None, False
+
+    # Usa o último candidato válido, porque a descrição pode conter "UN" antes da unidade real.
+    return candidatos[-1]
+
+
 def parse_linha_giro(line, meses_ref=None):
     """
-    Layout observado:
-    COD DESCRICAO CÓD.FABRICA UN 01/2026 02/2026 03/2026 04/2026
-    MEDIA DIAS DU ESTOQUE SUGESTAO PR.ULT.COMP DT.ULT.COMP PR.VENDA % LUCRO
+    Layout esperado:
+    COD DESCRICAO DO ITEM UN 04/2026 05/2026 06/2026 MEDIA PREVI.30 ESTOQUE
+    SUGESTAO PR.ULT.COMP DT.ULT.COMP PR.VENDA % LUCRO
+
+    Correção importante:
+    - Não usa mais o primeiro token "UN" encontrado.
+    - Localiza a unidade pela sequência numérica dos meses logo depois dela.
+    - Isso evita erro em itens cuja descrição contém "UN" ou códigos numéricos antes
+      da unidade real, como o item 85582.
     """
-    if not re.match(r"^\d{5}\s+", line):
+    if not re.match(r"^\d{5}\s+", str(line).strip()):
         return None
 
-    partes = line.split()
+    partes = str(line).strip().split()
     codigo = partes[0].zfill(5)
 
-    try:
-        un_index = partes.index("UN")
-    except ValueError:
+    meses_ref = meses_ref or MESES_PADRAO
+    qtd_meses = len(meses_ref)
+
+    un_index, unidade_colada = _encontrar_unidade_giro(partes, qtd_meses)
+    if un_index is None:
         return None
 
     antes_un = partes[1:un_index]
     depois_un = partes[un_index + 1:]
 
-    meses_ref = meses_ref or MESES_PADRAO
-    qtd_meses = len(meses_ref)
+    # Se a unidade veio colada no final do último token da descrição, remove só o "UN".
+    if unidade_colada:
+        token_sem_un = str(partes[un_index])[:-2].strip()
+        if token_sem_un:
+            antes_un = partes[1:un_index] + [token_sem_un]
 
-    if len(depois_un) < qtd_meses + 5:
+    if len(depois_un) < qtd_meses + 4:
         return None
 
-    # Código de fábrica normalmente fica imediatamente antes do UN.
+    # Garantia adicional: os meses precisam ser exatamente a primeira sequência após a unidade.
+    if not all(_token_numero_giro(v) for v in depois_un[:qtd_meses]):
+        return None
+
     codigo_fabrica_extraido = ""
     descricao_tokens = list(antes_un)
+
     if descricao_tokens:
         ultimo_token = descricao_tokens[-1]
         if re.fullmatch(r"\d{5,}", ultimo_token):
@@ -321,7 +389,7 @@ def parse_linha_giro(line, meses_ref=None):
 
     data_idx = None
     for i, token in enumerate(depois_un):
-        if re.fullmatch(r"\d{1,2}/\d{1,2}/\d{2,4}", token):
+        if re.fullmatch(r"\d{1,2}/\d{1,2}/\d{2,4}", str(token).strip()):
             data_idx = i
             break
 
@@ -335,15 +403,18 @@ def parse_linha_giro(line, meses_ref=None):
         if data_idx - 1 >= 0:
             pr_ult_compra = br_to_float(depois_un[data_idx - 1])
     else:
-        # Posição padrão do PR.ULT.COMP quando não há DT.ULT.COMP na linha.
-        pr_ult_compra = br_to_float(depois_un[8]) if len(depois_un) > 8 else 0.0
+        # Após os meses: MEDIA, PREVI.30, ESTOQUE, SUGESTAO, PR.ULT.COMP...
+        idx_preco = qtd_meses + 4
+        pr_ult_compra = br_to_float(depois_un[idx_preco]) if len(depois_un) > idx_preco else 0.0
+
+    idx_estoque = qtd_meses + 2
 
     return {
         "codigo": codigo,
         "descricao": " ".join(descricao_tokens).strip(),
         "codigo_fabrica": codigo_fabrica_extraido,
         **{mes: br_to_float(depois_un[i]) for i, mes in enumerate(meses_ref)},
-        "estoque": br_to_float(depois_un[qtd_meses + 2]) if len(depois_un) > qtd_meses + 2 else 0,
+        "estoque": br_to_float(depois_un[idx_estoque]) if len(depois_un) > idx_estoque else 0,
         "pr_ult_compra": pr_ult_compra,
         "dt_ult_compra": dt_ult_compra,
         "dt_ult_compra_txt": dt_ult_compra_txt,
