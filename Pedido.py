@@ -1,5 +1,7 @@
 import re
 import math
+import difflib
+import unicodedata
 from io import BytesIO
 from datetime import datetime, date
 
@@ -1343,6 +1345,7 @@ def gerar_excel_fornecedor_tratamento(df_tratamento):
     return output.getvalue()
 
 
+
 def _coluna_por_candidatos(df, candidatos):
     colunas_norm = {normalizar_coluna(c): c for c in df.columns}
     for candidato in candidatos:
@@ -1352,7 +1355,188 @@ def _coluna_por_candidatos(df, candidatos):
     return None
 
 
-def ler_arquivo_comparativo(uploaded_file):
+def _texto_sem_acentos(txt):
+    txt = str(txt or "")
+    txt = unicodedata.normalize("NFKD", txt)
+    txt = "".join(ch for ch in txt if not unicodedata.combining(ch))
+    return txt
+
+
+def normalizar_codigo_fabrica(valor):
+    """
+    Normaliza código de fábrica para comparação entre Excel e PDF.
+    Exemplos:
+    - "I :401" -> "I401"
+    - "P-512" -> "P512"
+    - " 000123 " -> "000123"
+    """
+    txt = _texto_sem_acentos(valor).upper().strip()
+    txt = re.sub(r"[^A-Z0-9]+", "", txt)
+    if txt in ["", "NAN", "NONE", "NULL", "SEM", "SNCODIGO"]:
+        return ""
+    return txt
+
+
+def normalizar_descricao_chave(valor):
+    txt = _texto_sem_acentos(valor).upper().strip()
+    txt = re.sub(r"[^A-Z0-9 ]+", " ", txt)
+    txt = re.sub(r"\s+", " ", txt).strip()
+    return txt
+
+
+def _tokens_numericos_linha(txt):
+    """Extrai números em padrão BR/US preservando a ordem visual da linha."""
+    txt = str(txt or "")
+    padrao = r"(?<![A-Z0-9])-?(?:R\$\s*)?\d{1,3}(?:\.\d{3})*(?:,\d+)?(?![A-Z0-9])|(?<![A-Z0-9])-?\d+(?:[\.,]\d+)?(?![A-Z0-9])"
+    valores = []
+    for m in re.finditer(padrao, txt, flags=re.IGNORECASE):
+        bruto = m.group(0).replace("R$", "").strip()
+        valores.append((m.start(), bruto, numero_planilha_para_float(bruto)))
+    return valores
+
+
+def _inferir_qtd_preco_total_por_linha(linha, pos_codigo=0):
+    """
+    Heurística para PDFs de fornecedores com layouts variados.
+    Após encontrar o código de fábrica na linha, procura quantidade, preço unitário e total.
+    Se houver total, tenta validar pares em que qtd x preço ~= total.
+    """
+    linha = str(linha or "")
+    numeros = [(pos, bruto, val) for pos, bruto, val in _tokens_numericos_linha(linha) if pos >= max(0, pos_codigo)]
+    numeros = [(pos, bruto, val) for pos, bruto, val in numeros if pd.notna(val) and float(val) != 0]
+
+    if not numeros:
+        return 0.0, 0.0, 0.0
+
+    # Remove números que são parte clara de códigos longos quando aparecem colados ao produto.
+    # Mantém quantidades e valores separados por espaço/coluna.
+    candidatos = [float(v) for _, _, v in numeros]
+
+    melhor = None
+    for i, qtd in enumerate(candidatos):
+        if qtd <= 0 or qtd > 100000:
+            continue
+        for j in range(i + 1, len(candidatos)):
+            preco = candidatos[j]
+            if preco <= 0:
+                continue
+            for k in range(j + 1, len(candidatos)):
+                total = candidatos[k]
+                if total <= 0:
+                    continue
+                esperado = qtd * preco
+                tolerancia = max(0.05, abs(total) * 0.03)
+                if abs(esperado - total) <= tolerancia:
+                    melhor = (qtd, preco, total)
+                    break
+            if melhor:
+                break
+        if melhor:
+            break
+
+    if melhor:
+        return melhor
+
+    # Fallback: normalmente a primeira medida depois do código é quantidade e a seguinte é preço unitário.
+    qtd = candidatos[0] if len(candidatos) >= 1 else 0.0
+    preco = candidatos[1] if len(candidatos) >= 2 else 0.0
+    total = candidatos[2] if len(candidatos) >= 3 else (qtd * preco if qtd and preco else 0.0)
+    return qtd, preco, total
+
+
+def _extrair_descricao_ao_redor_codigo(linha, codigo):
+    linha = str(linha or "").strip()
+    if not linha:
+        return ""
+    cod = str(codigo or "").strip()
+    pos = linha.upper().find(cod.upper()) if cod else -1
+    if pos >= 0:
+        antes = linha[:pos].strip(" -|;:\t")
+        depois = linha[pos + len(cod):].strip(" -|;:\t")
+        depois = re.sub(r"\s+(?:R\$\s*)?\d[\d\.,]*.*$", "", depois).strip()
+        desc = depois or antes
+    else:
+        desc = re.sub(r"\s+(?:R\$\s*)?\d[\d\.,]*.*$", "", linha).strip()
+    return desc[:180]
+
+
+def extrair_itens_pdf_por_codigos(uploaded_file, codigos_referencia=None):
+    """
+    Lê PDF de fornecedor em vários modelos.
+    Estratégia principal: usa os códigos de fábrica do pedido da Única como âncora.
+    Assim, mesmo sem cabeçalho ou com layout diferente, o sistema busca o código no texto/tabela
+    e tenta capturar quantidade e preço unitário na mesma linha.
+    """
+    referencias = {}
+    for c in (codigos_referencia or []):
+        norm = normalizar_codigo_fabrica(c)
+        if norm and len(norm) >= 3:
+            referencias[norm] = str(c).strip()
+
+    linhas_texto = []
+
+    try:
+        uploaded_file.seek(0)
+    except Exception:
+        pass
+
+    with pdfplumber.open(uploaded_file) as pdf:
+        for page in pdf.pages:
+            # Linhas extraídas de tabelas, quando o PDF permitir.
+            for tabela in (page.extract_tables() or []):
+                for linha in tabela:
+                    celulas = [str(c or "").strip() for c in (linha or [])]
+                    if any(celulas):
+                        linhas_texto.append(" | ".join(celulas))
+
+            # Linhas extraídas como texto livre, cobrindo PDFs sem tabela estruturada.
+            page_text = page.extract_text(x_tolerance=1, y_tolerance=3) or ""
+            for linha in page_text.splitlines():
+                linha = linha.strip()
+                if linha:
+                    linhas_texto.append(linha)
+
+    registros = []
+    vistos = set()
+
+    for linha in linhas_texto:
+        linha_norm = normalizar_codigo_fabrica(linha)
+        encontrados = []
+
+        if referencias:
+            for cod_norm, cod_original in referencias.items():
+                if cod_norm and cod_norm in linha_norm:
+                    encontrados.append((cod_norm, cod_original))
+        else:
+            # Sem referência, tenta pegar candidatos parecidos com código de fábrica.
+            for token in re.findall(r"\b[A-Z]{0,4}\d[A-Z0-9\-\./:]{2,}\b", _texto_sem_acentos(linha).upper()):
+                cod_norm = normalizar_codigo_fabrica(token)
+                if len(cod_norm) >= 3:
+                    encontrados.append((cod_norm, token))
+
+        for cod_norm, cod_original in encontrados:
+            pos_raw = _texto_sem_acentos(linha).upper().find(_texto_sem_acentos(cod_original).upper())
+            if pos_raw < 0:
+                pos_raw = 0
+            qtd, preco, total = _inferir_qtd_preco_total_por_linha(linha, pos_codigo=pos_raw + len(str(cod_original)))
+            desc = _extrair_descricao_ao_redor_codigo(linha, cod_original)
+            chave_visto = (cod_norm, round(qtd, 4), round(preco, 4), round(total, 4), normalizar_descricao_chave(desc))
+            if chave_visto in vistos:
+                continue
+            vistos.add(chave_visto)
+            registros.append({
+                "Código Fábrica": cod_original,
+                "Descrição": desc,
+                "Quantidade": qtd,
+                "Valor Unitário": preco,
+                "Valor Total": total,
+                "Linha PDF": linha,
+            })
+
+    return pd.DataFrame(registros)
+
+
+def ler_arquivo_comparativo(uploaded_file, codigos_referencia=None):
     if uploaded_file is None:
         return pd.DataFrame()
 
@@ -1363,7 +1547,16 @@ def ler_arquivo_comparativo(uploaded_file):
         pass
 
     if nome.endswith(".pdf"):
+        df_pdf = extrair_itens_pdf_por_codigos(uploaded_file, codigos_referencia=codigos_referencia)
+        if not df_pdf.empty:
+            return df_pdf
+
+        # Fallback antigo: tenta tabelas com cabeçalho quando não encontrou códigos no texto.
         linhas = []
+        try:
+            uploaded_file.seek(0)
+        except Exception:
+            pass
         with pdfplumber.open(uploaded_file) as pdf:
             for page in pdf.pages:
                 tabelas = page.extract_tables() or []
@@ -1377,9 +1570,9 @@ def ler_arquivo_comparativo(uploaded_file):
         max_cols = max(len(linha) for linha in linhas)
         linhas = [linha + [""] * (max_cols - len(linha)) for linha in linhas]
         header_idx = 0
-        for i, linha in enumerate(linhas[:10]):
+        for i, linha in enumerate(linhas[:15]):
             linha_norm = " ".join(normalizar_coluna(c) for c in linha)
-            if any(p in linha_norm for p in ["COD", "CÓD", "DESCR", "QTD", "QTDE", "QUANT"]):
+            if any(p in linha_norm for p in ["COD", "CÓD", "DESCR", "QTD", "QTDE", "QUANT", "UNIT", "PRECO", "PREÇO"]):
                 header_idx = i
                 break
         headers = [str(c).strip() or f"COLUNA {i+1}" for i, c in enumerate(linhas[header_idx])]
@@ -1396,24 +1589,38 @@ def normalizar_pedido_comparativo(df, origem):
         "Código Fábrica", "Codigo Fabrica", "Cód. Fábrica", "Cod. Fabrica",
         "Código de Fábrica", "Codigo de Fabrica", "Cod Fabrica", "Cód Fabrica",
         "Referência", "Referencia", "Ref", "Código Fornecedor", "Codigo Fornecedor",
+        "Cod Produto", "Código Produto", "Codigo Produto", "SKU", "Part Number", "Linha PDF",
     ])
     col_descricao = _coluna_por_candidatos(df, [
-        "descricao", "descrição", "descrição do item", "descricao do item", "produto", "item", "nome",
+        "descricao", "descrição", "descrição do item", "descricao do item", "produto", "item", "nome", "descr", "linha pdf",
     ])
     col_qtd = _coluna_por_candidatos(df, [
-        "PEDIDO Final", "Quantidade", "Qtd", "Qtde", "Quant", "Quantidade Pedido", "Qtd Pedido",
+        "PEDIDO Final", "Quantidade", "Qtd", "Qtde", "Quant", "Quantidade Pedido", "Qtd Pedido", "Qtde Pedido",
+        "Quantidade Pedida", "Qtd Solicitada", "Qtde Solicitada",
     ])
     col_preco = _coluna_por_candidatos(df, [
-        "Preço Última Compra", "Preco Ultima Compra", "Preço", "Preco", "Valor Unitário",
-        "Valor Unitario", "Vlr Unit", "Vr.Unit", "VR.UNIT", "Unitário", "Unitario",
+        "Preço Última Compra", "Preco Ultima Compra", "Preço", "Preco", "Preço Unitário", "Preco Unitario",
+        "Valor Unitário", "Valor Unitario", "Vlr Unit", "Vr.Unit", "VR.UNIT", "Unitário", "Unitario", "Preço Uni",
     ])
     col_total = _coluna_por_candidatos(df, [
-        "Valor Final do Pedido", "Valor Total", "Total", "Total Geral", "Valor", "Vlr Total",
+        "Valor Final do Pedido", "Valor Total", "Total", "Total Geral", "Valor", "Vlr Total", "Valor Mercadoria",
     ])
+
+    # Quando o arquivo veio de PDF sem cabeçalho perfeito, tenta inferir por linha completa.
+    if (not col_qtd or not col_preco) and "Linha PDF" in df.columns:
+        linhas_inferidas = df["Linha PDF"].astype(str).apply(_inferir_qtd_preco_total_por_linha)
+        df["__qtd_inferida"] = [x[0] for x in linhas_inferidas]
+        df["__preco_inferido"] = [x[1] for x in linhas_inferidas]
+        df["__total_inferido"] = [x[2] for x in linhas_inferidas]
+        col_qtd = col_qtd or "__qtd_inferida"
+        col_preco = col_preco or "__preco_inferido"
+        col_total = col_total or "__total_inferido"
 
     faltantes = []
     if not col_descricao:
-        faltantes.append("descrição")
+        # Descrição não pode travar o comparativo; usa o código/linha como identificação.
+        df["__descricao_auto"] = df[col_fabrica].astype(str) if col_fabrica else ""
+        col_descricao = "__descricao_auto"
     if not col_qtd:
         faltantes.append("quantidade")
     if faltantes:
@@ -1422,13 +1629,14 @@ def normalizar_pedido_comparativo(df, origem):
     out = pd.DataFrame()
     out["origem"] = origem
     out["codigo_fabrica"] = df[col_fabrica].astype(str).str.strip() if col_fabrica else ""
+    out["codigo_fabrica_norm"] = out["codigo_fabrica"].apply(normalizar_codigo_fabrica)
     out["descricao"] = df[col_descricao].astype(str).str.strip() if col_descricao else ""
-    out["quantidade"] = df[col_qtd].apply(br_to_float)
+    out["quantidade"] = df[col_qtd].apply(numero_planilha_para_float)
     out["preco_unitario"] = df[col_preco].apply(numero_planilha_para_float) if col_preco else 0.0
     out["valor_total"] = df[col_total].apply(numero_planilha_para_float) if col_total else 0.0
     out.loc[(out["valor_total"] <= 0) & (out["preco_unitario"] > 0), "valor_total"] = out["quantidade"] * out["preco_unitario"]
     out.loc[(out["preco_unitario"] <= 0) & (out["valor_total"] > 0) & (out["quantidade"] > 0), "preco_unitario"] = out["valor_total"] / out["quantidade"]
-    out["descricao_chave"] = out["descricao"].str.upper().str.replace(r"[^A-Z0-9 ]+", " ", regex=True).str.replace(r"\s+", " ", regex=True).str.strip()
+    out["descricao_chave"] = out["descricao"].apply(normalizar_descricao_chave)
     out = out[(out["quantidade"] > 0) | (out["preco_unitario"] > 0) | (out["valor_total"] > 0)].copy()
     return out
 
@@ -1438,9 +1646,11 @@ def agregar_pedido_comparativo(df):
         return df.copy()
     df = df.copy()
     df["codigo_fabrica"] = df["codigo_fabrica"].fillna("").astype(str).str.strip()
-    df["chave"] = df["codigo_fabrica"].where(df["codigo_fabrica"] != "", "DESC:" + df["descricao_chave"])
+    df["codigo_fabrica_norm"] = df["codigo_fabrica_norm"].fillna("").astype(str).str.strip()
+    df["chave"] = df["codigo_fabrica_norm"].where(df["codigo_fabrica_norm"] != "", "DESC:" + df["descricao_chave"])
     agg = df.groupby("chave", as_index=False).agg(
         codigo_fabrica=("codigo_fabrica", "first"),
+        codigo_fabrica_norm=("codigo_fabrica_norm", "first"),
         descricao=("descricao", "first"),
         descricao_chave=("descricao_chave", "first"),
         quantidade=("quantidade", "sum"),
@@ -1451,6 +1661,15 @@ def agregar_pedido_comparativo(df):
         axis=1,
     )
     return agg
+
+
+def codigos_referencia_comparativo(df_unica_raw):
+    try:
+        unica_norm = normalizar_pedido_comparativo(df_unica_raw, "Única")
+        codigos = unica_norm["codigo_fabrica"].dropna().astype(str).str.strip().tolist()
+        return [c for c in codigos if normalizar_codigo_fabrica(c)]
+    except Exception:
+        return []
 
 
 def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw):
@@ -1464,11 +1683,11 @@ def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw):
     for _, row in unica.iterrows():
         match = None
         metodo = ""
-        chave = str(row.get("chave", ""))
         cod_fab = str(row.get("codigo_fabrica", "")).strip()
+        cod_fab_norm = str(row.get("codigo_fabrica_norm", "")).strip()
 
-        if cod_fab:
-            candidatos = fornecedor[fornecedor["codigo_fabrica"].astype(str).str.strip() == cod_fab]
+        if cod_fab_norm:
+            candidatos = fornecedor[fornecedor["codigo_fabrica_norm"].astype(str).str.strip() == cod_fab_norm]
             candidatos = candidatos[~candidatos.index.isin(usados_fornecedor)]
             if not candidatos.empty:
                 match = candidatos.iloc[0]
@@ -1508,7 +1727,7 @@ def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw):
         dif_qtd = float(match.get("quantidade", 0) or 0) - float(row.get("quantidade", 0) or 0)
         dif_preco = float(match.get("preco_unitario", 0) or 0) - float(row.get("preco_unitario", 0) or 0)
         dif_valor = float(match.get("valor_total", 0) or 0) - float(row.get("valor_total", 0) or 0)
-        status = "OK" if abs(dif_qtd) < 0.0001 and abs(dif_preco) < 0.01 and abs(dif_valor) < 0.01 else "Divergente"
+        status = "OK" if abs(dif_qtd) < 0.0001 and abs(dif_preco) < 0.01 else "Divergente"
         linhas.append({
             "Status": status,
             "Método": metodo,
@@ -1548,7 +1767,6 @@ def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw):
         })
 
     return pd.DataFrame(linhas)
-
 
 def colorir_comparativo_pedidos(row):
     status = str(row.get("Status", ""))
@@ -1594,7 +1812,7 @@ def gerar_excel_comparativo_pedidos(df_comparativo):
 
 def render_pagina_comparativo_pedidos():
     st.markdown('<div class="section-title">Comparativo de Pedidos</div>', unsafe_allow_html=True)
-    st.caption("Compare o pedido da Única com o pedido enviado pelo fornecedor usando Código de Fábrica; quando faltar, o sistema tenta descrição aproximada.")
+    st.caption("Compare o pedido da Única com o pedido enviado pelo fornecedor. Para PDF, o sistema usa os Códigos de Fábrica do Excel da Única como âncora e procura esses códigos em qualquer modelo de PDF.")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -1608,7 +1826,8 @@ def render_pagina_comparativo_pedidos():
 
     try:
         df_unica = ler_arquivo_comparativo(pedido_unica)
-        df_fornecedor = ler_arquivo_comparativo(pedido_fornecedor)
+        codigos_ref = codigos_referencia_comparativo(df_unica)
+        df_fornecedor = ler_arquivo_comparativo(pedido_fornecedor, codigos_referencia=codigos_ref)
         if df_unica.empty or df_fornecedor.empty:
             st.error("Não consegui ler uma das bases enviadas. Verifique se o arquivo possui tabela com descrição, quantidade e preço/valor.")
             return
