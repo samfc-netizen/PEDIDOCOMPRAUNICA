@@ -540,13 +540,37 @@ def parse_pedidos_compra_aberto(text):
 
 def parse_pedidos_compra_aberto_pdf(uploaded_file):
     """
-    Parser preferencial para o PDF de Pedidos em Aberto usando coordenadas.
+    Lê o PDF de Pedidos em Aberto / Saldo em Trânsito.
 
-    Correção aplicada:
-    - Só aceita como cabeçalho a linha real que contém QTDE, BAIXADO, ABERTO e VR.UNIT.
-    - Ignora linhas de status como "BAIXADO/ABERTO: ABERTO TOTALMENTE", que antes mudavam a posição da coluna.
-    - Nas linhas de produto, lê visualmente a coluna ABERTO, não a coluna VR.UNIT.
+    Correção principal:
+    - Para este relatório, a coluna ABERTO é sempre o 6º número após a unidade UN.
+      Sequência depois do UN:
+      QTDE=0, TOT.LIT=1, TOT.KIL=2, PES.ITE=3, BAIXADO=4, ABERTO=5, VR.UNIT=6.
+    - Por isso, a leitura por texto é usada primeiro. Ela é mais segura do que coordenadas,
+      porque algumas linhas do PDF vêm com campos colados, ex.: ST000001-WANDA.
+    - A leitura por coordenadas fica apenas como fallback.
     """
+
+    # 1) Caminho principal: texto linha a linha, usando a posição fixa do ABERTO após UN.
+    try:
+        uploaded_file.seek(0)
+    except Exception:
+        pass
+
+    try:
+        texto = extract_text_from_pdf(uploaded_file)
+        df_texto = parse_pedidos_compra_aberto(texto)
+        if df_texto is not None and not df_texto.empty:
+            df_texto["codigo"] = df_texto["codigo"].astype(str).str.extract(r"(\d+)", expand=False).fillna("").str.zfill(5)
+            df_texto["Saldo em Trânsito/ABERTO"] = pd.to_numeric(df_texto["Saldo em Trânsito/ABERTO"], errors="coerce").fillna(0)
+            return df_texto.groupby("codigo", as_index=False).agg({
+                "descricao": "first",
+                "Saldo em Trânsito/ABERTO": "sum",
+            })
+    except Exception:
+        pass
+
+    # 2) Fallback: tenta por coordenadas caso o texto não tenha retornado itens.
     registros = []
 
     try:
@@ -572,9 +596,7 @@ def parse_pedidos_compra_aberto_pdf(uploaded_file):
                     linha_words = sorted(linha_words, key=lambda w: float(w.get("x0", 0)))
                     textos = [str(w.get("text", "")).strip() for w in linha_words]
                     textos_upper = [t.upper() for t in textos]
-                    linha_upper = " ".join(textos_upper)
 
-                    # Cabeçalho verdadeiro da tabela. Não confundir com linhas "BAIXADO/ABERTO".
                     if (
                         "QTDE" in textos_upper
                         and "BAIXADO" in textos_upper
@@ -586,10 +608,7 @@ def parse_pedidos_compra_aberto_pdf(uploaded_file):
                         aberto_x = (float(w["x0"]) + float(w["x1"])) / 2
                         continue
 
-                    if aberto_x is None:
-                        continue
-
-                    if not textos:
+                    if aberto_x is None or not textos:
                         continue
 
                     match_codigo = re.match(r"^(\d{5})(?:[-\s]|$)", textos[0])
@@ -597,14 +616,27 @@ def parse_pedidos_compra_aberto_pdf(uploaded_file):
                         continue
 
                     codigo = match_codigo.group(1).zfill(5)
+
                     un_index = None
                     for i, token in enumerate(textos):
                         if token.upper() in ["UN", "UND", "UNID", "UNIDADE"]:
                             un_index = i
                             break
-                    descricao = extrair_descricao_pedido_aberto_tokens(textos, un_index)
-                    candidatos = []
 
+                    descricao = extrair_descricao_pedido_aberto_tokens(textos, un_index)
+
+                    # Mesmo no fallback por coordenadas, se houver UN, prioriza a sequência numérica.
+                    if un_index is not None:
+                        valores_numericos = [p for p in textos[un_index + 1:] if _eh_numero_br(p)]
+                        if len(valores_numericos) > 5:
+                            registros.append({
+                                "codigo": codigo,
+                                "descricao": descricao,
+                                "Saldo em Trânsito/ABERTO": br_to_float(valores_numericos[5]),
+                            })
+                            continue
+
+                    candidatos = []
                     for w in linha_words[1:]:
                         txt = str(w.get("text", "")).strip()
                         if not _eh_numero_br(txt):
@@ -613,8 +645,6 @@ def parse_pedidos_compra_aberto_pdf(uploaded_file):
                         distancia = abs(cx - aberto_x)
                         candidatos.append((distancia, txt))
 
-                    # A coluna ABERTO fica muito próxima do centro do cabeçalho ABERTO.
-                    # VR.UNIT fica mais à direita e não deve entrar no filtro.
                     candidatos = [c for c in candidatos if c[0] <= 22]
                     if candidatos:
                         candidatos.sort(key=lambda x: x[0])
@@ -633,13 +663,7 @@ def parse_pedidos_compra_aberto_pdf(uploaded_file):
             "Saldo em Trânsito/ABERTO": "sum",
         })
 
-    try:
-        uploaded_file.seek(0)
-    except Exception:
-        pass
-
-    texto = extract_text_from_pdf(uploaded_file)
-    return parse_pedidos_compra_aberto(texto)
+    return pd.DataFrame(columns=["codigo", "descricao", "Saldo em Trânsito/ABERTO"])
 
 
 # =========================================================
@@ -869,6 +893,22 @@ def arredondar_para_embalagem(sugestao, embalagem):
 
 
 def montar_tabela_consolidada(df_giro, df_transito=None, dias_estoque_alvo=60, meses_alerta_sem_compra=3):
+    df_giro = df_giro.copy()
+
+    # Garantias para evitar KeyError quando algum upload não trouxer cadastro/embalagem.
+    # A tabela consolidada sempre precisa dessas colunas para o groupby/agg.
+    colunas_padrao = {
+        "codigo_fabrica": "",
+        "embalagem": 0,
+        "estoque": 0,
+        "codigo_empresa": "",
+        "descricao": "",
+        "codigo": "",
+    }
+    for coluna, valor_padrao in colunas_padrao.items():
+        if coluna not in df_giro.columns:
+            df_giro[coluna] = valor_padrao
+
     df_lojas = df_giro[df_giro["codigo_empresa"].isin(CODIGOS_LOJAS)].copy()
     df_unica = df_giro[df_giro["codigo_empresa"] == CODIGO_UNICA].copy()
 
