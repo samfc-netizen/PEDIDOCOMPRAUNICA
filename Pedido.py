@@ -2463,17 +2463,46 @@ def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw, mapa_unica=None,
     return pd.DataFrame(linhas)
 
 
-def gerar_texto_divergencias_comparativo(df_comparativo):
+def gerar_relatorio_executivo_comparativo(df_comparativo, limite_itens=80):
+    """
+    Gera um relatório executivo em Markdown para a conferência do pedido.
+    O texto é dividido por tópicos para facilitar copiar/colar no WhatsApp, e-mail ou ata.
+    """
     if df_comparativo is None or df_comparativo.empty:
-        return "Em relação às quantidades, não houve divergências.", "Em relação aos preços, não houve divergências."
+        return """# 📋 RELATÓRIO DE CONFERÊNCIA DO PEDIDO
+
+## ✅ Resumo Geral
+
+- Nenhum item foi encontrado para comparação.
+
+## ✅ Conclusão
+
+Não há divergências a reportar porque o comparativo está vazio.
+"""
 
     df = df_comparativo.copy()
-    for col in ["Qtd Única", "Qtd Fornecedor", "Preço Única", "Preço Fornecedor", "Diferença Qtd", "Diferença Preço", "Diferença Preço %"]:
+    for col in [
+        "Qtd Única", "Qtd Fornecedor", "Preço Única", "Preço Fornecedor",
+        "Diferença Qtd", "Diferença Preço", "Diferença Preço %", "Diferença Valor",
+        "Valor Única", "Valor Fornecedor",
+    ]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-    diverg_qtd = df[(df["Status"].isin(["Divergente", "Somente fornecedor", "Não encontrado no fornecedor"])) & (df["Diferença Qtd"].abs() > 0.0001)].copy()
-    diverg_preco = df[(df["Status"].isin(["Divergente", "Somente fornecedor", "Não encontrado no fornecedor"])) & (df["Diferença Preço"].abs() > 0.01)].copy()
+    total = len(df)
+    qtd_ok = int((df["Status"] == "OK").sum()) if "Status" in df.columns else 0
+    qtd_div = int((df["Status"] == "Divergente").sum()) if "Status" in df.columns else 0
+    qtd_nao_fornecedor = int((df["Status"] == "Não encontrado no fornecedor").sum()) if "Status" in df.columns else 0
+    qtd_somente_fornecedor = int((df["Status"] == "Somente fornecedor").sum()) if "Status" in df.columns else 0
+
+    diverg_qtd = df[
+        (df["Status"].isin(["Divergente", "Somente fornecedor", "Não encontrado no fornecedor"]))
+        & (df["Diferença Qtd"].abs() > 0.0001)
+    ].copy()
+    diverg_preco = df[
+        (df["Status"].isin(["Divergente", "Somente fornecedor", "Não encontrado no fornecedor"]))
+        & (df["Diferença Preço"].abs() > 0.01)
+    ].copy()
 
     def nome_item(row):
         codigo = str(row.get("Código Única") or row.get("Código Fornecedor") or "").strip()
@@ -2482,42 +2511,161 @@ def gerar_texto_divergencias_comparativo(df_comparativo):
             return f"{codigo} - {desc}"
         return codigo or desc or "item sem código"
 
+    def sinal_num(valor, casas=1):
+        try:
+            valor = float(valor or 0)
+            sinal = "+" if valor > 0 else ""
+            return sinal + str(format_num_br(valor, casas))
+        except Exception:
+            return str(valor)
+
+    def sinal_pct(valor):
+        try:
+            valor = float(valor or 0)
+            sinal = "+" if valor > 0 else ""
+            return sinal + str(format_num_br(valor, 2)) + "%"
+        except Exception:
+            return str(valor)
+
+    linhas = []
+    linhas.append("# 📋 RELATÓRIO DE CONFERÊNCIA DO PEDIDO")
+    linhas.append("")
+    linhas.append("## ✅ Resumo Geral")
+    linhas.append("")
+    linhas.append(f"- **Itens comparados:** {format_int_br(total)}")
+    linhas.append(f"- **Itens sem divergência:** {format_int_br(qtd_ok)}")
+    linhas.append(f"- **Itens com divergência:** {format_int_br(qtd_div)}")
+    linhas.append(f"- **Itens no Pedido Única não encontrados no fornecedor:** {format_int_br(qtd_nao_fornecedor)}")
+    linhas.append(f"- **Itens enviados pelo fornecedor que não constam no Pedido Única:** {format_int_br(qtd_somente_fornecedor)}")
+    linhas.append("")
+
+    linhas.append("## 📦 Divergências de Quantidade")
+    linhas.append("")
     if diverg_qtd.empty:
-        texto_qtd = "Em relação às quantidades, não houve divergências."
+        linhas.append("- Não foram identificadas divergências de quantidade.")
     else:
-        partes = []
-        for _, r in diverg_qtd.head(80).iterrows():
+        linhas.append("Foram identificadas divergências nas quantidades dos seguintes itens:")
+        linhas.append("")
+        for _, r in diverg_qtd.head(limite_itens).iterrows():
             status = str(r.get("Status", ""))
             item = nome_item(r)
+            linhas.append(f"### 🔸 {item}")
             if status == "Somente fornecedor":
-                partes.append(f"{item}: consta no fornecedor com {format_num_br(r.get('Qtd Fornecedor', 0), 1)} unidade(s), mas não consta no Pedido da Única.")
+                linhas.append("- **Situação:** item consta somente no pedido do fornecedor.")
+                linhas.append(f"- **Quantidade no fornecedor:** {format_num_br(r.get('Qtd Fornecedor', 0), 1)}")
+                linhas.append("- **Quantidade no Pedido Única:** 0")
+                linhas.append("- **Ação recomendada:** verificar se o fornecedor incluiu item indevido ou se houve alteração posterior no pedido.")
             elif status == "Não encontrado no fornecedor":
-                partes.append(f"{item}: consta no Pedido da Única com {format_num_br(r.get('Qtd Única', 0), 1)} unidade(s), mas não foi encontrado no fornecedor.")
+                linhas.append("- **Situação:** item consta no Pedido Única, mas não foi encontrado no fornecedor.")
+                linhas.append(f"- **Quantidade no Pedido Única:** {format_num_br(r.get('Qtd Única', 0), 1)}")
+                linhas.append("- **Quantidade no fornecedor:** 0")
+                linhas.append("- **Ação recomendada:** confirmar se houve corte, ruptura ou omissão do item pelo fornecedor.")
             else:
-                partes.append(f"{item}: Única pediu {format_num_br(r.get('Qtd Única', 0), 1)} e fornecedor informou {format_num_br(r.get('Qtd Fornecedor', 0), 1)}; diferença de {format_num_br(r.get('Diferença Qtd', 0), 1)} unidade(s).")
-        texto_qtd = "Em relação às quantidades houve essa divergência: " + " ".join(partes)
-        if len(diverg_qtd) > 80:
-            texto_qtd += f" Mais {len(diverg_qtd) - 80} divergência(s) não foram listadas neste texto."
+                linhas.append(f"- **Quantidade no Pedido Única:** {format_num_br(r.get('Qtd Única', 0), 1)}")
+                linhas.append(f"- **Quantidade no fornecedor:** {format_num_br(r.get('Qtd Fornecedor', 0), 1)}")
+                linhas.append(f"- **Diferença:** {sinal_num(r.get('Diferença Qtd', 0), 1)} unidade(s)")
+            linhas.append("")
+        if len(diverg_qtd) > limite_itens:
+            linhas.append(f"- Existem mais **{format_int_br(len(diverg_qtd) - limite_itens)}** divergência(s) de quantidade não listadas neste texto.")
+            linhas.append("")
 
+    linhas.append("## 💰 Divergências de Preço")
+    linhas.append("")
     if diverg_preco.empty:
-        texto_preco = "Em relação aos preços, não houve divergências."
+        linhas.append("- Não foram identificadas divergências de preço unitário.")
     else:
-        partes = []
-        for _, r in diverg_preco.head(80).iterrows():
+        linhas.append("Foram identificadas divergências nos preços unitários dos seguintes itens:")
+        linhas.append("")
+        for _, r in diverg_preco.head(limite_itens).iterrows():
             status = str(r.get("Status", ""))
             item = nome_item(r)
-            pct = format_num_br(r.get("Diferença Preço %", 0), 2)
+            linhas.append(f"### 🔸 {item}")
             if status == "Somente fornecedor":
-                partes.append(f"{item}: consta somente no fornecedor com preço {format_moeda_br(r.get('Preço Fornecedor', 0))}.")
+                linhas.append("- **Situação:** item consta somente no pedido do fornecedor.")
+                linhas.append(f"- **Preço fornecedor:** {format_moeda_br(r.get('Preço Fornecedor', 0))}")
+                linhas.append("- **Preço Pedido Única:** R$ 0,00")
+                linhas.append("- **Ação recomendada:** validar se o item deve entrar no pedido antes da aprovação.")
             elif status == "Não encontrado no fornecedor":
-                partes.append(f"{item}: consta somente na Única com preço {format_moeda_br(r.get('Preço Única', 0))}.")
+                linhas.append("- **Situação:** item consta somente no Pedido Única.")
+                linhas.append(f"- **Preço Pedido Única:** {format_moeda_br(r.get('Preço Única', 0))}")
+                linhas.append("- **Preço fornecedor:** R$ 0,00")
+                linhas.append("- **Ação recomendada:** confirmar se o fornecedor retirou o item ou se houve falha no arquivo recebido.")
             else:
-                partes.append(f"{item}: preço Única {format_moeda_br(r.get('Preço Única', 0))} e preço fornecedor {format_moeda_br(r.get('Preço Fornecedor', 0))}; diferença de {format_moeda_br(r.get('Diferença Preço', 0))} ({pct}%).")
-        texto_preco = "Em relação aos preços houve essas divergências: " + " ".join(partes)
-        if len(diverg_preco) > 80:
-            texto_preco += f" Mais {len(diverg_preco) - 80} divergência(s) não foram listadas neste texto."
+                linhas.append(f"- **Preço Pedido Única:** {format_moeda_br(r.get('Preço Única', 0))}")
+                linhas.append(f"- **Preço fornecedor:** {format_moeda_br(r.get('Preço Fornecedor', 0))}")
+                linhas.append(f"- **Diferença unitária:** {format_moeda_br(r.get('Diferença Preço', 0))}")
+                linhas.append(f"- **Diferença percentual:** {sinal_pct(r.get('Diferença Preço %', 0))}")
+            linhas.append("")
+        if len(diverg_preco) > limite_itens:
+            linhas.append(f"- Existem mais **{format_int_br(len(diverg_preco) - limite_itens)}** divergência(s) de preço não listadas neste texto.")
+            linhas.append("")
 
-    return texto_qtd, texto_preco
+    somente_forn = df[df["Status"] == "Somente fornecedor"].copy()
+    nao_encontrado = df[df["Status"] == "Não encontrado no fornecedor"].copy()
+
+    linhas.append("## ⚠️ Itens Apenas no Fornecedor")
+    linhas.append("")
+    if somente_forn.empty:
+        linhas.append("- Nenhum item foi encontrado apenas no arquivo do fornecedor.")
+    else:
+        linhas.append("Os itens abaixo foram enviados pelo fornecedor, porém não constam no Pedido Única considerado para comparação:")
+        linhas.append("")
+        for _, r in somente_forn.head(limite_itens).iterrows():
+            linhas.append(f"- **{nome_item(r)}** | Qtd: **{format_num_br(r.get('Qtd Fornecedor', 0), 1)}** | Preço: **{format_moeda_br(r.get('Preço Fornecedor', 0))}**")
+        if len(somente_forn) > limite_itens:
+            linhas.append(f"- Mais **{format_int_br(len(somente_forn) - limite_itens)}** item(ns) não listado(s).")
+    linhas.append("")
+
+    linhas.append("## ⚠️ Itens do Pedido Única não encontrados no fornecedor")
+    linhas.append("")
+    if nao_encontrado.empty:
+        linhas.append("- Nenhum item do Pedido Única ficou sem correspondência no fornecedor.")
+    else:
+        linhas.append("Os itens abaixo constam no Pedido Única, mas não foram encontrados no arquivo do fornecedor:")
+        linhas.append("")
+        for _, r in nao_encontrado.head(limite_itens).iterrows():
+            linhas.append(f"- **{nome_item(r)}** | Qtd: **{format_num_br(r.get('Qtd Única', 0), 1)}** | Preço: **{format_moeda_br(r.get('Preço Única', 0))}**")
+        if len(nao_encontrado) > limite_itens:
+            linhas.append(f"- Mais **{format_int_br(len(nao_encontrado) - limite_itens)}** item(ns) não listado(s).")
+    linhas.append("")
+
+    percentual_ok = (qtd_ok / total * 100) if total else 0
+    percentual_div = ((total - qtd_ok) / total * 100) if total else 0
+    linhas.append("## 📊 Indicadores da Conferência")
+    linhas.append("")
+    linhas.append(f"- **Percentual sem divergência:** {format_num_br(percentual_ok, 2)}%")
+    linhas.append(f"- **Percentual com algum apontamento:** {format_num_br(percentual_div, 2)}%")
+    linhas.append(f"- **Total de divergências de quantidade:** {format_int_br(len(diverg_qtd))}")
+    linhas.append(f"- **Total de divergências de preço:** {format_int_br(len(diverg_preco))}")
+    linhas.append("")
+
+    linhas.append("## ✅ Conclusão")
+    linhas.append("")
+    if qtd_div == 0 and qtd_nao_fornecedor == 0 and qtd_somente_fornecedor == 0:
+        linhas.append("A conferência foi finalizada sem divergências relevantes. O pedido pode seguir para validação final.")
+    else:
+        linhas.append("A conferência encontrou pontos que precisam ser validados antes da aprovação final do pedido:")
+        if len(diverg_qtd) > 0:
+            linhas.append(f"- **{format_int_br(len(diverg_qtd))}** divergência(s) de quantidade.")
+        if len(diverg_preco) > 0:
+            linhas.append(f"- **{format_int_br(len(diverg_preco))}** divergência(s) de preço.")
+        if qtd_somente_fornecedor > 0:
+            linhas.append(f"- **{format_int_br(qtd_somente_fornecedor)}** item(ns) enviado(s) pelo fornecedor que não constam no Pedido Única.")
+        if qtd_nao_fornecedor > 0:
+            linhas.append(f"- **{format_int_br(qtd_nao_fornecedor)}** item(ns) do Pedido Única não encontrado(s) no fornecedor.")
+        linhas.append("")
+        linhas.append("Recomenda-se validar as divergências com o fornecedor antes de aprovar o pedido.")
+
+    return "\n".join(linhas).strip()
+
+
+def gerar_texto_divergencias_comparativo(df_comparativo):
+    """
+    Mantida por compatibilidade com o restante do app.
+    Agora retorna o relatório executivo completo e um texto focado em preço.
+    """
+    relatorio = gerar_relatorio_executivo_comparativo(df_comparativo)
+    return relatorio, relatorio
 
 def colorir_comparativo_pedidos(row):
     status = str(row.get("Status", ""))
@@ -2670,10 +2818,15 @@ def render_pagina_comparativo_pedidos():
         c3.metric("Não encontrados", int((comparativo["Status"] == "Não encontrado no fornecedor").sum()))
         c4.metric("Somente fornecedor", int((comparativo["Status"] == "Somente fornecedor").sum()))
 
-        texto_qtd, texto_preco = gerar_texto_divergencias_comparativo(comparativo)
-        with st.expander("Texto automático das divergências", expanded=True):
-            st.text_area("Divergências de quantidade", texto_qtd, height=160, key="texto_diverg_qtd")
-            st.text_area("Divergências de preço", texto_preco, height=160, key="texto_diverg_preco")
+        relatorio_executivo = gerar_relatorio_executivo_comparativo(comparativo)
+        with st.expander("📋 Relatório executivo da conferência", expanded=True):
+            st.markdown(relatorio_executivo)
+            st.text_area(
+                "Texto pronto para copiar",
+                relatorio_executivo,
+                height=420,
+                key="texto_relatorio_executivo_comparativo",
+            )
 
         termo = st.text_input("Pesquisar no comparativo", key="busca_comparativo_pedidos").strip().lower()
         view = comparativo.copy()
