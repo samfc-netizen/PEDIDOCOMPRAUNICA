@@ -1357,17 +1357,69 @@ def google_ensure_folder(drive_service, name, parent_id):
     return criado["id"]
 
 
-def google_ensure_spreadsheet(drive_service, name, parent_id):
+def google_get_file_parents(drive_service, file_id):
+    try:
+        meta = drive_service.files().get(
+            fileId=file_id,
+            fields="parents",
+            supportsAllDrives=True,
+        ).execute()
+        return ",".join(meta.get("parents", []) or [])
+    except Exception:
+        return ""
+
+
+def google_mover_arquivo_para_pasta(drive_service, file_id, parent_id):
+    """
+    Move o arquivo para a pasta raiz configurada.
+
+    Importante:
+    - A planilha é criada pela Google Sheets API.
+    - Depois ela é vinculada explicitamente à pasta do Drive informada.
+    - Isso evita a criação solta na raiz da conta de serviço.
+    """
+    parents_atuais = google_get_file_parents(drive_service, file_id)
+    drive_service.files().update(
+        fileId=file_id,
+        addParents=parent_id,
+        removeParents=parents_atuais or None,
+        fields="id, parents, webViewLink",
+        supportsAllDrives=True,
+    ).execute()
+
+
+def google_ensure_spreadsheet(drive_service, sheets_service, name, parent_id):
+    """
+    Garante uma planilha Google Sheets dentro da pasta informada.
+
+    Correção aplicada:
+    - Antes, a planilha era criada diretamente pela Drive API com mimeType de Sheets.
+    - Em algumas contas de serviço isso causa erro 403 storageQuotaExceeded.
+    - Agora a planilha é criada pela Sheets API e imediatamente movida para a pasta.
+    """
     mime = "application/vnd.google-apps.spreadsheet"
     existente = google_find_file(drive_service, name, parent_id, mime)
     if existente:
         return existente["id"]
-    criado = drive_service.files().create(
-        body={"name": name, "mimeType": mime, "parents": [parent_id]},
-        fields="id",
-        supportsAllDrives=True,
-    ).execute()
-    return criado["id"]
+
+    try:
+        criado = sheets_service.spreadsheets().create(
+            body={"properties": {"title": name}},
+            fields="spreadsheetId",
+        ).execute()
+        spreadsheet_id = criado["spreadsheetId"]
+        google_mover_arquivo_para_pasta(drive_service, spreadsheet_id, parent_id)
+        return spreadsheet_id
+    except Exception as e:
+        erro = str(e)
+        if "storageQuotaExceeded" in erro or "Drive storage quota" in erro:
+            raise RuntimeError(
+                "O Google bloqueou a criação da planilha por cota da conta que está criando o arquivo. "
+                "A pasta está acessível, mas contas de serviço não têm armazenamento próprio em Meu Drive. "
+                "Solução definitiva: criar a pasta em um Drive Compartilhado ou autenticar com OAuth da conta dona "
+                "da pasta (ex.: gdautotintas@gmail.com). Erro original: " + erro
+            )
+        raise
 
 
 def google_ensure_sheet_tab(sheets_service, spreadsheet_id, sheet_name):
@@ -1457,8 +1509,8 @@ def google_get_resources_cached(_cache_key):
     drive_service, sheets_service, client_email = google_get_services()
     pedidos_folder_id = google_ensure_folder(drive_service, GOOGLE_SUBPASTA_PEDIDOS, GOOGLE_DRIVE_ROOT_FOLDER_ID)
     finais_folder_id = google_ensure_folder(drive_service, GOOGLE_SUBPASTA_FINAIS, GOOGLE_DRIVE_ROOT_FOLDER_ID)
-    controle_id = google_ensure_spreadsheet(drive_service, GOOGLE_PLANILHA_CONTROLE, GOOGLE_DRIVE_ROOT_FOLDER_ID)
-    cadastro_id = google_ensure_spreadsheet(drive_service, GOOGLE_PLANILHA_CADASTRO, GOOGLE_DRIVE_ROOT_FOLDER_ID)
+    controle_id = google_ensure_spreadsheet(drive_service, sheets_service, GOOGLE_PLANILHA_CONTROLE, GOOGLE_DRIVE_ROOT_FOLDER_ID)
+    cadastro_id = google_ensure_spreadsheet(drive_service, sheets_service, GOOGLE_PLANILHA_CADASTRO, GOOGLE_DRIVE_ROOT_FOLDER_ID)
     google_ensure_headers(sheets_service, controle_id, "Pedidos", GOOGLE_PEDIDOS_COLUNAS)
     google_ensure_headers(sheets_service, controle_id, "Acompanhamento", GOOGLE_ACOMPANHAMENTO_COLUNAS)
     google_ensure_headers(sheets_service, cadastro_id, "Cadastro", ["codigo", "descricao", "codigo_fabrica", "embalagem"])
@@ -1489,7 +1541,7 @@ def google_criar_planilha_pedido(nome_pedido, fornecedor, pedido_df, criado_por=
     nome_limpo = google_safe_name(nome_pedido)
     fornecedor_limpo = google_safe_name(fornecedor)
     titulo = f"{datetime.now().strftime('%Y-%m-%d')} - {fornecedor_limpo} - {nome_limpo}"
-    spreadsheet_id = google_ensure_spreadsheet(drive_service, titulo, recursos["pedidos_folder_id"])
+    spreadsheet_id = google_ensure_spreadsheet(drive_service, sheets_service, titulo, recursos["pedidos_folder_id"])
 
     df_export = pedido_df.copy()
     if "zx" not in df_export.columns:
