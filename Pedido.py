@@ -2136,24 +2136,105 @@ def ler_arquivo_comparativo(uploaded_file, codigos_referencia=None):
         headers = [str(c).strip() or f"COLUNA {i+1}" for i, c in enumerate(linhas[header_idx])]
         return pd.DataFrame(linhas[header_idx + 1:], columns=headers)
 
+    if nome.endswith((".html", ".htm")):
+        try:
+            uploaded_file.seek(0)
+            tabelas = pd.read_html(uploaded_file, dtype=str)
+            if tabelas:
+                # Usa a maior tabela encontrada no HTML.
+                tabelas = sorted(tabelas, key=lambda d: d.shape[0] * max(d.shape[1], 1), reverse=True)
+                df_html = tabelas[0].copy()
+                df_html.columns = [str(c).strip() for c in df_html.columns]
+                return df_html
+        except Exception:
+            return pd.DataFrame()
+
     return ler_planilha_comparativo_fornecedor(uploaded_file)
 
 
-def normalizar_pedido_comparativo(df, origem):
+def _opcoes_colunas_mapeamento(df, incluir_vazio=True):
+    cols = [str(c) for c in list(df.columns)] if df is not None else []
+    return (["-- Não usar --"] + cols) if incluir_vazio else cols
+
+
+def _primeira_coluna_existente(df, candidatos, permitir_vazio=True):
+    if df is None or df.empty:
+        return "-- Não usar --" if permitir_vazio else None
+    col = _coluna_por_candidatos(df, candidatos)
+    if col:
+        return str(col)
+    return "-- Não usar --" if permitir_vazio else (str(df.columns[0]) if len(df.columns) else None)
+
+
+def _mapear_colunas_comparativo(df, prefixo, origem):
+    st.markdown(f"**Mapeamento do {origem}**")
+    op_obrig = _opcoes_colunas_mapeamento(df, incluir_vazio=False)
+    op_opc = _opcoes_colunas_mapeamento(df, incluir_vazio=True)
+
+    if not op_obrig:
+        st.error(f"Não encontrei colunas no arquivo {origem}.")
+        return None
+
+    default_codigo = _primeira_coluna_existente(df, [
+        "Código Fábrica", "Codigo Fabrica", "Cód. Fábrica", "Cod. Fabrica",
+        "Código de Fábrica", "Codigo de Fabrica", "Código", "Codigo", "Cód.", "Cod.", "Cod",
+        "Referência", "Referencia", "Ref", "SKU", "Produto", "Cod Produto", "Código Produto"
+    ], permitir_vazio=True)
+    default_desc = _primeira_coluna_existente(df, [
+        "descricao", "descrição", "descrição do item", "descricao do item", "produto", "item", "nome", "descr", "Linha PDF"
+    ], permitir_vazio=True)
+    default_qtd = _coluna_quantidade_flexivel(df) or _primeira_coluna_existente(df, [
+        "PEDIDO Final", "Quantidade", "Qtd", "Qtde", "Quant", "Qte", "Qty", "QTDE"
+    ], permitir_vazio=True)
+    default_preco = _primeira_coluna_existente(df, [
+        "Preço Última Compra", "Preco Ultima Compra", "Preço", "Preco", "Preço Unitário", "Preco Unitario",
+        "Valor Unitário", "Valor Unitario", "Vlr Unit", "Vl Unit", "VL. UNIT.", "VL UNIT", "VR.UNIT", "UNIT.TOT"
+    ], permitir_vazio=True)
+    default_total = _primeira_coluna_existente(df, [
+        "Valor Final do Pedido", "Valor Total", "VL. TOTAL", "VL TOTAL", "Vlr Total", "Total", "Valor"
+    ], permitir_vazio=True)
+
+    def idx(opcoes, valor):
+        return opcoes.index(valor) if valor in opcoes else 0
+
+    c1, c2 = st.columns(2)
+    with c1:
+        col_codigo = st.selectbox("Coluna de relacionamento/código", op_opc, index=idx(op_opc, default_codigo), key=f"{prefixo}_codigo")
+        col_desc = st.selectbox("Coluna de descrição", op_opc, index=idx(op_opc, default_desc), key=f"{prefixo}_desc")
+    with c2:
+        col_qtd = st.selectbox("Coluna de quantidade", op_opc, index=idx(op_opc, default_qtd), key=f"{prefixo}_qtd")
+        col_preco = st.selectbox("Coluna de valor unitário", op_opc, index=idx(op_opc, default_preco), key=f"{prefixo}_preco")
+        col_total = st.selectbox("Coluna de valor total (opcional)", op_opc, index=idx(op_opc, default_total), key=f"{prefixo}_total")
+
+    def limpar(v):
+        return None if v == "-- Não usar --" else v
+
+    return {
+        "codigo": limpar(col_codigo),
+        "descricao": limpar(col_desc),
+        "quantidade": limpar(col_qtd),
+        "preco_unitario": limpar(col_preco),
+        "valor_total": limpar(col_total),
+    }
+
+
+def normalizar_pedido_comparativo(df, origem, mapa_colunas=None):
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
+    mapa_colunas = mapa_colunas or {}
 
-    col_fabrica = _coluna_por_candidatos(df, [
+    # Quando houver mapeamento manual, ele manda. O reconhecimento automático fica só como fallback.
+    col_fabrica = mapa_colunas.get("codigo") or _coluna_por_candidatos(df, [
         "Código Fábrica", "Codigo Fabrica", "Cód. Fábrica", "Cod. Fabrica",
         "Código de Fábrica", "Codigo de Fabrica", "Cod Fabrica", "Cód Fabrica",
         "Código", "Codigo", "Cód.", "Cod.", "Cod",
         "Referência", "Referencia", "Ref", "Código Fornecedor", "Codigo Fornecedor",
         "Cod Produto", "Código Produto", "Codigo Produto", "SKU", "Part Number", "Linha PDF",
     ])
-    col_descricao = _coluna_por_candidatos(df, [
+    col_descricao = mapa_colunas.get("descricao") or _coluna_por_candidatos(df, [
         "descricao", "descrição", "descrição do item", "descricao do item", "produto", "item", "nome", "descr", "linha pdf",
     ])
-    col_qtd = _coluna_quantidade_flexivel(df) or _coluna_por_candidatos(df, [
+    col_qtd = mapa_colunas.get("quantidade") or _coluna_quantidade_flexivel(df) or _coluna_por_candidatos(df, [
         "PEDIDO Final", "Quantidade", "Qtd", "Qtde", "Quant", "Quant.", "Qte", "Qty", "Quantity",
         "Quantidade Pedido", "Qtd Pedido", "Qtde Pedido", "Quant Pedido",
         "Quantidade Pedida", "Qtd Pedida", "Qtde Pedida", "Quant Pedida",
@@ -2162,13 +2243,13 @@ def normalizar_pedido_comparativo(df, origem):
         "Quantidade Faturada", "Qtd Faturada", "Qtde Faturada",
         "Volume", "Vol",
     ])
-    col_preco = _coluna_por_candidatos(df, [
+    col_preco = mapa_colunas.get("preco_unitario") or _coluna_por_candidatos(df, [
         "Preço Última Compra", "Preco Ultima Compra", "Preço", "Preco", "Preço Unitário", "Preco Unitario",
         "Valor Unitário", "Valor Unitario", "Vlr Unit", "Vl Unit", "VL. UNIT.", "VL UNIT",
         "Vr.Unit", "VR.UNIT", "VR UNIT", "Unitário", "Unitario", "Preço Uni",
         "UNIT.TOT", "UNIT TOT", "Unit Total",
     ])
-    col_total = _coluna_por_candidatos(df, [
+    col_total = mapa_colunas.get("valor_total") or _coluna_por_candidatos(df, [
         "Valor Final do Pedido", "Valor Total", "VL. TOTAL", "VL TOTAL", "Vlr Total",
         "Total", "Total Geral", "Valor", "Valor Mercadoria",
     ])
@@ -2184,34 +2265,26 @@ def normalizar_pedido_comparativo(df, origem):
         col_total = col_total or "__total_inferido"
 
     faltantes = []
-    if not col_descricao:
-        # Descrição não pode travar o comparativo; usa o código/linha como identificação.
-        df["__descricao_auto"] = df[col_fabrica].astype(str) if col_fabrica else ""
-        col_descricao = "__descricao_auto"
+    if not col_fabrica and not col_descricao:
+        faltantes.append("código ou descrição")
     if not col_qtd:
         faltantes.append("quantidade")
     if faltantes:
-        raise ValueError(f"O arquivo {origem} não possui coluna reconhecida de " + ", ".join(faltantes) + ".")
+        raise ValueError(f"O arquivo {origem} precisa de mapeamento para: " + ", ".join(faltantes) + ".")
 
     out = pd.DataFrame()
     out["origem"] = origem
     out["codigo_fabrica"] = df[col_fabrica].astype(str).str.strip() if col_fabrica else ""
     out["codigo_fabrica_norm"] = out["codigo_fabrica"].apply(normalizar_codigo_fabrica)
-    out["descricao"] = df[col_descricao].astype(str).str.strip() if col_descricao else ""
+    out["descricao"] = df[col_descricao].astype(str).str.strip() if col_descricao else out["codigo_fabrica"]
     out["quantidade"] = df[col_qtd].apply(numero_planilha_para_float)
     out["preco_unitario"] = df[col_preco].apply(numero_planilha_para_float) if col_preco else 0.0
     out["valor_total"] = df[col_total].apply(numero_planilha_para_float) if col_total else 0.0
     out.loc[(out["valor_total"] <= 0) & (out["preco_unitario"] > 0), "valor_total"] = out["quantidade"] * out["preco_unitario"]
     out.loc[(out["preco_unitario"] <= 0) & (out["valor_total"] > 0) & (out["quantidade"] > 0), "preco_unitario"] = out["valor_total"] / out["quantidade"]
     out["descricao_chave"] = out["descricao"].apply(normalizar_descricao_chave)
-    if str(origem).strip().lower() in ["única", "unica"]:
-        # Na planilha da Única, só entram no comparativo os itens realmente pedidos.
-        # Itens com PEDIDO Final vazio/zero não devem virar "não encontrado".
-        out = out[out["quantidade"] > 0].copy()
-    else:
-        out = out[(out["quantidade"] > 0) | (out["preco_unitario"] > 0) | (out["valor_total"] > 0)].copy()
+    out = out[(out["quantidade"] > 0) | (out["preco_unitario"] > 0) | (out["valor_total"] > 0)].copy()
     return out
-
 
 def agregar_pedido_comparativo(df):
     if df.empty:
@@ -2235,18 +2308,34 @@ def agregar_pedido_comparativo(df):
     return agg
 
 
-def codigos_referencia_comparativo(df_unica_raw):
+def codigos_referencia_comparativo(df_unica_raw, mapa_unica=None):
     try:
-        unica_norm = normalizar_pedido_comparativo(df_unica_raw, "Única")
+        unica_norm = normalizar_pedido_comparativo(df_unica_raw, "Única", mapa_unica)
         codigos = unica_norm["codigo_fabrica"].dropna().astype(str).str.strip().tolist()
         return [c for c in codigos if normalizar_codigo_fabrica(c)]
     except Exception:
         return []
 
 
-def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw):
-    unica = agregar_pedido_comparativo(normalizar_pedido_comparativo(df_unica_raw, "Única"))
-    fornecedor = agregar_pedido_comparativo(normalizar_pedido_comparativo(df_fornecedor_raw, "Fornecedor"))
+def _aplicar_relacionamentos_manuais(unica, fornecedor, relacionamentos):
+    relacionamentos = relacionamentos or {}
+    if not relacionamentos:
+        return fornecedor.copy()
+
+    fornecedor = fornecedor.copy()
+    for chave_unica, chave_fornecedor in relacionamentos.items():
+        if not chave_unica or not chave_fornecedor:
+            continue
+        mask_f = fornecedor["chave"].astype(str) == str(chave_fornecedor)
+        if mask_f.any():
+            fornecedor.loc[mask_f, "chave"] = str(chave_unica)
+    return fornecedor
+
+
+def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw, mapa_unica=None, mapa_fornecedor=None, relacionamentos_manuais=None):
+    unica = agregar_pedido_comparativo(normalizar_pedido_comparativo(df_unica_raw, "Única", mapa_unica))
+    fornecedor = agregar_pedido_comparativo(normalizar_pedido_comparativo(df_fornecedor_raw, "Fornecedor", mapa_fornecedor))
+    fornecedor = _aplicar_relacionamentos_manuais(unica, fornecedor, relacionamentos_manuais)
 
     usados_fornecedor = set()
     linhas = []
@@ -2258,13 +2347,20 @@ def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw):
         cod_fab = str(row.get("codigo_fabrica", "")).strip()
         cod_fab_norm = str(row.get("codigo_fabrica_norm", "")).strip()
 
-        if cod_fab_norm:
+        candidatos_manual = fornecedor[fornecedor["chave"].astype(str) == str(row.get("chave", ""))]
+        candidatos_manual = candidatos_manual[~candidatos_manual.index.isin(usados_fornecedor)]
+        if not candidatos_manual.empty:
+            match = candidatos_manual.iloc[0]
+            usados_fornecedor.add(match.name)
+            metodo = "Relacionamento manual" if str(match.get("chave", "")) == str(row.get("chave", "")) else "Código"
+
+        if match is None and cod_fab_norm:
             candidatos = fornecedor[fornecedor["codigo_fabrica_norm"].astype(str).str.strip() == cod_fab_norm]
             candidatos = candidatos[~candidatos.index.isin(usados_fornecedor)]
             if not candidatos.empty:
                 match = candidatos.iloc[0]
                 usados_fornecedor.add(match.name)
-                metodo = "Código de fábrica"
+                metodo = "Código"
 
         if match is None and str(row.get("descricao_chave", "")).strip() and descricoes_fornecedor:
             candidato_desc = difflib.get_close_matches(str(row["descricao_chave"]), descricoes_fornecedor, n=1, cutoff=0.72)
@@ -2280,12 +2376,14 @@ def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw):
             linhas.append({
                 "Status": "Não encontrado no fornecedor",
                 "Método": "Sem correspondência",
-                "Código Fábrica Única": cod_fab,
+                "Chave Única": row.get("chave", ""),
+                "Chave Fornecedor": "",
+                "Código Única": cod_fab,
                 "Descrição Única": row.get("descricao", ""),
                 "Qtd Única": row.get("quantidade", 0),
                 "Preço Única": row.get("preco_unitario", 0),
                 "Valor Única": row.get("valor_total", 0),
-                "Código Fábrica Fornecedor": "",
+                "Código Fornecedor": "",
                 "Descrição Fornecedor": "",
                 "Qtd Fornecedor": 0,
                 "Preço Fornecedor": 0,
@@ -2303,12 +2401,14 @@ def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw):
         linhas.append({
             "Status": status,
             "Método": metodo,
-            "Código Fábrica Única": cod_fab,
+            "Chave Única": row.get("chave", ""),
+            "Chave Fornecedor": match.get("chave", ""),
+            "Código Única": cod_fab,
             "Descrição Única": row.get("descricao", ""),
             "Qtd Única": row.get("quantidade", 0),
             "Preço Única": row.get("preco_unitario", 0),
             "Valor Única": row.get("valor_total", 0),
-            "Código Fábrica Fornecedor": match.get("codigo_fabrica", ""),
+            "Código Fornecedor": match.get("codigo_fabrica", ""),
             "Descrição Fornecedor": match.get("descricao", ""),
             "Qtd Fornecedor": match.get("quantidade", 0),
             "Preço Fornecedor": match.get("preco_unitario", 0),
@@ -2323,12 +2423,14 @@ def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw):
         linhas.append({
             "Status": "Somente fornecedor",
             "Método": "Sem correspondência",
-            "Código Fábrica Única": "",
+            "Chave Única": "",
+            "Chave Fornecedor": row.get("chave", ""),
+            "Código Única": "",
             "Descrição Única": "",
             "Qtd Única": 0,
             "Preço Única": 0,
             "Valor Única": 0,
-            "Código Fábrica Fornecedor": row.get("codigo_fabrica", ""),
+            "Código Fornecedor": row.get("codigo_fabrica", ""),
             "Descrição Fornecedor": row.get("descricao", ""),
             "Qtd Fornecedor": row.get("quantidade", 0),
             "Preço Fornecedor": row.get("preco_unitario", 0),
@@ -2384,27 +2486,97 @@ def gerar_excel_comparativo_pedidos(df_comparativo):
 
 def render_pagina_comparativo_pedidos():
     st.markdown('<div class="section-title">Comparativo de Pedidos</div>', unsafe_allow_html=True)
-    st.caption("Compare o pedido da Única com o pedido enviado pelo fornecedor. Para PDF, o sistema usa os Códigos de Fábrica do Excel da Única como âncora e procura esses códigos em qualquer modelo de PDF.")
+    st.caption("Novo modelo: o sistema lê os arquivos e o usuário escolhe quais colunas representam código, descrição, quantidade e valor. Isso permite comparar layouts diferentes de fornecedores sem alterar o código.")
+
+    if "relacionamentos_comparativo" not in st.session_state:
+        st.session_state["relacionamentos_comparativo"] = {}
 
     col1, col2 = st.columns(2)
     with col1:
-        pedido_unica = st.file_uploader("Planilha do pedido da Única", type=["xlsx", "xls", "csv"], key="upload_comparativo_unica")
+        pedido_unica = st.file_uploader("Planilha do pedido da Única", type=["xlsx", "xls", "csv", "html", "htm"], key="upload_comparativo_unica")
     with col2:
-        pedido_fornecedor = st.file_uploader("Pedido do fornecedor", type=["xlsx", "xls", "csv", "pdf"], key="upload_comparativo_fornecedor")
+        pedido_fornecedor = st.file_uploader("Pedido do fornecedor", type=["xlsx", "xls", "csv", "pdf", "html", "htm"], key="upload_comparativo_fornecedor")
 
     if not pedido_unica or not pedido_fornecedor:
-        st.info("Envie a planilha da Única e o arquivo do fornecedor para gerar o comparativo.")
+        st.info("Envie o pedido da Única e o arquivo do fornecedor para iniciar o comparativo.")
         return
 
     try:
         df_unica = ler_arquivo_comparativo(pedido_unica)
-        codigos_ref = codigos_referencia_comparativo(df_unica)
-        df_fornecedor = ler_arquivo_comparativo(pedido_fornecedor, codigos_referencia=codigos_ref)
-        if df_unica.empty or df_fornecedor.empty:
-            st.error("Não consegui ler uma das bases enviadas. Verifique se o arquivo possui tabela com descrição, quantidade e preço/valor.")
+        if df_unica.empty:
+            st.error("Não consegui ler o pedido da Única.")
             return
 
-        comparativo = montar_comparativo_pedidos(df_unica, df_fornecedor)
+        st.markdown("### 1. Conferência e mapeamento das colunas")
+        with st.expander("Prévia do Pedido Única", expanded=False):
+            st.dataframe(df_unica.head(30), use_container_width=True, hide_index=True)
+
+        mapa_unica = _mapear_colunas_comparativo(df_unica, "cmp_unica", "Pedido Única")
+        if not mapa_unica:
+            return
+
+        codigos_ref = codigos_referencia_comparativo(df_unica, mapa_unica)
+        df_fornecedor = ler_arquivo_comparativo(pedido_fornecedor, codigos_referencia=codigos_ref)
+        if df_fornecedor.empty:
+            st.error("Não consegui ler o arquivo do fornecedor.")
+            return
+
+        with st.expander("Prévia do Pedido Fornecedor", expanded=False):
+            st.dataframe(df_fornecedor.head(30), use_container_width=True, hide_index=True)
+
+        mapa_fornecedor = _mapear_colunas_comparativo(df_fornecedor, "cmp_fornecedor", "Pedido Fornecedor")
+        if not mapa_fornecedor:
+            return
+
+        st.markdown("### 2. Relacionamento manual dos itens sem identificação")
+        relacionamentos = st.session_state.get("relacionamentos_comparativo", {})
+        comparativo_base = montar_comparativo_pedidos(df_unica, df_fornecedor, mapa_unica, mapa_fornecedor, relacionamentos)
+
+        nao_encontrados = comparativo_base[comparativo_base["Status"] == "Não encontrado no fornecedor"].copy()
+        somente_fornecedor = comparativo_base[comparativo_base["Status"] == "Somente fornecedor"].copy()
+
+        if not nao_encontrados.empty and not somente_fornecedor.empty:
+            with st.expander("Relacionar manualmente itens não encontrados", expanded=True):
+                st.caption("Escolha qual item do fornecedor corresponde ao item da Única. Depois clique em aplicar para refazer o comparativo.")
+                opcoes_fornecedor = {"-- Não relacionar --": ""}
+                for _, r in somente_fornecedor.iterrows():
+                    label = f'{str(r.get("Código Fornecedor", "")).strip()} | {str(r.get("Descrição Fornecedor", "")).strip()} | Qtd {format_num_br(r.get("Qtd Fornecedor", 0), 1)} | R$ {format_num_br(r.get("Preço Fornecedor", 0), 2)}'
+                    opcoes_fornecedor[label[:250]] = str(r.get("Chave Fornecedor", ""))
+
+                novos_rel = dict(relacionamentos)
+                limite_manual = min(len(nao_encontrados), 80)
+                for i, (_, r) in enumerate(nao_encontrados.head(limite_manual).iterrows()):
+                    st.markdown(f'**Única:** {str(r.get("Código Única", "")).strip()} | {str(r.get("Descrição Única", "")).strip()} | Qtd {format_num_br(r.get("Qtd Única", 0), 1)}')
+                    escolha = st.selectbox(
+                        "Item correspondente no fornecedor",
+                        list(opcoes_fornecedor.keys()),
+                        key=f"rel_manual_{i}_{str(r.get('Chave Única', ''))[:20]}",
+                    )
+                    chave_f = opcoes_fornecedor.get(escolha, "")
+                    if chave_f:
+                        novos_rel[str(r.get("Chave Única", ""))] = chave_f
+
+                if len(nao_encontrados) > limite_manual:
+                    st.info(f"Mostrando os primeiros {limite_manual} itens para relacionamento manual.")
+
+                c_rel1, c_rel2 = st.columns(2)
+                if c_rel1.button("Aplicar relacionamentos manuais", type="primary"):
+                    st.session_state["relacionamentos_comparativo"] = novos_rel
+                    st.rerun()
+                if c_rel2.button("Limpar relacionamentos manuais"):
+                    st.session_state["relacionamentos_comparativo"] = {}
+                    st.rerun()
+        else:
+            st.info("Não há itens pendentes para relacionamento manual neste momento.")
+
+        st.markdown("### 3. Resultado do comparativo")
+        comparativo = montar_comparativo_pedidos(
+            df_unica,
+            df_fornecedor,
+            mapa_unica,
+            mapa_fornecedor,
+            st.session_state.get("relacionamentos_comparativo", {}),
+        )
         st.success(f"Comparativo gerado com {len(comparativo)} linha(s).")
 
         c1, c2, c3, c4 = st.columns(4)
@@ -2417,12 +2589,15 @@ def render_pagina_comparativo_pedidos():
         view = comparativo.copy()
         if termo:
             filtro = pd.Series(False, index=view.index)
-            for col in ["Código Fábrica Única", "Descrição Única", "Código Fábrica Fornecedor", "Descrição Fornecedor", "Status"]:
-                filtro = filtro | view[col].astype(str).str.lower().str.contains(termo, na=False)
+            for col in ["Código Única", "Descrição Única", "Código Fornecedor", "Descrição Fornecedor", "Status", "Método"]:
+                if col in view.columns:
+                    filtro = filtro | view[col].astype(str).str.lower().str.contains(termo, na=False)
             view = view[filtro].copy()
 
+        colunas_ocultar = ["Chave Única", "Chave Fornecedor"]
+        view_exibicao = view.drop(columns=colunas_ocultar, errors="ignore")
         st.dataframe(
-            view.style.apply(colorir_comparativo_pedidos, axis=1).format(formatadores_para_tabela(view)),
+            view_exibicao.style.apply(colorir_comparativo_pedidos, axis=1).format(formatadores_para_tabela(view_exibicao)),
             use_container_width=True,
             hide_index=True,
             height=620,
@@ -2430,7 +2605,7 @@ def render_pagina_comparativo_pedidos():
 
         st.download_button(
             "Baixar comparativo em Excel",
-            gerar_excel_comparativo_pedidos(comparativo),
+            gerar_excel_comparativo_pedidos(comparativo.drop(columns=colunas_ocultar, errors="ignore")),
             "comparativo_pedidos.xlsx",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary",
