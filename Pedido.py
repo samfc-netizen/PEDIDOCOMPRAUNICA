@@ -2340,7 +2340,16 @@ def _aplicar_relacionamentos_manuais(unica, fornecedor, relacionamentos):
 
 
 def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw, mapa_unica=None, mapa_fornecedor=None, relacionamentos_manuais=None):
-    unica = agregar_pedido_comparativo(normalizar_pedido_comparativo(df_unica_raw, "Única", mapa_unica))
+    unica_normalizada = normalizar_pedido_comparativo(df_unica_raw, "Única", mapa_unica)
+
+    # Regra do comparativo: itens com PEDIDO FINAL / quantidade da Única igual a zero
+    # não entram na base de comparação. Isso evita apontar divergência de itens que
+    # foram carregados na planilha, mas não foram efetivamente pedidos.
+    if not unica_normalizada.empty and "quantidade" in unica_normalizada.columns:
+        unica_normalizada["quantidade"] = pd.to_numeric(unica_normalizada["quantidade"], errors="coerce").fillna(0)
+        unica_normalizada = unica_normalizada[unica_normalizada["quantidade"] > 0].copy()
+
+    unica = agregar_pedido_comparativo(unica_normalizada)
     fornecedor = agregar_pedido_comparativo(normalizar_pedido_comparativo(df_fornecedor_raw, "Fornecedor", mapa_fornecedor))
     fornecedor = _aplicar_relacionamentos_manuais(unica, fornecedor, relacionamentos_manuais)
 
@@ -2390,13 +2399,22 @@ def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw, mapa_unica=None,
                 "Valor Fornecedor": 0,
                 "Diferença Qtd": -float(row.get("quantidade", 0) or 0),
                 "Diferença Preço": -float(row.get("preco_unitario", 0) or 0),
+                "Diferença Preço %": -100.0 if float(row.get("preco_unitario", 0) or 0) > 0 else 0.0,
                 "Diferença Valor": -float(row.get("valor_total", 0) or 0),
             })
             continue
 
-        dif_qtd = float(match.get("quantidade", 0) or 0) - float(row.get("quantidade", 0) or 0)
-        dif_preco = float(match.get("preco_unitario", 0) or 0) - float(row.get("preco_unitario", 0) or 0)
-        dif_valor = float(match.get("valor_total", 0) or 0) - float(row.get("valor_total", 0) or 0)
+        qtd_unica = float(row.get("quantidade", 0) or 0)
+        preco_unica = float(row.get("preco_unitario", 0) or 0)
+        valor_unica = float(row.get("valor_total", 0) or 0)
+        qtd_fornecedor = float(match.get("quantidade", 0) or 0)
+        preco_fornecedor = float(match.get("preco_unitario", 0) or 0)
+        valor_fornecedor = float(match.get("valor_total", 0) or 0)
+
+        dif_qtd = qtd_fornecedor - qtd_unica
+        dif_preco = preco_fornecedor - preco_unica
+        dif_preco_pct = (dif_preco / preco_unica * 100) if abs(preco_unica) > 0.000001 else (100.0 if abs(preco_fornecedor) > 0.000001 else 0.0)
+        dif_valor = valor_fornecedor - valor_unica
         status = "OK" if abs(dif_qtd) < 0.0001 and abs(dif_preco) < 0.01 else "Divergente"
         linhas.append({
             "Status": status,
@@ -2415,6 +2433,7 @@ def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw, mapa_unica=None,
             "Valor Fornecedor": match.get("valor_total", 0),
             "Diferença Qtd": dif_qtd,
             "Diferença Preço": dif_preco,
+            "Diferença Preço %": dif_preco_pct,
             "Diferença Valor": dif_valor,
         })
 
@@ -2437,10 +2456,68 @@ def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw, mapa_unica=None,
             "Valor Fornecedor": row.get("valor_total", 0),
             "Diferença Qtd": row.get("quantidade", 0),
             "Diferença Preço": row.get("preco_unitario", 0),
+            "Diferença Preço %": 100.0 if float(row.get("preco_unitario", 0) or 0) > 0 else 0.0,
             "Diferença Valor": row.get("valor_total", 0),
         })
 
     return pd.DataFrame(linhas)
+
+
+def gerar_texto_divergencias_comparativo(df_comparativo):
+    if df_comparativo is None or df_comparativo.empty:
+        return "Em relação às quantidades, não houve divergências.", "Em relação aos preços, não houve divergências."
+
+    df = df_comparativo.copy()
+    for col in ["Qtd Única", "Qtd Fornecedor", "Preço Única", "Preço Fornecedor", "Diferença Qtd", "Diferença Preço", "Diferença Preço %"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    diverg_qtd = df[(df["Status"].isin(["Divergente", "Somente fornecedor", "Não encontrado no fornecedor"])) & (df["Diferença Qtd"].abs() > 0.0001)].copy()
+    diverg_preco = df[(df["Status"].isin(["Divergente", "Somente fornecedor", "Não encontrado no fornecedor"])) & (df["Diferença Preço"].abs() > 0.01)].copy()
+
+    def nome_item(row):
+        codigo = str(row.get("Código Única") or row.get("Código Fornecedor") or "").strip()
+        desc = str(row.get("Descrição Única") or row.get("Descrição Fornecedor") or "").strip()
+        if codigo and desc:
+            return f"{codigo} - {desc}"
+        return codigo or desc or "item sem código"
+
+    if diverg_qtd.empty:
+        texto_qtd = "Em relação às quantidades, não houve divergências."
+    else:
+        partes = []
+        for _, r in diverg_qtd.head(80).iterrows():
+            status = str(r.get("Status", ""))
+            item = nome_item(r)
+            if status == "Somente fornecedor":
+                partes.append(f"{item}: consta no fornecedor com {format_num_br(r.get('Qtd Fornecedor', 0), 1)} unidade(s), mas não consta no Pedido da Única.")
+            elif status == "Não encontrado no fornecedor":
+                partes.append(f"{item}: consta no Pedido da Única com {format_num_br(r.get('Qtd Única', 0), 1)} unidade(s), mas não foi encontrado no fornecedor.")
+            else:
+                partes.append(f"{item}: Única pediu {format_num_br(r.get('Qtd Única', 0), 1)} e fornecedor informou {format_num_br(r.get('Qtd Fornecedor', 0), 1)}; diferença de {format_num_br(r.get('Diferença Qtd', 0), 1)} unidade(s).")
+        texto_qtd = "Em relação às quantidades houve essa divergência: " + " ".join(partes)
+        if len(diverg_qtd) > 80:
+            texto_qtd += f" Mais {len(diverg_qtd) - 80} divergência(s) não foram listadas neste texto."
+
+    if diverg_preco.empty:
+        texto_preco = "Em relação aos preços, não houve divergências."
+    else:
+        partes = []
+        for _, r in diverg_preco.head(80).iterrows():
+            status = str(r.get("Status", ""))
+            item = nome_item(r)
+            pct = format_num_br(r.get("Diferença Preço %", 0), 2)
+            if status == "Somente fornecedor":
+                partes.append(f"{item}: consta somente no fornecedor com preço {format_moeda_br(r.get('Preço Fornecedor', 0))}.")
+            elif status == "Não encontrado no fornecedor":
+                partes.append(f"{item}: consta somente na Única com preço {format_moeda_br(r.get('Preço Única', 0))}.")
+            else:
+                partes.append(f"{item}: preço Única {format_moeda_br(r.get('Preço Única', 0))} e preço fornecedor {format_moeda_br(r.get('Preço Fornecedor', 0))}; diferença de {format_moeda_br(r.get('Diferença Preço', 0))} ({pct}%).")
+        texto_preco = "Em relação aos preços houve essas divergências: " + " ".join(partes)
+        if len(diverg_preco) > 80:
+            texto_preco += f" Mais {len(diverg_preco) - 80} divergência(s) não foram listadas neste texto."
+
+    return texto_qtd, texto_preco
 
 def colorir_comparativo_pedidos(row):
     status = str(row.get("Status", ""))
@@ -2468,6 +2545,14 @@ def gerar_excel_comparativo_pedidos(df_comparativo):
         letter = ws.cell(row=1, column=idx).column_letter
         if "Descrição" in col:
             ws.column_dimensions[letter].width = 42
+        elif "%" in col:
+            ws.column_dimensions[letter].width = 16
+            for cell in ws[letter][1:]:
+                cell.number_format = '0.00%'
+                try:
+                    cell.value = float(cell.value or 0) / 100
+                except Exception:
+                    pass
         elif "Preço" in col or "Valor" in col:
             ws.column_dimensions[letter].width = 16
             for cell in ws[letter][1:]:
@@ -2584,6 +2669,11 @@ def render_pagina_comparativo_pedidos():
         c2.metric("Divergentes", int((comparativo["Status"] == "Divergente").sum()))
         c3.metric("Não encontrados", int((comparativo["Status"] == "Não encontrado no fornecedor").sum()))
         c4.metric("Somente fornecedor", int((comparativo["Status"] == "Somente fornecedor").sum()))
+
+        texto_qtd, texto_preco = gerar_texto_divergencias_comparativo(comparativo)
+        with st.expander("Texto automático das divergências", expanded=True):
+            st.text_area("Divergências de quantidade", texto_qtd, height=160, key="texto_diverg_qtd")
+            st.text_area("Divergências de preço", texto_preco, height=160, key="texto_diverg_preco")
 
         termo = st.text_input("Pesquisar no comparativo", key="busca_comparativo_pedidos").strip().lower()
         view = comparativo.copy()
