@@ -2199,7 +2199,7 @@ def _mapear_colunas_comparativo(df, prefixo, origem):
 
     c1, c2 = st.columns(2)
     with c1:
-        col_codigo = st.selectbox("Coluna de relacionamento/código", op_opc, index=idx(op_opc, default_codigo), key=f"{prefixo}_codigo")
+        col_codigo = st.selectbox("Coluna de Código de Fábrica / relacionamento", op_opc, index=idx(op_opc, default_codigo), key=f"{prefixo}_codigo")
         col_desc = st.selectbox("Coluna de descrição", op_opc, index=idx(op_opc, default_desc), key=f"{prefixo}_desc")
     with c2:
         col_qtd = st.selectbox("Coluna de quantidade", op_opc, index=idx(op_opc, default_qtd), key=f"{prefixo}_qtd")
@@ -2265,8 +2265,8 @@ def normalizar_pedido_comparativo(df, origem, mapa_colunas=None):
         col_total = col_total or "__total_inferido"
 
     faltantes = []
-    if not col_fabrica and not col_descricao:
-        faltantes.append("código ou descrição")
+    if not col_fabrica:
+        faltantes.append("Código de Fábrica / relacionamento")
     if not col_qtd:
         faltantes.append("quantidade")
     if faltantes:
@@ -2283,16 +2283,23 @@ def normalizar_pedido_comparativo(df, origem, mapa_colunas=None):
     out.loc[(out["valor_total"] <= 0) & (out["preco_unitario"] > 0), "valor_total"] = out["quantidade"] * out["preco_unitario"]
     out.loc[(out["preco_unitario"] <= 0) & (out["valor_total"] > 0) & (out["quantidade"] > 0), "preco_unitario"] = out["valor_total"] / out["quantidade"]
     out["descricao_chave"] = out["descricao"].apply(normalizar_descricao_chave)
+    out["__linha_origem"] = range(len(out))
     out = out[(out["quantidade"] > 0) | (out["preco_unitario"] > 0) | (out["valor_total"] > 0)].copy()
     return out
 
 def agregar_pedido_comparativo(df):
     if df.empty:
         return df.copy()
-    df = df.copy()
+    df = df.copy().reset_index(drop=True)
     df["codigo_fabrica"] = df["codigo_fabrica"].fillna("").astype(str).str.strip()
     df["codigo_fabrica_norm"] = df["codigo_fabrica_norm"].fillna("").astype(str).str.strip()
-    df["chave"] = df["codigo_fabrica_norm"].where(df["codigo_fabrica_norm"] != "", "DESC:" + df["descricao_chave"])
+
+    # Regra principal do comparativo: relacionamento automático SOMENTE por Código de Fábrica.
+    # Itens sem código não são aproximados por descrição; ficam separados e podem ser vinculados manualmente.
+    df["chave"] = df.apply(
+        lambda r: str(r["codigo_fabrica_norm"]) if str(r["codigo_fabrica_norm"]).strip() else f"SEM_CODIGO_{r.name}",
+        axis=1,
+    )
     agg = df.groupby("chave", as_index=False).agg(
         codigo_fabrica=("codigo_fabrica", "first"),
         codigo_fabrica_norm=("codigo_fabrica_norm", "first"),
@@ -2339,7 +2346,6 @@ def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw, mapa_unica=None,
 
     usados_fornecedor = set()
     linhas = []
-    descricoes_fornecedor = fornecedor["descricao_chave"].fillna("").tolist() if not fornecedor.empty else []
 
     for _, row in unica.iterrows():
         match = None
@@ -2347,30 +2353,24 @@ def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw, mapa_unica=None,
         cod_fab = str(row.get("codigo_fabrica", "")).strip()
         cod_fab_norm = str(row.get("codigo_fabrica_norm", "")).strip()
 
+        # 1) Relacionamento manual salvo pelo usuário.
         candidatos_manual = fornecedor[fornecedor["chave"].astype(str) == str(row.get("chave", ""))]
         candidatos_manual = candidatos_manual[~candidatos_manual.index.isin(usados_fornecedor)]
         if not candidatos_manual.empty:
             match = candidatos_manual.iloc[0]
             usados_fornecedor.add(match.name)
-            metodo = "Relacionamento manual" if str(match.get("chave", "")) == str(row.get("chave", "")) else "Código"
+            metodo = "Relacionamento manual"
 
+        # 2) Relacionamento automático SOMENTE por Código de Fábrica normalizado.
         if match is None and cod_fab_norm:
             candidatos = fornecedor[fornecedor["codigo_fabrica_norm"].astype(str).str.strip() == cod_fab_norm]
             candidatos = candidatos[~candidatos.index.isin(usados_fornecedor)]
             if not candidatos.empty:
                 match = candidatos.iloc[0]
                 usados_fornecedor.add(match.name)
-                metodo = "Código"
+                metodo = "Código de Fábrica"
 
-        if match is None and str(row.get("descricao_chave", "")).strip() and descricoes_fornecedor:
-            candidato_desc = difflib.get_close_matches(str(row["descricao_chave"]), descricoes_fornecedor, n=1, cutoff=0.72)
-            if candidato_desc:
-                candidatos = fornecedor[fornecedor["descricao_chave"] == candidato_desc[0]]
-                candidatos = candidatos[~candidatos.index.isin(usados_fornecedor)]
-                if not candidatos.empty:
-                    match = candidatos.iloc[0]
-                    usados_fornecedor.add(match.name)
-                    metodo = "Descrição aproximada"
+        # Não usa descrição aproximada/fuzzy para evitar comparação de produtos parecidos.
 
         if match is None:
             linhas.append({
@@ -2486,7 +2486,7 @@ def gerar_excel_comparativo_pedidos(df_comparativo):
 
 def render_pagina_comparativo_pedidos():
     st.markdown('<div class="section-title">Comparativo de Pedidos</div>', unsafe_allow_html=True)
-    st.caption("Novo modelo: o sistema lê os arquivos e o usuário escolhe quais colunas representam código, descrição, quantidade e valor. Isso permite comparar layouts diferentes de fornecedores sem alterar o código.")
+    st.caption("Novo modelo: o sistema compara somente pelo Código de Fábrica. A descrição fica apenas para conferência visual e não é usada para vínculo automático, evitando relacionamentos errados.")
 
     if "relacionamentos_comparativo" not in st.session_state:
         st.session_state["relacionamentos_comparativo"] = {}
@@ -2537,7 +2537,7 @@ def render_pagina_comparativo_pedidos():
 
         if not nao_encontrados.empty and not somente_fornecedor.empty:
             with st.expander("Relacionar manualmente itens não encontrados", expanded=True):
-                st.caption("Escolha qual item do fornecedor corresponde ao item da Única. Depois clique em aplicar para refazer o comparativo.")
+                st.caption("O vínculo automático é feito apenas por Código de Fábrica. Use esta tela somente para relacionar manualmente códigos que não bateram entre os arquivos.")
                 opcoes_fornecedor = {"-- Não relacionar --": ""}
                 for _, r in somente_fornecedor.iterrows():
                     label = f'{str(r.get("Código Fornecedor", "")).strip()} | {str(r.get("Descrição Fornecedor", "")).strip()} | Qtd {format_num_br(r.get("Qtd Fornecedor", 0), 1)} | R$ {format_num_br(r.get("Preço Fornecedor", 0), 2)}'
