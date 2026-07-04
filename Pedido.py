@@ -17,12 +17,10 @@ except Exception:
 
 try:
     from google.oauth2 import service_account
-    from google.oauth2.credentials import Credentials as UserCredentials
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaIoBaseUpload
 except Exception:
     service_account = None
-    UserCredentials = None
     build = None
     MediaIoBaseUpload = None
 
@@ -50,7 +48,7 @@ CODIGO_UNICA = "009"
 MESES_PADRAO = ["01/2026", "02/2026", "03/2026", "04/2026"]
 MESES = MESES_PADRAO.copy()
 
-GOOGLE_DRIVE_ROOT_FOLDER_ID = "1PqWXzphyeU_Q5Wc7UDYeZUzFA4kKZL-H"
+GOOGLE_DRIVE_ROOT_FOLDER_ID = "1k0xYXor2qeDXRGQeeVhu8r9-ufqd4QkW"
 GOOGLE_SUBPASTA_PEDIDOS = "Pedidos Editaveis"
 GOOGLE_SUBPASTA_FINAIS = "Arquivos Finais"
 GOOGLE_PLANILHA_CONTROLE = "Controle de Pedidos - Dauto"
@@ -880,15 +878,14 @@ def normalizar_cadastro_produtos_df(df):
 
 @st.cache_data(show_spinner="Lendo cadastro do Google Sheets...", ttl=120)
 def ler_cadastro_produtos_google_cached(_cache_key):
-    _, sheets_service, _, auth_mode = google_get_services()
+    _, sheets_service, _ = google_get_services()
     recursos = google_get_resources()
     df_raw = google_read_df(sheets_service, recursos["cadastro_id"], "Cadastro")
     return normalizar_cadastro_produtos_df(df_raw)
 
 
 def ler_cadastro_produtos_google():
-    oauth_json = google_oauth_user_json()
-    info_json = oauth_json or google_service_account_json()
+    info_json = google_service_account_json()
     if not info_json:
         return pd.DataFrame()
     return ler_cadastro_produtos_google_cached(str(hash(info_json)))
@@ -1249,30 +1246,23 @@ def gerar_csv(df):
 # =========================================================
 
 def google_configurado():
-    if build is None or MediaIoBaseUpload is None:
+    if service_account is None or build is None or MediaIoBaseUpload is None:
         return False
     try:
-        return (
-            "google_oauth_user" in st.secrets
-            or "GOOGLE_OAUTH_USER_JSON" in st.secrets
-            or "google_service_account" in st.secrets
-            or "GOOGLE_SERVICE_ACCOUNT_JSON" in st.secrets
-        )
+        return "google_service_account" in st.secrets or "GOOGLE_SERVICE_ACCOUNT_JSON" in st.secrets
     except Exception:
         return False
 
 
 def google_mensagem_configuracao():
-    if build is None or MediaIoBaseUpload is None:
+    if service_account is None or build is None or MediaIoBaseUpload is None:
         return (
             "Instale as dependencias do Google no ambiente: "
             "google-api-python-client, google-auth e google-auth-httplib2."
         )
     return (
-        "Configure a autenticação Google em st.secrets. Preferencial: [google_oauth_user] "
-        "com client_id, client_secret e refresh_token da conta dona da pasta. "
-        "Conta de serviço pode ler/escrever arquivos existentes, mas normalmente não consegue criar "
-        "Google Sheets em Meu Drive sem gerar erro de cota/permissão."
+        "Configure a conta de servico em st.secrets e compartilhe a pasta do Drive "
+        "com o e-mail dessa conta como Editor."
     )
 
 
@@ -1291,76 +1281,25 @@ def google_service_account_json():
     return ""
 
 
-def google_oauth_user_json():
-    """
-    Autenticação OAuth da conta dona da pasta, ex.: gdautotintas@gmail.com.
-    Use este formato nos Secrets do Streamlit:
-
-    [google_oauth_user]
-    client_id = "..."
-    client_secret = "..."
-    refresh_token = "..."
-    token_uri = "https://oauth2.googleapis.com/token"
-
-    Esse modo cria Google Sheets usando a cota/permissão da conta dona,
-    evitando os erros storageQuotaExceeded e caller does not have permission
-    típicos de conta de serviço em Meu Drive.
-    """
-    try:
-        if "google_oauth_user" in st.secrets:
-            return json.dumps(dict(st.secrets["google_oauth_user"]), sort_keys=True)
-        if "GOOGLE_OAUTH_USER_JSON" in st.secrets:
-            raw = st.secrets["GOOGLE_OAUTH_USER_JSON"]
-            if isinstance(raw, str):
-                json.loads(raw)
-                return raw
-            return json.dumps(dict(raw), sort_keys=True)
-    except Exception:
-        return ""
-    return ""
-
-
 @st.cache_resource(show_spinner=False)
-def google_get_services_cached(auth_mode, info_json):
+def google_get_services_cached(info_json):
     info = json.loads(info_json)
     scopes = [
         "https://www.googleapis.com/auth/drive",
         "https://www.googleapis.com/auth/spreadsheets",
     ]
-
-    if auth_mode == "oauth_user":
-        if UserCredentials is None:
-            raise RuntimeError("Biblioteca google-auth sem suporte a OAuth user credentials.")
-        credentials = UserCredentials(
-            token=info.get("token"),
-            refresh_token=info.get("refresh_token"),
-            token_uri=info.get("token_uri", "https://oauth2.googleapis.com/token"),
-            client_id=info.get("client_id"),
-            client_secret=info.get("client_secret"),
-            scopes=scopes,
-        )
-        client_email = info.get("user_email") or info.get("email") or "oauth_user"
-    else:
-        if service_account is None:
-            raise RuntimeError("Biblioteca google-auth sem suporte a service_account.")
-        credentials = service_account.Credentials.from_service_account_info(info, scopes=scopes)
-        client_email = info.get("client_email", "service_account")
-
+    credentials = service_account.Credentials.from_service_account_info(info, scopes=scopes)
     drive_service = build("drive", "v3", credentials=credentials, cache_discovery=False)
     sheets_service = build("sheets", "v4", credentials=credentials, cache_discovery=False)
-    return drive_service, sheets_service, client_email, auth_mode
+    return drive_service, sheets_service, info.get("client_email", "")
 
 
 def google_get_services():
-    oauth_json = google_oauth_user_json()
-    if oauth_json:
-        return google_get_services_cached("oauth_user", oauth_json)
-
     info_json = google_service_account_json()
-    if info_json:
-        return google_get_services_cached("service_account", info_json)
+    if not info_json:
+        raise RuntimeError(google_mensagem_configuracao())
+    return google_get_services_cached(info_json)
 
-    raise RuntimeError(google_mensagem_configuracao())
 
 def google_link_pasta(folder_id):
     return f"https://drive.google.com/drive/folders/{folder_id}"
@@ -1418,75 +1357,17 @@ def google_ensure_folder(drive_service, name, parent_id):
     return criado["id"]
 
 
-def google_get_file_parents(drive_service, file_id):
-    try:
-        meta = drive_service.files().get(
-            fileId=file_id,
-            fields="parents",
-            supportsAllDrives=True,
-        ).execute()
-        return ",".join(meta.get("parents", []) or [])
-    except Exception:
-        return ""
-
-
-def google_mover_arquivo_para_pasta(drive_service, file_id, parent_id):
-    """
-    Move o arquivo para a pasta raiz configurada.
-
-    Importante:
-    - A planilha é criada pela Google Sheets API.
-    - Depois ela é vinculada explicitamente à pasta do Drive informada.
-    - Isso evita a criação solta na raiz da conta de serviço.
-    """
-    parents_atuais = google_get_file_parents(drive_service, file_id)
-    drive_service.files().update(
-        fileId=file_id,
-        addParents=parent_id,
-        removeParents=parents_atuais or None,
-        fields="id, parents, webViewLink",
-        supportsAllDrives=True,
-    ).execute()
-
-
-def google_ensure_spreadsheet(drive_service, sheets_service, name, parent_id):
-    """
-    Garante uma planilha Google Sheets dentro da pasta informada.
-
-    Correção aplicada:
-    - Antes, a planilha era criada diretamente pela Drive API com mimeType de Sheets.
-    - Em algumas contas de serviço isso causa erro 403 storageQuotaExceeded.
-    - Agora a planilha é criada pela Sheets API e imediatamente movida para a pasta.
-    """
+def google_ensure_spreadsheet(drive_service, name, parent_id):
     mime = "application/vnd.google-apps.spreadsheet"
     existente = google_find_file(drive_service, name, parent_id, mime)
     if existente:
         return existente["id"]
-
-    try:
-        criado = sheets_service.spreadsheets().create(
-            body={"properties": {"title": name}},
-            fields="spreadsheetId",
-        ).execute()
-        spreadsheet_id = criado["spreadsheetId"]
-        google_mover_arquivo_para_pasta(drive_service, spreadsheet_id, parent_id)
-        return spreadsheet_id
-    except Exception as e:
-        erro = str(e)
-        if (
-            "storageQuotaExceeded" in erro
-            or "Drive storage quota" in erro
-            or "The caller does not have permission" in erro
-            or "caller does not have permission" in erro
-        ):
-            raise RuntimeError(
-                "O Google bloqueou a criação da planilha com a autenticação atual. "
-                "Para criar Google Sheets automaticamente dentro de uma pasta de Meu Drive, "
-                "use OAuth da conta dona da pasta em [google_oauth_user] nos Secrets do Streamlit. "
-                "Conta de serviço funciona para acessar pastas compartilhadas, mas costuma falhar ao criar "
-                "arquivos nativos do Google Sheets em Meu Drive. Erro original: " + erro
-            )
-        raise
+    criado = drive_service.files().create(
+        body={"name": name, "mimeType": mime, "parents": [parent_id]},
+        fields="id",
+        supportsAllDrives=True,
+    ).execute()
+    return criado["id"]
 
 
 def google_ensure_sheet_tab(sheets_service, spreadsheet_id, sheet_name):
@@ -1573,11 +1454,11 @@ def google_ensure_headers(sheets_service, spreadsheet_id, sheet_name, columns):
 
 @st.cache_data(show_spinner=False, ttl=60)
 def google_get_resources_cached(_cache_key):
-    drive_service, sheets_service, client_email, auth_mode = google_get_services()
+    drive_service, sheets_service, client_email = google_get_services()
     pedidos_folder_id = google_ensure_folder(drive_service, GOOGLE_SUBPASTA_PEDIDOS, GOOGLE_DRIVE_ROOT_FOLDER_ID)
     finais_folder_id = google_ensure_folder(drive_service, GOOGLE_SUBPASTA_FINAIS, GOOGLE_DRIVE_ROOT_FOLDER_ID)
-    controle_id = google_ensure_spreadsheet(drive_service, sheets_service, GOOGLE_PLANILHA_CONTROLE, GOOGLE_DRIVE_ROOT_FOLDER_ID)
-    cadastro_id = google_ensure_spreadsheet(drive_service, sheets_service, GOOGLE_PLANILHA_CADASTRO, GOOGLE_DRIVE_ROOT_FOLDER_ID)
+    controle_id = google_ensure_spreadsheet(drive_service, GOOGLE_PLANILHA_CONTROLE, GOOGLE_DRIVE_ROOT_FOLDER_ID)
+    cadastro_id = google_ensure_spreadsheet(drive_service, GOOGLE_PLANILHA_CADASTRO, GOOGLE_DRIVE_ROOT_FOLDER_ID)
     google_ensure_headers(sheets_service, controle_id, "Pedidos", GOOGLE_PEDIDOS_COLUNAS)
     google_ensure_headers(sheets_service, controle_id, "Acompanhamento", GOOGLE_ACOMPANHAMENTO_COLUNAS)
     google_ensure_headers(sheets_service, cadastro_id, "Cadastro", ["codigo", "descricao", "codigo_fabrica", "embalagem"])
@@ -1596,20 +1477,19 @@ def google_get_resources_cached(_cache_key):
 
 
 def google_get_resources():
-    oauth_json = google_oauth_user_json()
-    info_json = oauth_json or google_service_account_json()
+    info_json = google_service_account_json()
     if not info_json:
         raise RuntimeError(google_mensagem_configuracao())
-    return google_get_resources_cached(str(hash(info_json)))
+    return google_get_resources_cached(f"{hash(info_json)}:{GOOGLE_DRIVE_ROOT_FOLDER_ID}")
 
 
 def google_criar_planilha_pedido(nome_pedido, fornecedor, pedido_df, criado_por=""):
-    drive_service, sheets_service, _, auth_mode = google_get_services()
+    drive_service, sheets_service, _ = google_get_services()
     recursos = google_get_resources()
     nome_limpo = google_safe_name(nome_pedido)
     fornecedor_limpo = google_safe_name(fornecedor)
     titulo = f"{datetime.now().strftime('%Y-%m-%d')} - {fornecedor_limpo} - {nome_limpo}"
-    spreadsheet_id = google_ensure_spreadsheet(drive_service, sheets_service, titulo, recursos["pedidos_folder_id"])
+    spreadsheet_id = google_ensure_spreadsheet(drive_service, titulo, recursos["pedidos_folder_id"])
 
     df_export = pedido_df.copy()
     if "zx" not in df_export.columns:
@@ -1634,7 +1514,7 @@ def google_criar_planilha_pedido(nome_pedido, fornecedor, pedido_df, criado_por=
 
 
 def google_listar_pedidos():
-    _, sheets_service, _, auth_mode = google_get_services()
+    _, sheets_service, _ = google_get_services()
     recursos = google_get_resources()
     df = google_read_df(sheets_service, recursos["controle_id"], "Pedidos")
     for col in GOOGLE_PEDIDOS_COLUNAS:
@@ -1644,7 +1524,7 @@ def google_listar_pedidos():
 
 
 def google_salvar_pedidos_controle(df):
-    _, sheets_service, _, auth_mode = google_get_services()
+    _, sheets_service, _ = google_get_services()
     recursos = google_get_resources()
     df = df.copy()
     for col in GOOGLE_PEDIDOS_COLUNAS:
@@ -1675,14 +1555,14 @@ def google_atualizar_status_pedido(pedido_id, status, usuario="", observacao="",
 
 
 def google_ler_pedido_drive(spreadsheet_id):
-    _, sheets_service, _, auth_mode = google_get_services()
+    _, sheets_service, _ = google_get_services()
     df = google_read_df(sheets_service, spreadsheet_id, "Pedido")
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
 
 def google_upload_bytes(nome_arquivo, dados, mime_type, folder_id):
-    drive_service, _, _, auth_mode = google_get_services()
+    drive_service, _, _ = google_get_services()
     media = MediaIoBaseUpload(BytesIO(dados), mimetype=mime_type, resumable=False)
     criado = drive_service.files().create(
         body={"name": nome_arquivo, "parents": [folder_id]},
@@ -1694,7 +1574,7 @@ def google_upload_bytes(nome_arquivo, dados, mime_type, folder_id):
 
 
 def google_registrar_acompanhamento(pedido_info):
-    _, sheets_service, _, auth_mode = google_get_services()
+    _, sheets_service, _ = google_get_services()
     recursos = google_get_resources()
     data_atual = datetime.now().strftime("%d/%m/%Y")
     mes_atual = datetime.now().strftime("%m/%Y")
@@ -4295,7 +4175,7 @@ token_uri = "https://oauth2.googleapis.com/token"
             st.rerun()
 
         try:
-            _, sheets_service, _, auth_mode = google_get_services()
+            _, sheets_service, _ = google_get_services()
             acomp = google_read_df(sheets_service, recursos["controle_id"], "Acompanhamento")
             if not acomp.empty:
                 st.markdown("### Acompanhamento mensal")
