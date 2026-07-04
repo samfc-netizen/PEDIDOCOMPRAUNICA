@@ -1,6 +1,7 @@
 import re
 import math
 import difflib
+import json
 import unicodedata
 from io import BytesIO
 from datetime import datetime, date
@@ -13,6 +14,15 @@ try:
     from openpyxl import Workbook
 except Exception:
     Workbook = None
+
+try:
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaIoBaseUpload
+except Exception:
+    service_account = None
+    build = None
+    MediaIoBaseUpload = None
 
 st.set_page_config(page_title="Análise de Giro e Pedido de Compra", layout="wide", page_icon="📊")
 
@@ -37,6 +47,21 @@ CODIGOS_LOJAS = ["004", "006", "012", "013", "014", "015", "016", "022", "024"]
 CODIGO_UNICA = "009"
 MESES_PADRAO = ["01/2026", "02/2026", "03/2026", "04/2026"]
 MESES = MESES_PADRAO.copy()
+
+GOOGLE_DRIVE_ROOT_FOLDER_ID = "1PqWXzphyeU_Q5Wc7UDYeZUzFA4kKZL-H"
+GOOGLE_SUBPASTA_PEDIDOS = "Pedidos Editaveis"
+GOOGLE_SUBPASTA_FINAIS = "Arquivos Finais"
+GOOGLE_PLANILHA_CONTROLE = "Controle de Pedidos - Dauto"
+GOOGLE_PLANILHA_CADASTRO = "Cadastro de Produtos - Dauto"
+GOOGLE_PEDIDOS_COLUNAS = [
+    "id_pedido", "nome_pedido", "fornecedor", "status", "valor",
+    "criado_em", "criado_por", "aprovado_em", "aprovado_por",
+    "link_pedido", "spreadsheet_id", "link_autcom", "link_fornecedor", "observacao",
+]
+GOOGLE_ACOMPANHAMENTO_COLUNAS = [
+    "data", "mes", "fornecedor", "nome_pedido", "valor",
+    "status", "link_pedido", "link_autcom", "link_fornecedor",
+]
 
 # =========================================================
 # FUNÇÕES AUXILIARES
@@ -790,9 +815,84 @@ def ler_cadastro_produtos_csv(uploaded_file):
     return cadastro
 
 
-def aplicar_cadastro(df_giro, cadastro_csv):
-    cadastro = ler_cadastro_produtos_csv(cadastro_csv)
-    if cadastro.empty:
+def normalizar_cadastro_produtos_df(df):
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    colunas_norm = {normalizar_coluna(c): c for c in df.columns}
+
+    def encontrar(candidatos):
+        for candidato in candidatos:
+            candidato_norm = normalizar_coluna(candidato)
+            if candidato_norm in colunas_norm:
+                return colunas_norm[candidato_norm]
+        return None
+
+    col_codigo = encontrar([
+        "CODIGO", "CÓDIGO", "COD.ITEM", "CÓD.ITEM", "COD ITEM", "CÓD ITEM",
+        "CODIGO ITEM", "CÓDIGO ITEM", "codigo",
+    ])
+    col_descricao = encontrar([
+        "DESCRICAO DO ITEM", "DESCRIÇÃO DO ITEM", "DESCRICAO", "DESCRIÇÃO",
+        "DESC ITEM", "DESCRICAO ITEM", "DESCRIÇÃO ITEM", "descricao",
+    ])
+    col_fabrica = encontrar([
+        "COD. FABRICA", "CÓD. FABRICA", "COD. FÁBRICA", "CÓD. FÁBRICA",
+        "CODIGO DE FABRICA", "CÓDIGO DE FÁBRICA", "NOVO CODIGO DE FABRICA",
+        "NOVO CÓDIGO DE FÁBRICA", "COD FABRICA", "CÓD FABRICA",
+        "CODIGO FABRICA", "CÓDIGO FÁBRICA", "codigo_fabrica",
+    ])
+    col_embalagem = encontrar([
+        "EMBALAGEM", "EMB", "QTD EMBALAGEM", "QUANTIDADE EMBALAGEM",
+        "QTDE EMBALAGEM", "QTD. EMBALAGEM", "MULTIPLO", "MÚLTIPLO", "embalagem",
+    ])
+
+    if not col_codigo or not col_descricao or not col_fabrica:
+        return pd.DataFrame()
+
+    colunas = [col_codigo, col_descricao, col_fabrica]
+    nomes = ["codigo", "descricao_cadastro", "codigo_fabrica_cadastro"]
+    if col_embalagem:
+        colunas.append(col_embalagem)
+        nomes.append("embalagem")
+
+    cadastro = df[colunas].copy()
+    cadastro.columns = nomes
+    cadastro["codigo"] = cadastro["codigo"].astype(str).str.extract(r"(\d+)")[0].str.zfill(5)
+    cadastro["descricao_cadastro"] = cadastro["descricao_cadastro"].astype(str).str.strip()
+    cadastro["codigo_fabrica_cadastro"] = cadastro["codigo_fabrica_cadastro"].astype(str).str.strip()
+
+    if "embalagem" in cadastro.columns:
+        cadastro["embalagem"] = cadastro["embalagem"].apply(br_to_float)
+        cadastro["embalagem"] = pd.to_numeric(cadastro["embalagem"], errors="coerce").fillna(0).round(0).astype(int)
+    else:
+        cadastro["embalagem"] = 0
+
+    cadastro = cadastro.dropna(subset=["codigo"])
+    cadastro = cadastro[cadastro["codigo"].astype(str).str.lower() != "nan"]
+    cadastro = cadastro.drop_duplicates(subset=["codigo"], keep="first")
+    return cadastro
+
+
+@st.cache_data(show_spinner="Lendo cadastro do Google Sheets...", ttl=120)
+def ler_cadastro_produtos_google_cached(_cache_key):
+    _, sheets_service, _ = google_get_services()
+    recursos = google_get_resources()
+    df_raw = google_read_df(sheets_service, recursos["cadastro_id"], "Cadastro")
+    return normalizar_cadastro_produtos_df(df_raw)
+
+
+def ler_cadastro_produtos_google():
+    info_json = google_service_account_json()
+    if not info_json:
+        return pd.DataFrame()
+    return ler_cadastro_produtos_google_cached(str(hash(info_json)))
+
+
+def aplicar_cadastro_dataframe(df_giro, cadastro):
+    if cadastro is None or cadastro.empty:
         return df_giro
 
     df = df_giro.merge(cadastro, on="codigo", how="left")
@@ -808,7 +908,17 @@ def aplicar_cadastro(df_giro, cadastro_csv):
         & (df["codigo_fabrica_cadastro"].astype(str).str.lower() != "nan"),
         df["codigo_fabrica"],
     )
+    if "embalagem" in df.columns:
+        df["embalagem"] = pd.to_numeric(df["embalagem"], errors="coerce").fillna(0).round(0).astype(int)
     return df.drop(columns=["descricao_cadastro", "codigo_fabrica_cadastro"], errors="ignore")
+
+
+def aplicar_cadastro(df_giro, cadastro_csv):
+    cadastro = ler_cadastro_produtos_csv(cadastro_csv)
+    if cadastro.empty:
+        return df_giro
+
+    return aplicar_cadastro_dataframe(df_giro, cadastro)
 
 # =========================================================
 # ÚLTIMA COMPRA / PREÇO
@@ -1129,6 +1239,389 @@ def render_tabela_interativa_colorida(df, height=650):
 
 def gerar_csv(df):
     return df.to_csv(index=False, sep=";", decimal=",", encoding="utf-8-sig").encode("utf-8-sig")
+
+
+# =========================================================
+# INTEGRACAO GOOGLE DRIVE / SHEETS
+# =========================================================
+
+def google_configurado():
+    if service_account is None or build is None or MediaIoBaseUpload is None:
+        return False
+    try:
+        return "google_service_account" in st.secrets or "GOOGLE_SERVICE_ACCOUNT_JSON" in st.secrets
+    except Exception:
+        return False
+
+
+def google_mensagem_configuracao():
+    if service_account is None or build is None or MediaIoBaseUpload is None:
+        return (
+            "Instale as dependencias do Google no ambiente: "
+            "google-api-python-client, google-auth e google-auth-httplib2."
+        )
+    return (
+        "Configure a conta de servico em st.secrets e compartilhe a pasta do Drive "
+        "com o e-mail dessa conta como Editor."
+    )
+
+
+def google_service_account_json():
+    try:
+        if "google_service_account" in st.secrets:
+            return json.dumps(dict(st.secrets["google_service_account"]), sort_keys=True)
+        if "GOOGLE_SERVICE_ACCOUNT_JSON" in st.secrets:
+            raw = st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"]
+            if isinstance(raw, str):
+                json.loads(raw)
+                return raw
+            return json.dumps(dict(raw), sort_keys=True)
+    except Exception:
+        return ""
+    return ""
+
+
+@st.cache_resource(show_spinner=False)
+def google_get_services_cached(info_json):
+    info = json.loads(info_json)
+    scopes = [
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/spreadsheets",
+    ]
+    credentials = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+    drive_service = build("drive", "v3", credentials=credentials, cache_discovery=False)
+    sheets_service = build("sheets", "v4", credentials=credentials, cache_discovery=False)
+    return drive_service, sheets_service, info.get("client_email", "")
+
+
+def google_get_services():
+    info_json = google_service_account_json()
+    if not info_json:
+        raise RuntimeError(google_mensagem_configuracao())
+    return google_get_services_cached(info_json)
+
+
+def google_link_pasta(folder_id):
+    return f"https://drive.google.com/drive/folders/{folder_id}"
+
+
+def google_link_planilha(spreadsheet_id):
+    return f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
+
+
+def google_link_arquivo(file_id):
+    return f"https://drive.google.com/file/d/{file_id}/view"
+
+
+def google_safe_name(nome):
+    nome = str(nome or "").strip()
+    nome = re.sub(r"[\\/:*?\"<>|]+", "-", nome)
+    nome = re.sub(r"\s+", " ", nome).strip()
+    return nome or f"Pedido {datetime.now().strftime('%Y-%m-%d %H.%M')}"
+
+
+def google_q_text(value):
+    return str(value).replace("\\", "\\\\").replace("'", "\\'")
+
+
+def google_find_file(drive_service, name, parent_id, mime_type=None):
+    partes = [
+        f"name = '{google_q_text(name)}'",
+        f"'{google_q_text(parent_id)}' in parents",
+        "trashed = false",
+    ]
+    if mime_type:
+        partes.append(f"mimeType = '{google_q_text(mime_type)}'")
+    result = drive_service.files().list(
+        q=" and ".join(partes),
+        spaces="drive",
+        fields="files(id, name, mimeType, webViewLink)",
+        pageSize=10,
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
+    ).execute()
+    files = result.get("files", [])
+    return files[0] if files else None
+
+
+def google_ensure_folder(drive_service, name, parent_id):
+    mime = "application/vnd.google-apps.folder"
+    existente = google_find_file(drive_service, name, parent_id, mime)
+    if existente:
+        return existente["id"]
+    criado = drive_service.files().create(
+        body={"name": name, "mimeType": mime, "parents": [parent_id]},
+        fields="id",
+        supportsAllDrives=True,
+    ).execute()
+    return criado["id"]
+
+
+def google_ensure_spreadsheet(drive_service, name, parent_id):
+    mime = "application/vnd.google-apps.spreadsheet"
+    existente = google_find_file(drive_service, name, parent_id, mime)
+    if existente:
+        return existente["id"]
+    criado = drive_service.files().create(
+        body={"name": name, "mimeType": mime, "parents": [parent_id]},
+        fields="id",
+        supportsAllDrives=True,
+    ).execute()
+    return criado["id"]
+
+
+def google_ensure_sheet_tab(sheets_service, spreadsheet_id, sheet_name):
+    meta = sheets_service.spreadsheets().get(
+        spreadsheetId=spreadsheet_id,
+        fields="sheets(properties(title))",
+    ).execute()
+    existentes = {s["properties"]["title"] for s in meta.get("sheets", [])}
+    if sheet_name in existentes:
+        return
+    sheets_service.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={"requests": [{"addSheet": {"properties": {"title": sheet_name}}}]},
+    ).execute()
+
+
+def google_prepare_value(value):
+    if pd.isna(value):
+        return ""
+    if isinstance(value, (datetime, date, pd.Timestamp)):
+        return format_data_br(value)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return str(value)
+
+
+def google_df_to_values(df):
+    df = df.copy() if df is not None else pd.DataFrame()
+    return [list(df.columns)] + [
+        [google_prepare_value(row.get(col, "")) for col in df.columns]
+        for _, row in df.iterrows()
+    ]
+
+
+def google_write_df(sheets_service, spreadsheet_id, sheet_name, df):
+    google_ensure_sheet_tab(sheets_service, spreadsheet_id, sheet_name)
+    sheets_service.spreadsheets().values().clear(
+        spreadsheetId=spreadsheet_id,
+        range=f"'{sheet_name}'!A:ZZ",
+        body={},
+    ).execute()
+    values = google_df_to_values(df)
+    sheets_service.spreadsheets().values().update(
+        spreadsheetId=spreadsheet_id,
+        range=f"'{sheet_name}'!A1",
+        valueInputOption="USER_ENTERED",
+        body={"values": values},
+    ).execute()
+
+
+def google_read_df(sheets_service, spreadsheet_id, sheet_name=None):
+    range_name = f"'{sheet_name}'!A:ZZ" if sheet_name else "A:ZZ"
+    result = sheets_service.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id,
+        range=range_name,
+    ).execute()
+    values = result.get("values", [])
+    if not values:
+        return pd.DataFrame()
+    header = [str(c).strip() for c in values[0]]
+    rows = values[1:]
+    largura = len(header)
+    rows = [row + [""] * (largura - len(row)) if len(row) < largura else row[:largura] for row in rows]
+    return pd.DataFrame(rows, columns=header)
+
+
+def google_append_rows(sheets_service, spreadsheet_id, sheet_name, rows):
+    google_ensure_sheet_tab(sheets_service, spreadsheet_id, sheet_name)
+    sheets_service.spreadsheets().values().append(
+        spreadsheetId=spreadsheet_id,
+        range=f"'{sheet_name}'!A1",
+        valueInputOption="USER_ENTERED",
+        insertDataOption="INSERT_ROWS",
+        body={"values": rows},
+    ).execute()
+
+
+def google_ensure_headers(sheets_service, spreadsheet_id, sheet_name, columns):
+    google_ensure_sheet_tab(sheets_service, spreadsheet_id, sheet_name)
+    atual = google_read_df(sheets_service, spreadsheet_id, sheet_name)
+    if atual.empty and list(atual.columns) == []:
+        google_write_df(sheets_service, spreadsheet_id, sheet_name, pd.DataFrame(columns=columns))
+
+
+@st.cache_data(show_spinner=False, ttl=60)
+def google_get_resources_cached(_cache_key):
+    drive_service, sheets_service, client_email = google_get_services()
+    pedidos_folder_id = google_ensure_folder(drive_service, GOOGLE_SUBPASTA_PEDIDOS, GOOGLE_DRIVE_ROOT_FOLDER_ID)
+    finais_folder_id = google_ensure_folder(drive_service, GOOGLE_SUBPASTA_FINAIS, GOOGLE_DRIVE_ROOT_FOLDER_ID)
+    controle_id = google_ensure_spreadsheet(drive_service, GOOGLE_PLANILHA_CONTROLE, GOOGLE_DRIVE_ROOT_FOLDER_ID)
+    cadastro_id = google_ensure_spreadsheet(drive_service, GOOGLE_PLANILHA_CADASTRO, GOOGLE_DRIVE_ROOT_FOLDER_ID)
+    google_ensure_headers(sheets_service, controle_id, "Pedidos", GOOGLE_PEDIDOS_COLUNAS)
+    google_ensure_headers(sheets_service, controle_id, "Acompanhamento", GOOGLE_ACOMPANHAMENTO_COLUNAS)
+    google_ensure_headers(sheets_service, cadastro_id, "Cadastro", ["codigo", "descricao", "codigo_fabrica", "embalagem"])
+    return {
+        "client_email": client_email,
+        "pedidos_folder_id": pedidos_folder_id,
+        "finais_folder_id": finais_folder_id,
+        "controle_id": controle_id,
+        "cadastro_id": cadastro_id,
+        "root_link": google_link_pasta(GOOGLE_DRIVE_ROOT_FOLDER_ID),
+        "pedidos_link": google_link_pasta(pedidos_folder_id),
+        "finais_link": google_link_pasta(finais_folder_id),
+        "controle_link": google_link_planilha(controle_id),
+        "cadastro_link": google_link_planilha(cadastro_id),
+    }
+
+
+def google_get_resources():
+    info_json = google_service_account_json()
+    if not info_json:
+        raise RuntimeError(google_mensagem_configuracao())
+    return google_get_resources_cached(str(hash(info_json)))
+
+
+def google_criar_planilha_pedido(nome_pedido, fornecedor, pedido_df, criado_por=""):
+    drive_service, sheets_service, _ = google_get_services()
+    recursos = google_get_resources()
+    nome_limpo = google_safe_name(nome_pedido)
+    fornecedor_limpo = google_safe_name(fornecedor)
+    titulo = f"{datetime.now().strftime('%Y-%m-%d')} - {fornecedor_limpo} - {nome_limpo}"
+    spreadsheet_id = google_ensure_spreadsheet(drive_service, titulo, recursos["pedidos_folder_id"])
+
+    df_export = pedido_df.copy()
+    if "zx" not in df_export.columns:
+        df_export.insert(0, "zx", df_export.get("codigo", ""))
+    google_write_df(sheets_service, spreadsheet_id, "Pedido", df_export)
+    google_write_df(sheets_service, spreadsheet_id, "Aprovacao", pd.DataFrame([{
+        "status": "Em edicao",
+        "aprovado_por": "",
+        "aprovado_em": "",
+        "observacao": "",
+    }]))
+
+    agora = datetime.now().strftime("%d/%m/%Y %H:%M")
+    pedido_id = datetime.now().strftime("%Y%m%d%H%M%S")
+    link = google_link_planilha(spreadsheet_id)
+    valor = totalizar_valor_pedido(df_export)
+    google_append_rows(sheets_service, recursos["controle_id"], "Pedidos", [[
+        pedido_id, nome_limpo, fornecedor_limpo, "Em edicao", round(float(valor or 0), 2),
+        agora, criado_por, "", "", link, spreadsheet_id, "", "", "",
+    ]])
+    return {"pedido_id": pedido_id, "spreadsheet_id": spreadsheet_id, "link": link, "titulo": titulo}
+
+
+def google_listar_pedidos():
+    _, sheets_service, _ = google_get_services()
+    recursos = google_get_resources()
+    df = google_read_df(sheets_service, recursos["controle_id"], "Pedidos")
+    for col in GOOGLE_PEDIDOS_COLUNAS:
+        if col not in df.columns:
+            df[col] = ""
+    return df[GOOGLE_PEDIDOS_COLUNAS]
+
+
+def google_salvar_pedidos_controle(df):
+    _, sheets_service, _ = google_get_services()
+    recursos = google_get_resources()
+    df = df.copy()
+    for col in GOOGLE_PEDIDOS_COLUNAS:
+        if col not in df.columns:
+            df[col] = ""
+    google_write_df(sheets_service, recursos["controle_id"], "Pedidos", df[GOOGLE_PEDIDOS_COLUNAS])
+
+
+def google_atualizar_status_pedido(pedido_id, status, usuario="", observacao="", link_autcom="", link_fornecedor=""):
+    df = google_listar_pedidos()
+    mask = df["id_pedido"].astype(str) == str(pedido_id)
+    if not mask.any():
+        raise ValueError("Pedido nao encontrado no controle.")
+    idx = df[mask].index[0]
+    agora = datetime.now().strftime("%d/%m/%Y %H:%M")
+    df.loc[idx, "status"] = status
+    if status.lower().startswith("aprov"):
+        df.loc[idx, "aprovado_em"] = agora
+        df.loc[idx, "aprovado_por"] = usuario
+    if observacao:
+        df.loc[idx, "observacao"] = observacao
+    if link_autcom:
+        df.loc[idx, "link_autcom"] = link_autcom
+    if link_fornecedor:
+        df.loc[idx, "link_fornecedor"] = link_fornecedor
+    google_salvar_pedidos_controle(df)
+    return df.loc[idx].to_dict()
+
+
+def google_ler_pedido_drive(spreadsheet_id):
+    _, sheets_service, _ = google_get_services()
+    df = google_read_df(sheets_service, spreadsheet_id, "Pedido")
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
+def google_upload_bytes(nome_arquivo, dados, mime_type, folder_id):
+    drive_service, _, _ = google_get_services()
+    media = MediaIoBaseUpload(BytesIO(dados), mimetype=mime_type, resumable=False)
+    criado = drive_service.files().create(
+        body={"name": nome_arquivo, "parents": [folder_id]},
+        media_body=media,
+        fields="id, webViewLink",
+        supportsAllDrives=True,
+    ).execute()
+    return criado.get("webViewLink") or google_link_arquivo(criado["id"])
+
+
+def google_registrar_acompanhamento(pedido_info):
+    _, sheets_service, _ = google_get_services()
+    recursos = google_get_resources()
+    data_atual = datetime.now().strftime("%d/%m/%Y")
+    mes_atual = datetime.now().strftime("%m/%Y")
+    google_append_rows(sheets_service, recursos["controle_id"], "Acompanhamento", [[
+        data_atual,
+        mes_atual,
+        pedido_info.get("fornecedor", ""),
+        pedido_info.get("nome_pedido", ""),
+        pedido_info.get("valor", ""),
+        pedido_info.get("status", ""),
+        pedido_info.get("link_pedido", ""),
+        pedido_info.get("link_autcom", ""),
+        pedido_info.get("link_fornecedor", ""),
+    ]])
+
+
+def google_finalizar_pedido(pedido_id, df_tratamento, usuario=""):
+    recursos = google_get_resources()
+    pedidos = google_listar_pedidos()
+    row = pedidos[pedidos["id_pedido"].astype(str) == str(pedido_id)]
+    if row.empty:
+        raise ValueError("Pedido nao encontrado.")
+    row = row.iloc[0].to_dict()
+    base_nome = google_safe_name(row.get("nome_pedido") or "pedido")
+    autcom_bytes = gerar_excel_autcom_tratamento(df_tratamento)
+    fornecedor_bytes = gerar_excel_fornecedor_tratamento(df_tratamento)
+    link_autcom = google_upload_bytes(
+        f"{base_nome} - importacao autcom.xlsx",
+        autcom_bytes,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        recursos["finais_folder_id"],
+    )
+    link_fornecedor = google_upload_bytes(
+        f"{base_nome} - envio fornecedor.xlsx",
+        fornecedor_bytes,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        recursos["finais_folder_id"],
+    )
+    atualizado = google_atualizar_status_pedido(
+        pedido_id,
+        "Finalizado",
+        usuario=usuario,
+        link_autcom=link_autcom,
+        link_fornecedor=link_fornecedor,
+    )
+    google_registrar_acompanhamento(atualizado)
+    return link_autcom, link_fornecedor
 
 
 def gerar_excel_pedido_editavel(df):
@@ -3612,6 +4105,94 @@ def render_pagina_ruptura_por_marca():
         "text/csv",
     )
 
+def render_pagina_pedidos_drive():
+    st.markdown('<div class="section-title">Pedidos no Google Drive</div>', unsafe_allow_html=True)
+
+    if not google_configurado():
+        st.warning(google_mensagem_configuracao())
+        st.code(
+            """
+[google_service_account]
+type = "service_account"
+project_id = "..."
+private_key_id = "..."
+private_key = "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"
+client_email = "sua-conta@projeto.iam.gserviceaccount.com"
+client_id = "..."
+token_uri = "https://oauth2.googleapis.com/token"
+""".strip(),
+            language="toml",
+        )
+        st.stop()
+
+    try:
+        recursos = google_get_resources()
+        st.success(f"Google Drive conectado: {recursos.get('client_email', '')}")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.link_button("Pasta raiz", recursos["root_link"])
+        c2.link_button("Pedidos editaveis", recursos["pedidos_link"])
+        c3.link_button("Arquivos finais", recursos["finais_link"])
+        c4.link_button("Controle", recursos["controle_link"])
+
+        pedidos = google_listar_pedidos()
+        if pedidos.empty:
+            st.info("Ainda nao existem pedidos registrados no Drive.")
+            st.stop()
+
+        pedidos_view = pedidos.copy()
+        pedidos_view["valor"] = pd.to_numeric(pedidos_view["valor"], errors="coerce").fillna(0)
+        st.markdown("### Painel de pedidos")
+        st.dataframe(
+            pedidos_view[[
+                "id_pedido", "nome_pedido", "fornecedor", "status", "valor",
+                "criado_em", "criado_por", "aprovado_em", "aprovado_por",
+                "link_pedido", "link_autcom", "link_fornecedor",
+            ]],
+            use_container_width=True,
+            hide_index=True,
+            height=420,
+            column_config={
+                "valor": st.column_config.NumberColumn("Valor", format="R$ %.2f"),
+                "link_pedido": st.column_config.LinkColumn("Pedido"),
+                "link_autcom": st.column_config.LinkColumn("Autcom"),
+                "link_fornecedor": st.column_config.LinkColumn("Fornecedor"),
+            },
+        )
+
+        st.markdown("### Aprovar ou atualizar status")
+        opcoes = {
+            f"{r.get('id_pedido', '')} | {r.get('fornecedor', '')} | {r.get('nome_pedido', '')} | {r.get('status', '')}": r.get("id_pedido", "")
+            for _, r in pedidos.iterrows()
+        }
+        pedido_label = st.selectbox("Pedido", list(opcoes.keys()), key="drive_pedido_status")
+        usuario = st.text_input("Usuario responsavel", value="", key="drive_usuario_status")
+        status = st.selectbox("Status", ["Aprovado", "Em edicao", "Reprovado", "Finalizado"], key="drive_status")
+        observacao = st.text_input("Observacao", key="drive_observacao_status")
+
+        if st.button("Salvar status no controle", type="primary"):
+            atualizado = google_atualizar_status_pedido(opcoes[pedido_label], status, usuario=usuario, observacao=observacao)
+            st.success(f"Status atualizado para {atualizado.get('status')}.")
+            st.rerun()
+
+        try:
+            _, sheets_service, _ = google_get_services()
+            acomp = google_read_df(sheets_service, recursos["controle_id"], "Acompanhamento")
+            if not acomp.empty:
+                st.markdown("### Acompanhamento mensal")
+                acomp["valor"] = pd.to_numeric(acomp.get("valor", 0), errors="coerce").fillna(0)
+                resumo_mes = acomp.groupby(["mes", "fornecedor"], as_index=False)["valor"].sum()
+                st.dataframe(
+                    resumo_mes,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={"valor": st.column_config.NumberColumn("Valor", format="R$ %.2f")},
+                )
+        except Exception:
+            pass
+    except Exception as e:
+        st.error(str(e))
+
+
 # =========================================================
 # APP STREAMLIT
 # =========================================================
@@ -3622,7 +4203,7 @@ render_header()
 st.sidebar.markdown("### 📊 Análise de Giro")
 pagina = st.sidebar.radio(
     "Navegação",
-    ["📦 Giro Consolidado", "🛒 Pedido de Compra", "📄 Exportações", "🏷️ Ruptura por Marca", "⚖️ Comparativo de Pedidos", "⚙️ Tratamento Final"],
+    ["📦 Giro Consolidado", "🛒 Pedido de Compra", "📄 Exportações", "📁 Pedidos no Drive", "🏷️ Ruptura por Marca", "⚖️ Comparativo de Pedidos", "⚙️ Tratamento Final"],
     label_visibility="collapsed",
 )
 
@@ -3656,10 +4237,15 @@ if pagina == "⚖️ Comparativo de Pedidos":
     render_pagina_comparativo_pedidos()
     st.stop()
 
+if pagina == "📁 Pedidos no Drive":
+    render_pagina_pedidos_drive()
+    st.stop()
+
 
 st.markdown('<div class="section-title">Upload dos arquivos</div>', unsafe_allow_html=True)
 st.caption("Envie o PDF de Giro para iniciar. Os demais arquivos enriquecem a análise e o pedido final.")
 col_upload_1, col_upload_2, col_upload_3 = st.columns(3)
+cadastro_google = pd.DataFrame()
 
 with col_upload_1:
     giro_pdf = st.file_uploader("PDF - Giro de Estoque", type=["pdf"], key="upload_giro_pdf")
@@ -3668,7 +4254,18 @@ with col_upload_2:
     pedidos_pdf = st.file_uploader("PDF - Pedidos em Aberto", type=["pdf"], key="upload_pedidos_pdf")
     render_upload_status("📄 Pedidos em Aberto", pedidos_pdf)
 with col_upload_3:
-    cadastro_csv = st.file_uploader("CSV - Cadastro de Produtos", type=["csv"], key="upload_cadastro_csv")
+    if google_configurado():
+        try:
+            cadastro_google = ler_cadastro_produtos_google()
+            recursos_google = google_get_resources()
+            if not cadastro_google.empty:
+                st.success(f"Cadastro lido do Google Sheets: {len(cadastro_google)} item(ns).")
+            else:
+                st.warning("Cadastro do Google Sheets está vazio ou sem as colunas obrigatórias.")
+            st.link_button("Abrir cadastro no Drive", recursos_google["cadastro_link"])
+        except Exception as e:
+            st.warning(f"Não consegui ler o cadastro do Google Sheets: {e}")
+    cadastro_csv = st.file_uploader("CSV - Cadastro de Produtos (fallback)", type=["csv"], key="upload_cadastro_csv")
     render_upload_status("📄 Cadastro de Produtos", cadastro_csv)
 
 if pagina == "⚙️ Tratamento Final":
@@ -3677,6 +4274,55 @@ if pagina == "⚙️ Tratamento Final":
         "Envie a planilha final editável. O sistema vai gerar um Excel para importação no Autcom: "
         "coluna B = zx, coluna F = PEDIDO Final e coluna H = Preço Última Compra."
     )
+
+    if google_configurado():
+        st.markdown("### Usar pedido aprovado do Google Drive")
+        try:
+            pedidos_drive = google_listar_pedidos()
+            pedidos_aprovados = pedidos_drive[pedidos_drive["status"].astype(str).str.lower().isin(["aprovado", "em edicao"])].copy()
+            if pedidos_aprovados.empty:
+                st.info("Não há pedidos aprovados ou em edição no controle do Drive.")
+            else:
+                opcoes_drive = {
+                    f"{r.get('id_pedido', '')} | {r.get('fornecedor', '')} | {r.get('nome_pedido', '')} | {r.get('status', '')}": r.to_dict()
+                    for _, r in pedidos_aprovados.iterrows()
+                }
+                pedido_drive_label = st.selectbox("Pedido do Drive", list(opcoes_drive.keys()), key="tratamento_pedido_drive")
+                usuario_finalizacao = st.text_input("Finalizado por", value="", key="tratamento_usuario_drive")
+                pedido_drive_info = opcoes_drive[pedido_drive_label]
+
+                if st.button("Ler pedido do Drive e gerar arquivos finais", type="primary"):
+                    df_drive = google_ler_pedido_drive(pedido_drive_info["spreadsheet_id"])
+                    st.session_state["df_tratamento_drive"] = df_drive
+                    st.session_state["pedido_tratamento_drive_id"] = pedido_drive_info["id_pedido"]
+                    st.success(f"Pedido lido do Drive: {len(df_drive)} linha(s).")
+
+                df_drive_preview = st.session_state.get("df_tratamento_drive")
+                pedido_drive_id = st.session_state.get("pedido_tratamento_drive_id")
+                if df_drive_preview is not None and pedido_drive_id:
+                    colunas_preview_drive = [c for c in ["zx", "codigo", "descricao", "Código Fábrica", "PEDIDO Final", "Preço Última Compra", "Valor Final do Pedido", "Total Geral do Pedido"] if c in df_drive_preview.columns]
+                    st.dataframe(
+                        df_drive_preview[colunas_preview_drive].head(50) if colunas_preview_drive else df_drive_preview.head(50),
+                        use_container_width=True,
+                        hide_index=True,
+                        height=320,
+                    )
+                    if st.button("Salvar arquivos finais no Drive e finalizar pedido"):
+                        link_autcom, link_fornecedor = google_finalizar_pedido(
+                            pedido_drive_id,
+                            df_drive_preview,
+                            usuario=usuario_finalizacao,
+                        )
+                        st.success("Pedido finalizado e arquivos salvos no Drive.")
+                        c_autcom, c_forn = st.columns(2)
+                        c_autcom.link_button("Abrir arquivo Autcom", link_autcom)
+                        c_forn.link_button("Abrir arquivo fornecedor", link_fornecedor)
+                        st.rerun()
+        except Exception as e:
+            st.warning(f"Não consegui usar o fluxo do Google Drive: {e}")
+
+        st.markdown("---")
+        st.markdown("### Upload manual")
 
     planilha_tratamento = st.file_uploader(
         "Planilha do Pedido Final",
@@ -3740,7 +4386,10 @@ if df_giro.empty:
     st.error("Não consegui extrair os dados do Giro de Estoque.")
     st.stop()
 
-df_giro = aplicar_cadastro(df_giro, cadastro_csv)
+if cadastro_google is not None and not cadastro_google.empty:
+    df_giro = aplicar_cadastro_dataframe(df_giro, cadastro_google)
+else:
+    df_giro = aplicar_cadastro(df_giro, cadastro_csv)
 
 df_transito = pd.DataFrame(columns=["codigo", "Saldo em Trânsito/ABERTO"])
 if pedidos_pdf:
@@ -3990,6 +4639,33 @@ elif pagina == "🛒 Pedido de Compra":
         )
     except RuntimeError as e:
         st.error(str(e))
+
+    st.markdown("---")
+    st.markdown("### Enviar pedido editável para o Google Drive")
+    if google_configurado():
+        with st.form("form_exportar_pedido_drive"):
+            nome_pedido_drive = st.text_input("Nome do pedido", value=f"Pedido {datetime.now().strftime('%d-%m-%Y')}")
+            fornecedor_drive = st.text_input("Fornecedor", value="")
+            usuario_drive = st.text_input("Criado por", value="")
+            enviar_drive = st.form_submit_button("Criar planilha editável no Drive", type="primary")
+
+        if enviar_drive:
+            try:
+                pedido_para_drive = st.session_state.get("pedido_editado", pedido_editado).copy()
+                pedido_para_drive = atualizar_valor_e_origem(pedido_para_drive)
+                pedido_para_drive = pedido_para_drive[colunas_pedido_compras(MESES)]
+                resultado_drive = google_criar_planilha_pedido(
+                    nome_pedido_drive,
+                    fornecedor_drive,
+                    pedido_para_drive,
+                    criado_por=usuario_drive,
+                )
+                st.success("Pedido criado no Google Drive.")
+                st.link_button("Abrir planilha do pedido", resultado_drive["link"])
+            except Exception as e:
+                st.error(str(e))
+    else:
+        st.info(google_mensagem_configuracao())
 
 elif pagina == "📄 Exportações":
     st.markdown('<div class="section-title">📄 Exportações</div>', unsafe_allow_html=True)
