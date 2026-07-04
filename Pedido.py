@@ -1545,6 +1545,8 @@ def _coluna_quantidade_flexivel(df):
     return None
 
 
+
+
 def _texto_sem_acentos(txt):
     txt = str(txt or "")
     txt = unicodedata.normalize("NFKD", txt)
@@ -1953,6 +1955,143 @@ def extrair_itens_pdf_por_blocos(uploaded_file, codigos_referencia=None):
 
     return pd.DataFrame(registros)
 
+def _deduplicar_headers_planilha(headers):
+    """Garante nomes únicos de colunas, preservando o texto original quando existir."""
+    saida = []
+    contagem = {}
+    for i, h in enumerate(headers):
+        nome = str(h or "").strip()
+        if not nome or nome.lower() in ["nan", "none"]:
+            nome = f"COLUNA {i + 1}"
+        base = nome
+        chave = normalizar_coluna(base)
+        contagem[chave] = contagem.get(chave, 0) + 1
+        if contagem[chave] > 1:
+            nome = f"{base}.{contagem[chave]}"
+        saida.append(nome)
+    return saida
+
+
+def _pontuar_linha_cabecalho_planilha(valores):
+    """
+    Pontua uma possível linha de cabeçalho em planilhas de fornecedor.
+    Resolve arquivos que vêm com dados do cliente antes da tabela, como:
+    CÓDIGO | DESCRIÇÃO | ... | QTDE | LITROS | VL. UNIT. | ... | VL. TOTAL
+    """
+    textos = [_normalizar_nome_coluna_flex(v) for v in valores]
+    compactos = [re.sub(r"[^A-Z0-9]+", "", t) for t in textos]
+    linha = " ".join(t for t in textos if t)
+
+    score = 0
+    tem_codigo = any(t in ["CODIGO", "COD", "SKU", "REFERENCIA", "REF"] or t.startswith("CODIGO ") or t.startswith("COD ") for t in textos) or any(c in ["CODIGO", "COD", "SKU", "REFERENCIA", "REF"] for c in compactos)
+    tem_desc = any("DESCR" in t or t in ["PRODUTO", "ITEM", "NOME"] for t in textos)
+    tem_qtd = any(re.search(r"(^| )(QTD|QTDE|QTE|QTY|QUANT|QUANTIDADE)( |$)", t) for t in textos) or any(c in ["QTD", "QTDE", "QTE", "QTY", "QUANT", "QUANTIDADE"] for c in compactos)
+    tem_preco = any("PRECO" in t or "UNIT" in t or "VL UNIT" in t or "VR UNIT" in t or "VALOR UNIT" in t for t in textos)
+    tem_total = any(("TOTAL" in t and "UNIT" not in t) or "VL TOTAL" in t or "VALOR TOTAL" in t for t in textos)
+
+    score += 3 if tem_codigo else 0
+    score += 3 if tem_desc else 0
+    score += 4 if tem_qtd else 0
+    score += 2 if tem_preco else 0
+    score += 2 if tem_total else 0
+
+    # Penaliza linhas de formulário/cadastro do cliente, não tabela de produtos.
+    if any(p in linha for p in ["DADOS DO CLIENTE", "CNPJ", "CONDICAO PAGTO", "OBSERVACAO NF", "BAIRRO", "SUB REGIAO"]):
+        score -= 4
+    return score
+
+
+def _ajustar_cabecalho_planilha_fornecedor(df_raw):
+    """
+    Quando o Excel do fornecedor possui cabeçalho fora da primeira linha,
+    encontra a linha da tabela e transforma em DataFrame tabular.
+    """
+    if df_raw is None or df_raw.empty:
+        return pd.DataFrame()
+
+    df_scan = df_raw.copy()
+    melhor_idx = None
+    melhor_score = -999
+
+    limite = min(len(df_scan), 100)
+    for idx in range(limite):
+        valores = list(df_scan.iloc[idx].values)
+        score = _pontuar_linha_cabecalho_planilha(valores)
+        if score > melhor_score:
+            melhor_score = score
+            melhor_idx = idx
+
+    # Exige pelo menos código/descrição/quantidade ou pontuação equivalente.
+    if melhor_idx is None or melhor_score < 7:
+        return df_raw.copy()
+
+    headers = _deduplicar_headers_planilha(list(df_scan.iloc[melhor_idx].values))
+    df = df_scan.iloc[melhor_idx + 1:].copy()
+    df.columns = headers
+
+    # Remove linhas totalmente vazias e linhas de totalização.
+    df = df.dropna(how="all")
+    primeira_col = df.columns[0] if len(df.columns) else None
+    if primeira_col:
+        primeira_txt = df[primeira_col].astype(str).str.strip().str.upper()
+        df = df[~primeira_txt.isin(["", "NAN", "NONE"])]
+        df = df[~primeira_txt.str.contains(r"^TOTA(IS|L)?$|^TOTAL", regex=True, na=False)]
+
+    # Remove colunas completamente vazias, mas mantém nomes reconhecidos.
+    df = df.dropna(axis=1, how="all")
+    return df.reset_index(drop=True)
+
+
+def ler_planilha_comparativo_fornecedor(uploaded_file):
+    """
+    Lê Excel/CSV do fornecedor procurando automaticamente a linha real do cabeçalho.
+    Importante para modelos em que a tabela começa depois de blocos como DADOS DO CLIENTE.
+    """
+    if uploaded_file is None:
+        return pd.DataFrame()
+
+    nome = str(getattr(uploaded_file, "name", "")).lower()
+    try:
+        uploaded_file.seek(0)
+    except Exception:
+        pass
+
+    if nome.endswith((".xlsx", ".xls")):
+        # header=None permite localizar cabeçalhos que não estão na primeira linha.
+        # Para .xls, mantenha xlrd>=2.0.1 no requirements.txt.
+        df_raw = pd.read_excel(uploaded_file, dtype=str, header=None)
+        return _ajustar_cabecalho_planilha_fornecedor(df_raw)
+
+    # CSV: também pode ter linhas acima do cabeçalho.
+    tentativas = [
+        {"sep": ";", "encoding": "utf-8-sig"},
+        {"sep": ";", "encoding": "latin1"},
+        {"sep": ",", "encoding": "utf-8-sig"},
+        {"sep": ",", "encoding": "latin1"},
+        {"sep": "\t", "encoding": "utf-8-sig"},
+        {"sep": "\t", "encoding": "latin1"},
+    ]
+    ultimo_erro = None
+    for tentativa in tentativas:
+        try:
+            uploaded_file.seek(0)
+            df_raw = pd.read_csv(
+                uploaded_file,
+                sep=tentativa["sep"],
+                encoding=tentativa["encoding"],
+                dtype=str,
+                engine="python",
+                on_bad_lines="skip",
+                header=None,
+            )
+            return _ajustar_cabecalho_planilha_fornecedor(df_raw)
+        except Exception as e:
+            ultimo_erro = str(e)
+            continue
+
+    raise RuntimeError(f"Não consegui ler a planilha do fornecedor. Último erro: {ultimo_erro}")
+
+
 def ler_arquivo_comparativo(uploaded_file, codigos_referencia=None):
     if uploaded_file is None:
         return pd.DataFrame()
@@ -1997,7 +2136,7 @@ def ler_arquivo_comparativo(uploaded_file, codigos_referencia=None):
         headers = [str(c).strip() or f"COLUNA {i+1}" for i, c in enumerate(linhas[header_idx])]
         return pd.DataFrame(linhas[header_idx + 1:], columns=headers)
 
-    return ler_planilha_tratamento_pedido(uploaded_file)
+    return ler_planilha_comparativo_fornecedor(uploaded_file)
 
 
 def normalizar_pedido_comparativo(df, origem):
@@ -2007,6 +2146,7 @@ def normalizar_pedido_comparativo(df, origem):
     col_fabrica = _coluna_por_candidatos(df, [
         "Código Fábrica", "Codigo Fabrica", "Cód. Fábrica", "Cod. Fabrica",
         "Código de Fábrica", "Codigo de Fabrica", "Cod Fabrica", "Cód Fabrica",
+        "Código", "Codigo", "Cód.", "Cod.", "Cod",
         "Referência", "Referencia", "Ref", "Código Fornecedor", "Codigo Fornecedor",
         "Cod Produto", "Código Produto", "Codigo Produto", "SKU", "Part Number", "Linha PDF",
     ])
@@ -2024,10 +2164,13 @@ def normalizar_pedido_comparativo(df, origem):
     ])
     col_preco = _coluna_por_candidatos(df, [
         "Preço Última Compra", "Preco Ultima Compra", "Preço", "Preco", "Preço Unitário", "Preco Unitario",
-        "Valor Unitário", "Valor Unitario", "Vlr Unit", "Vr.Unit", "VR.UNIT", "Unitário", "Unitario", "Preço Uni",
+        "Valor Unitário", "Valor Unitario", "Vlr Unit", "Vl Unit", "VL. UNIT.", "VL UNIT",
+        "Vr.Unit", "VR.UNIT", "VR UNIT", "Unitário", "Unitario", "Preço Uni",
+        "UNIT.TOT", "UNIT TOT", "Unit Total",
     ])
     col_total = _coluna_por_candidatos(df, [
-        "Valor Final do Pedido", "Valor Total", "Total", "Total Geral", "Valor", "Vlr Total", "Valor Mercadoria",
+        "Valor Final do Pedido", "Valor Total", "VL. TOTAL", "VL TOTAL", "Vlr Total",
+        "Total", "Total Geral", "Valor", "Valor Mercadoria",
     ])
 
     # Quando o arquivo veio de PDF sem cabeçalho perfeito, tenta inferir por linha completa.
