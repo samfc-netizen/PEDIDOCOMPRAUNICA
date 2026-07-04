@@ -48,11 +48,12 @@ CODIGO_UNICA = "009"
 MESES_PADRAO = ["01/2026", "02/2026", "03/2026", "04/2026"]
 MESES = MESES_PADRAO.copy()
 
-GOOGLE_DRIVE_ROOT_FOLDER_ID = "1k0xYXor2qeDXRGQeeVhu8r9-ufqd4QkW"
+GOOGLE_DRIVE_ROOT_FOLDER_ID = "1PqWXzphyeU_Q5Wc7UDYeZUzFA4kKZL-H"
 GOOGLE_SUBPASTA_PEDIDOS = "Pedidos Editaveis"
 GOOGLE_SUBPASTA_FINAIS = "Arquivos Finais"
 GOOGLE_PLANILHA_CONTROLE = "Controle de Pedidos - Dauto"
 GOOGLE_PLANILHA_CADASTRO = "Cadastro de Produtos - Dauto"
+GOOGLE_PLANILHA_CADASTRO_ID = "1iu9dbvhQCqdfWTrRL2_HMnAkQQnbK_cqN_k-9pZpkBw"
 GOOGLE_PEDIDOS_COLUNAS = [
     "id_pedido", "nome_pedido", "fornecedor", "status", "valor",
     "criado_em", "criado_por", "aprovado_em", "aprovado_por",
@@ -877,10 +878,14 @@ def normalizar_cadastro_produtos_df(df):
 
 
 @st.cache_data(show_spinner="Lendo cadastro do Google Sheets...", ttl=120)
-def ler_cadastro_produtos_google_cached(_cache_key):
+def ler_cadastro_produtos_google_cached(_cache_key, spreadsheet_id):
+    """
+    Lê o cadastro diretamente de uma planilha Google Sheets fixa.
+    Importante: esta função NÃO chama google_get_resources(), para evitar que o app
+    tente criar planilhas automaticamente via conta de serviço apenas para ler o cadastro.
+    """
     _, sheets_service, _ = google_get_services()
-    recursos = google_get_resources()
-    df_raw = google_read_df(sheets_service, recursos["cadastro_id"], "Cadastro")
+    df_raw = google_read_df(sheets_service, spreadsheet_id, "Cadastro")
     return normalizar_cadastro_produtos_df(df_raw)
 
 
@@ -888,7 +893,7 @@ def ler_cadastro_produtos_google():
     info_json = google_service_account_json()
     if not info_json:
         return pd.DataFrame()
-    return ler_cadastro_produtos_google_cached(str(hash(info_json)))
+    return ler_cadastro_produtos_google_cached(str(hash(info_json)), GOOGLE_PLANILHA_CADASTRO_ID)
 
 
 def aplicar_cadastro_dataframe(df_giro, cadastro):
@@ -1458,10 +1463,9 @@ def google_get_resources_cached(_cache_key):
     pedidos_folder_id = google_ensure_folder(drive_service, GOOGLE_SUBPASTA_PEDIDOS, GOOGLE_DRIVE_ROOT_FOLDER_ID)
     finais_folder_id = google_ensure_folder(drive_service, GOOGLE_SUBPASTA_FINAIS, GOOGLE_DRIVE_ROOT_FOLDER_ID)
     controle_id = google_ensure_spreadsheet(drive_service, GOOGLE_PLANILHA_CONTROLE, GOOGLE_DRIVE_ROOT_FOLDER_ID)
-    cadastro_id = google_ensure_spreadsheet(drive_service, GOOGLE_PLANILHA_CADASTRO, GOOGLE_DRIVE_ROOT_FOLDER_ID)
+    cadastro_id = GOOGLE_PLANILHA_CADASTRO_ID
     google_ensure_headers(sheets_service, controle_id, "Pedidos", GOOGLE_PEDIDOS_COLUNAS)
     google_ensure_headers(sheets_service, controle_id, "Acompanhamento", GOOGLE_ACOMPANHAMENTO_COLUNAS)
-    google_ensure_headers(sheets_service, cadastro_id, "Cadastro", ["codigo", "descricao", "codigo_fabrica", "embalagem"])
     return {
         "client_email": client_email,
         "pedidos_folder_id": pedidos_folder_id,
@@ -1480,7 +1484,7 @@ def google_get_resources():
     info_json = google_service_account_json()
     if not info_json:
         raise RuntimeError(google_mensagem_configuracao())
-    return google_get_resources_cached(f"{hash(info_json)}:{GOOGLE_DRIVE_ROOT_FOLDER_ID}")
+    return google_get_resources_cached(str(hash(info_json)))
 
 
 def google_criar_planilha_pedido(nome_pedido, fornecedor, pedido_df, criado_por=""):
@@ -4257,12 +4261,11 @@ with col_upload_3:
     if google_configurado():
         try:
             cadastro_google = ler_cadastro_produtos_google()
-            recursos_google = google_get_resources()
             if not cadastro_google.empty:
                 st.success(f"Cadastro lido do Google Sheets: {len(cadastro_google)} item(ns).")
             else:
                 st.warning("Cadastro do Google Sheets está vazio ou sem as colunas obrigatórias.")
-            st.link_button("Abrir cadastro no Drive", recursos_google["cadastro_link"])
+            st.link_button("Abrir cadastro no Drive", google_link_planilha(GOOGLE_PLANILHA_CADASTRO_ID))
         except Exception as e:
             st.warning(f"Não consegui ler o cadastro do Google Sheets: {e}")
     cadastro_csv = st.file_uploader("CSV - Cadastro de Produtos (fallback)", type=["csv"], key="upload_cadastro_csv")
