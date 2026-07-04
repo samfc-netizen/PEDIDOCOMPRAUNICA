@@ -1480,6 +1480,71 @@ def _coluna_por_candidatos(df, candidatos):
     return None
 
 
+def _normalizar_nome_coluna_flex(nome):
+    """Normaliza nome de coluna para reconhecimento flexível."""
+    txt = _texto_sem_acentos(nome).upper().strip()
+    txt = re.sub(r"[^A-Z0-9]+", " ", txt)
+    txt = re.sub(r"\s+", " ", txt).strip()
+    return txt
+
+
+def _coluna_quantidade_flexivel(df):
+    """
+    Encontra coluna de quantidade mesmo quando o fornecedor usa nomes variados.
+    Aceita: QTD, QTDE, QUANT, QUANT., QUANTIDADE, QTD PEDIDA, QTDE SOLICITADA,
+    QTD FATURADA, QTD COMPRA, QTE, QTY, QUANTITY, VOL, VOLUME etc.
+    Evita confundir com preço, valor total, saldo, código, embalagem ou peso.
+    """
+    if df is None or df.empty:
+        return None
+
+    bloqueios = [
+        "PRECO", "PREÇO", "VALOR", "VL", "VLR", "UNIT", "UNITARIO", "UNITÁRIO",
+        "TOTAL", "IPI", "SUB", "ST", "COD", "CÓD", "CODIGO", "CÓDIGO",
+        "FABRICA", "FÁBRICA", "REFERENCIA", "REFERÊNCIA", "SKU", "DESCR",
+        "PESO", "PES", "KIL", "LIT", "LITRO", "EMB", "EMBALAGEM",
+        "ESTOQUE", "SALDO", "BAIXADO", "ABERTO", "DATA", "DT",
+    ]
+
+    fortes_exatos = {
+        "QTD", "QTDE", "QTE", "QTY", "QUANT", "QUANTIDADE", "QUANTITY",
+        "QUANTID", "QUANTIDADE PEDIDA", "QTD PEDIDA", "QTDE PEDIDA",
+        "QUANTIDADE SOLICITADA", "QTD SOLICITADA", "QTDE SOLICITADA",
+        "QUANTIDADE COMPRA", "QTD COMPRA", "QTDE COMPRA",
+        "QUANTIDADE DO PEDIDO", "QTD DO PEDIDO", "QTDE DO PEDIDO",
+        "QUANTIDADE PEDIDO", "QTD PEDIDO", "QTDE PEDIDO",
+        "PEDIDO FINAL", "QUANTIDADE FATURADA", "QTD FATURADA", "QTDE FATURADA",
+        "VOLUME", "VOL",
+    }
+
+    # 1) Prioriza nomes exatos normalizados.
+    for col in df.columns:
+        norm = _normalizar_nome_coluna_flex(col)
+        if norm in fortes_exatos:
+            return col
+
+    # 2) Depois aceita qualquer coluna que contenha uma palavra clara de quantidade,
+    # desde que não contenha termos típicos de preço, código, estoque etc.
+    padrao_qtd = re.compile(r"(^| )(QTD|QTDE|QTE|QTY|QUANT|QUANTIDADE|QUANTITY|VOLUME|VOL)( |$)")
+    for col in df.columns:
+        norm = _normalizar_nome_coluna_flex(col)
+        if not norm:
+            continue
+        if padrao_qtd.search(norm) and not any(b in norm for b in bloqueios):
+            return col
+
+    # 3) Caso o nome seja algo como 'QTD_PED', 'QTDE-SOLIC', 'QUANT.' já estará
+    # normalizado com espaço. Este fallback pega prefixos comuns.
+    for col in df.columns:
+        norm = _normalizar_nome_coluna_flex(col)
+        compact = re.sub(r"[^A-Z0-9]+", "", norm)
+        if any(compact.startswith(p) for p in ["QTD", "QTDE", "QTE", "QTY", "QUANT", "QUANTIDADE"]):
+            if not any(b in norm for b in bloqueios):
+                return col
+
+    return None
+
+
 def _texto_sem_acentos(txt):
     txt = str(txt or "")
     txt = unicodedata.normalize("NFKD", txt)
@@ -1948,9 +2013,14 @@ def normalizar_pedido_comparativo(df, origem):
     col_descricao = _coluna_por_candidatos(df, [
         "descricao", "descrição", "descrição do item", "descricao do item", "produto", "item", "nome", "descr", "linha pdf",
     ])
-    col_qtd = _coluna_por_candidatos(df, [
-        "PEDIDO Final", "Quantidade", "Qtd", "Qtde", "Quant", "Quantidade Pedido", "Qtd Pedido", "Qtde Pedido",
-        "Quantidade Pedida", "Qtd Solicitada", "Qtde Solicitada",
+    col_qtd = _coluna_quantidade_flexivel(df) or _coluna_por_candidatos(df, [
+        "PEDIDO Final", "Quantidade", "Qtd", "Qtde", "Quant", "Quant.", "Qte", "Qty", "Quantity",
+        "Quantidade Pedido", "Qtd Pedido", "Qtde Pedido", "Quant Pedido",
+        "Quantidade Pedida", "Qtd Pedida", "Qtde Pedida", "Quant Pedida",
+        "Quantidade Solicitada", "Qtd Solicitada", "Qtde Solicitada", "Quant Solicitada",
+        "Quantidade Compra", "Qtd Compra", "Qtde Compra", "Qtd. Compra",
+        "Quantidade Faturada", "Qtd Faturada", "Qtde Faturada",
+        "Volume", "Vol",
     ])
     col_preco = _coluna_por_candidatos(df, [
         "Preço Última Compra", "Preco Ultima Compra", "Preço", "Preco", "Preço Unitário", "Preco Unitario",
