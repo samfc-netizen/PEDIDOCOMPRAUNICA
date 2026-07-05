@@ -877,10 +877,11 @@ def normalizar_cadastro_produtos_df(df):
     return cadastro
 
 
-@st.cache_data(show_spinner="Lendo cadastro do Google Sheets...", ttl=120)
 def ler_cadastro_produtos_google_cached(_cache_key, spreadsheet_id):
     """
     Lê o cadastro diretamente de uma planilha Google Sheets fixa.
+    Sem cache: sempre que o app recarregar ou executar novamente, busca a versão atual
+    da planilha. Assim qualquer alteração feita no Google Sheets entra no app.
     Importante: esta função NÃO chama google_get_resources(), para evitar que o app
     tente criar planilhas automaticamente via conta de serviço apenas para ler o cadastro.
     """
@@ -4258,6 +4259,10 @@ with col_upload_2:
     pedidos_pdf = st.file_uploader("PDF - Pedidos em Aberto", type=["pdf"], key="upload_pedidos_pdf")
     render_upload_status("📄 Pedidos em Aberto", pedidos_pdf)
 with col_upload_3:
+    st.markdown("**Cadastro de Produtos**")
+    st.link_button("🔗 Abrir / editar cadastro no Google Sheets", google_link_planilha(GOOGLE_PLANILHA_CADASTRO_ID), use_container_width=True)
+    st.caption("Após editar a planilha, volte ao app e recarregue a página para puxar a versão atualizada.")
+
     if google_configurado():
         try:
             cadastro_google = ler_cadastro_produtos_google()
@@ -4265,9 +4270,11 @@ with col_upload_3:
                 st.success(f"Cadastro lido do Google Sheets: {len(cadastro_google)} item(ns).")
             else:
                 st.warning("Cadastro do Google Sheets está vazio ou sem as colunas obrigatórias.")
-            st.link_button("Abrir cadastro no Drive", google_link_planilha(GOOGLE_PLANILHA_CADASTRO_ID))
         except Exception as e:
             st.warning(f"Não consegui ler o cadastro do Google Sheets: {e}")
+    else:
+        st.warning("Google Sheets não configurado. Use o CSV como fallback.")
+
     cadastro_csv = st.file_uploader("CSV - Cadastro de Produtos (fallback)", type=["csv"], key="upload_cadastro_csv")
     render_upload_status("📄 Cadastro de Produtos", cadastro_csv)
 
