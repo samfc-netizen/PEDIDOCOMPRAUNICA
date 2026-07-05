@@ -1295,7 +1295,10 @@ def google_service_account_json():
             if not cfg:
                 continue
             if cfg.get("private_key"):
-                cfg["private_key"] = str(cfg["private_key"]).replace("\\n", "\n")
+                pk = str(cfg["private_key"]).strip()
+                # Aceita tanto \n literal quanto chave multilinha.
+                pk = pk.replace("\\n", "\n")
+                cfg["private_key"] = pk
             cfg.setdefault("type", "service_account")
             cfg.setdefault("token_uri", "https://oauth2.googleapis.com/token")
             obrigatorios = ["type", "project_id", "private_key", "client_email", "token_uri"]
@@ -1588,10 +1591,15 @@ def google_get_resources_cached(_cache_key):
 
 
 def google_get_resources():
+    service_json = google_service_account_json()
+    if service_json:
+        return google_get_resources_cached(str(hash(service_json)))
+
     oauth_json = google_oauth_user_json()
-    if not oauth_json:
-        raise RuntimeError(google_mensagem_configuracao())
-    return google_get_resources_cached(str(hash(oauth_json)))
+    if oauth_json:
+        return google_get_resources_cached(str(hash(oauth_json)))
+
+    raise RuntimeError(google_mensagem_configuracao())
 
 
 def google_listar_planilhas_pasta(drive_service, folder_id):
@@ -4665,10 +4673,13 @@ def render_pagina_pedidos_drive():
         st.warning(google_mensagem_configuracao())
         st.code(
             """
-[google_oauth_user]
+[google_service_account]
+type = "service_account"
+project_id = "..."
+private_key_id = "..."
+private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+client_email = "...@...iam.gserviceaccount.com"
 client_id = "..."
-client_secret = "..."
-refresh_token = "..."
 token_uri = "https://oauth2.googleapis.com/token"
 """.strip(),
             language="toml",
@@ -4677,7 +4688,7 @@ token_uri = "https://oauth2.googleapis.com/token"
 
     try:
         recursos = google_get_resources()
-        st.success(f"Google Drive conectado via OAuth: {recursos.get('oauth_user', 'gdautotintas@gmail.com')}")
+        st.success("Google Drive conectado via Service Account.")
         c1, c2, c3 = st.columns(3)
         c1.link_button("Pedidos para aprovação", recursos["pedidos_link"])
         c2.link_button("Pedidos aprovados", recursos["aprovados_link"])
