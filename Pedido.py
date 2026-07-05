@@ -889,24 +889,31 @@ def normalizar_cadastro_produtos_df(df):
     return cadastro
 
 
-def ler_cadastro_produtos_google_cached(_cache_key, spreadsheet_id):
+@st.cache_data(show_spinner="Lendo cadastro no Google Sheets...", ttl=60)
+def ler_cadastro_produtos_google_public_cached(spreadsheet_id, sheet_name="Cadastro"):
     """
-    Lê o cadastro diretamente de uma planilha Google Sheets fixa.
-    Sem cache: sempre que o app recarregar ou executar novamente, busca a versão atual
-    da planilha. Assim qualquer alteração feita no Google Sheets entra no app.
-    Importante: esta função NÃO chama google_get_resources(), para evitar que o app
-    tente criar planilhas automaticamente via conta de serviço apenas para ler o cadastro.
+    Leitura simples do cadastro no Google Sheets, sem OAuth.
+
+    Para funcionar, a planilha precisa estar compartilhada como:
+    Qualquer pessoa com o link -> Leitor.
+
+    Essa leitura é usada apenas para buscar o cadastro. Ela não cria, não edita
+    e não depende de client_id, client_secret nem refresh_token.
     """
-    _, sheets_service, _ = google_get_services()
-    df_raw = google_read_df(sheets_service, spreadsheet_id, "Cadastro")
+    url = (
+        f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/gviz/tq"
+        f"?tqx=out:csv&sheet={sheet_name}"
+    )
+    df_raw = pd.read_csv(url, dtype=str, keep_default_na=False)
     return normalizar_cadastro_produtos_df(df_raw)
 
 
 def ler_cadastro_produtos_google():
-    oauth_json = google_oauth_user_json()
-    if not oauth_json:
-        return pd.DataFrame()
-    return ler_cadastro_produtos_google_cached(str(hash(oauth_json)), GOOGLE_PLANILHA_CADASTRO_ID)
+    """
+    Busca o cadastro diretamente do Google Sheets por URL pública.
+    Não usa OAuth para evitar erro invalid_client no cadastro.
+    """
+    return ler_cadastro_produtos_google_public_cached(GOOGLE_PLANILHA_CADASTRO_ID, "Cadastro")
 
 
 def aplicar_cadastro_dataframe(df_giro, cadastro):
@@ -4728,17 +4735,18 @@ with col_upload_3:
     st.link_button("🔗 Abrir / editar cadastro no Google Sheets", google_link_planilha(GOOGLE_PLANILHA_CADASTRO_ID), use_container_width=True)
     st.caption("Após editar a planilha, volte ao app e recarregue a página para puxar a versão atualizada.")
 
-    if google_configurado():
-        try:
-            cadastro_google = ler_cadastro_produtos_google()
-            if not cadastro_google.empty:
-                st.success(f"Cadastro lido do Google Sheets: {len(cadastro_google)} item(ns).")
-            else:
-                st.warning("Cadastro do Google Sheets está vazio ou sem as colunas obrigatórias.")
-        except Exception as e:
-            st.warning(f"Não consegui ler o cadastro do Google Sheets: {e}")
-    else:
-        st.warning("Google Sheets não configurado. Use o CSV como fallback.")
+    try:
+        cadastro_google = ler_cadastro_produtos_google()
+        if not cadastro_google.empty:
+            st.success(f"Cadastro lido do Google Sheets: {len(cadastro_google)} item(ns).")
+        else:
+            st.warning("Cadastro do Google Sheets está vazio ou sem as colunas obrigatórias.")
+    except Exception as e:
+        st.warning(
+            "Não consegui ler o cadastro do Google Sheets por leitura simples. "
+            "Confira se a planilha está compartilhada como 'Qualquer pessoa com o link - Leitor' "
+            f"e se existe a aba 'Cadastro'. Detalhe: {e}"
+        )
 
     cadastro_csv = st.file_uploader("CSV - Cadastro de Produtos (fallback)", type=["csv"], key="upload_cadastro_csv")
     render_upload_status("📄 Cadastro de Produtos", cadastro_csv)
