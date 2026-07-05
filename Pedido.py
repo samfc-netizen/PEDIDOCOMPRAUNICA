@@ -1478,7 +1478,7 @@ def google_get_resources_cached(_cache_key):
     - Não cria novas pastas nem planilhas centrais aqui.
     - Isso evita o erro storageQuotaExceeded da conta de serviço ao tentar criar
       arquivos nativos do Google Sheets no Meu Drive.
-    - Os pedidos são criados copiando a planilha modelo informada.
+    - Os pedidos são gerados do zero pelo código, sem copiar planilha modelo.
     """
     drive_service, sheets_service, client_email = google_get_services()
     return {
@@ -1677,6 +1677,172 @@ Sistema de Pedidos
         return False, f"Pedido criado, mas não consegui enviar e-mail: {e}"
 
 
+def google_criar_spreadsheet_do_zero(drive_service, sheets_service, titulo, folder_id):
+    """
+    Cria uma planilha Google Sheets do zero, sem usar files().copy().
+
+    Motivo: copiar uma planilha modelo com conta de serviço pode fazer o Google
+    tentar atribuir a cópia à cota da própria conta de serviço, gerando
+    storageQuotaExceeded. Aqui a planilha é criada vazia e depois estruturada
+    pelo código.
+    """
+    ultimo_erro = None
+
+    # Tentativa 1: criar diretamente no Drive dentro da pasta informada.
+    try:
+        criado = drive_service.files().create(
+            body={
+                "name": titulo,
+                "mimeType": "application/vnd.google-apps.spreadsheet",
+                "parents": [folder_id],
+            },
+            fields="id, webViewLink",
+            supportsAllDrives=True,
+        ).execute()
+        return criado["id"], criado.get("webViewLink") or google_link_planilha(criado["id"])
+    except Exception as e:
+        ultimo_erro = e
+
+    # Tentativa 2: criar pela Sheets API e mover para a pasta.
+    # Em alguns ambientes esta rota funciona melhor do que Drive files().create().
+    try:
+        criado = sheets_service.spreadsheets().create(
+            body={"properties": {"title": titulo}},
+            fields="spreadsheetId",
+        ).execute()
+        spreadsheet_id = criado["spreadsheetId"]
+
+        # Move para a pasta de aprovação. Se a planilha nasceu em uma raiz acessível,
+        # remove os pais atuais e adiciona a pasta correta.
+        arquivo = drive_service.files().get(
+            fileId=spreadsheet_id,
+            fields="parents, webViewLink",
+            supportsAllDrives=True,
+        ).execute()
+        parents = ",".join(arquivo.get("parents", []))
+        drive_service.files().update(
+            fileId=spreadsheet_id,
+            addParents=folder_id,
+            removeParents=parents,
+            fields="id, webViewLink",
+            supportsAllDrives=True,
+        ).execute()
+        return spreadsheet_id, google_link_planilha(spreadsheet_id)
+    except Exception as e2:
+        raise RuntimeError(
+            "Não consegui criar a planilha do pedido no Google Sheets. "
+            "O código já foi ajustado para NÃO copiar modelo e gerar a planilha do zero. "
+            "Se este erro continuar, a conta de serviço está impedida pelo Google de criar "
+            "arquivos nativos do Google Sheets em Meu Drive. Nesse caso, use OAuth da conta "
+            "dona da pasta ou um Drive Compartilhado do Google Workspace. "
+            f"Erro Drive API: {ultimo_erro} | Erro Sheets API: {e2}"
+        )
+
+
+def google_remover_abas_padrao(sheets_service, spreadsheet_id, abas_manter):
+    try:
+        meta = sheets_service.spreadsheets().get(
+            spreadsheetId=spreadsheet_id,
+            fields="sheets(properties(sheetId,title))",
+        ).execute()
+        requests = []
+        for sheet in meta.get("sheets", []):
+            props = sheet.get("properties", {})
+            title = props.get("title")
+            sheet_id = props.get("sheetId")
+            if title not in set(abas_manter) and sheet_id is not None:
+                requests.append({"deleteSheet": {"sheetId": sheet_id}})
+        if requests:
+            sheets_service.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={"requests": requests},
+            ).execute()
+    except Exception:
+        # Não trava o fluxo por causa de uma aba padrão extra.
+        pass
+
+
+def google_formatar_planilha_pedido(sheets_service, spreadsheet_id, pedido_df):
+    """Aplica formatação básica e menu de status na planilha gerada do zero."""
+    meta = sheets_service.spreadsheets().get(
+        spreadsheetId=spreadsheet_id,
+        fields="sheets(properties(sheetId,title))",
+    ).execute()
+    ids = {s["properties"]["title"]: s["properties"]["sheetId"] for s in meta.get("sheets", [])}
+    pedido_sheet_id = ids.get("Pedido")
+    controle_sheet_id = ids.get("Controle")
+    requests = []
+
+    if pedido_sheet_id is not None:
+        n_cols = max(len(pedido_df.columns), 1)
+        n_rows = max(len(pedido_df) + 1, 2)
+        requests.extend([
+            {"repeatCell": {
+                "range": {"sheetId": pedido_sheet_id, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": n_cols},
+                "cell": {"userEnteredFormat": {
+                    "backgroundColor": {"red": 0.85, "green": 0.92, "blue": 0.97},
+                    "horizontalAlignment": "CENTER",
+                    "textFormat": {"bold": True},
+                    "wrapStrategy": "WRAP",
+                }},
+                "fields": "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,wrapStrategy)",
+            }},
+            {"updateSheetProperties": {"properties": {"sheetId": pedido_sheet_id, "gridProperties": {"frozenRowCount": 1}}, "fields": "gridProperties.frozenRowCount"}},
+            {"autoResizeDimensions": {
+                "dimensions": {"sheetId": pedido_sheet_id, "dimension": "COLUMNS", "startIndex": 0, "endIndex": n_cols}
+            }},
+            {"addFilterView": {
+                "filter": {
+                    "title": "Filtro Pedido",
+                    "range": {"sheetId": pedido_sheet_id, "startRowIndex": 0, "endRowIndex": n_rows, "startColumnIndex": 0, "endColumnIndex": n_cols},
+                }
+            }},
+        ])
+
+    if controle_sheet_id is not None:
+        requests.extend([
+            {"repeatCell": {
+                "range": {"sheetId": controle_sheet_id, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 2},
+                "cell": {"userEnteredFormat": {
+                    "backgroundColor": {"red": 0.85, "green": 0.92, "blue": 0.97},
+                    "horizontalAlignment": "CENTER",
+                    "textFormat": {"bold": True},
+                }},
+                "fields": "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)",
+            }},
+            {"setDataValidation": {
+                "range": {"sheetId": controle_sheet_id, "startRowIndex": 1, "endRowIndex": 2, "startColumnIndex": 1, "endColumnIndex": 2},
+                "rule": {
+                    "condition": {
+                        "type": "ONE_OF_LIST",
+                        "values": [
+                            {"userEnteredValue": "Em edição"},
+                            {"userEnteredValue": "Aguardando aprovação"},
+                            {"userEnteredValue": "Aprovado"},
+                            {"userEnteredValue": "Reprovado"},
+                            {"userEnteredValue": "Finalizado"},
+                        ],
+                    },
+                    "showCustomUi": True,
+                    "strict": True,
+                },
+            }},
+            {"autoResizeDimensions": {
+                "dimensions": {"sheetId": controle_sheet_id, "dimension": "COLUMNS", "startIndex": 0, "endIndex": 2}
+            }},
+        ])
+
+    if requests:
+        try:
+            sheets_service.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={"requests": requests},
+            ).execute()
+        except Exception:
+            # Formatação não deve impedir a criação do pedido.
+            pass
+
+
 def google_criar_planilha_pedido(nome_pedido, fornecedor, pedido_df, criado_por=""):
     drive_service, sheets_service, _ = google_get_services()
     recursos = google_get_resources()
@@ -1685,32 +1851,20 @@ def google_criar_planilha_pedido(nome_pedido, fornecedor, pedido_df, criado_por=
     pedido_id = datetime.now().strftime("%Y%m%d%H%M%S")
     titulo = f"{datetime.now().strftime('%Y-%m-%d')} - {fornecedor_limpo} - {nome_limpo}"
 
-    # Copia a planilha modelo para a pasta PEDIDOS PARA APROVAÇÃO.
-    # Não usamos files().create com Google Sheets vazio, pois isso pode gerar storageQuotaExceeded
-    # com conta de serviço em Meu Drive.
-    try:
-        criado = drive_service.files().copy(
-            fileId=GOOGLE_MODELO_PEDIDO_ID,
-            body={"name": titulo, "parents": [GOOGLE_PASTA_APROVACAO_ID]},
-            fields="id, webViewLink",
-            supportsAllDrives=True,
-        ).execute()
-    except Exception as e:
-        raise RuntimeError(
-            "Não consegui copiar a planilha modelo para a pasta de aprovação. "
-            "Confirme que a planilha modelo e a pasta PEDIDOS PARA APROVAÇÃO estão compartilhadas "
-            "com a conta de serviço como Editor. Erro original: " + str(e)
-        )
-
-    spreadsheet_id = criado["id"]
-    link = criado.get("webViewLink") or google_link_planilha(spreadsheet_id)
-
     df_export = pedido_df.copy()
     if "zx" not in df_export.columns:
         df_export.insert(0, "zx", df_export.get("codigo", ""))
 
     valor = totalizar_valor_pedido(df_export)
     agora = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+    # Cria a planilha do zero. Não usa files().copy() nem planilha modelo.
+    spreadsheet_id, link = google_criar_spreadsheet_do_zero(
+        drive_service,
+        sheets_service,
+        titulo,
+        GOOGLE_PASTA_APROVACAO_ID,
+    )
 
     google_write_df(sheets_service, spreadsheet_id, "Pedido", df_export)
     google_escrever_controle_pedido(
@@ -1722,6 +1876,8 @@ def google_criar_planilha_pedido(nome_pedido, fornecedor, pedido_df, criado_por=
         valor=round(float(valor or 0), 2),
         pedido_id=pedido_id,
     )
+    google_remover_abas_padrao(sheets_service, spreadsheet_id, ["Pedido", "Controle"])
+    google_formatar_planilha_pedido(sheets_service, spreadsheet_id, df_export)
 
     email_ok, email_msg = google_enviar_email_aprovadores(nome_limpo, fornecedor_limpo, valor, link, criado_por=criado_por)
 
