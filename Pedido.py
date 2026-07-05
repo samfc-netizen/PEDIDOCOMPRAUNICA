@@ -20,11 +20,13 @@ except Exception:
 
 try:
     from google.oauth2.credentials import Credentials
+    from google.oauth2 import service_account as google_service_account
     from google.auth.transport.requests import Request
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaIoBaseUpload
 except Exception:
     Credentials = None
+    google_service_account = None
     Request = None
     build = None
     MediaIoBaseUpload = None
@@ -1270,75 +1272,140 @@ def gerar_csv(df):
 # INTEGRACAO GOOGLE DRIVE / SHEETS
 # =========================================================
 
-def google_configurado():
-    if Credentials is None or Request is None or build is None or MediaIoBaseUpload is None:
-        return False
+def google_service_account_json():
+    """
+    Autenticação recomendada para o Streamlit/Drive.
+    Usa uma Service Account em st.secrets, sem OAuth Playground e sem refresh_token.
+
+    Secrets aceitos:
+    [google_service_account]
+    type = "service_account"
+    project_id = "..."
+    private_key_id = "..."
+    private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+    client_email = "...@...iam.gserviceaccount.com"
+    client_id = "..."
+    token_uri = "https://oauth2.googleapis.com/token"
+
+    Também aceita [gcp_service_account], que é o nome comum usado no Streamlit.
+    """
     try:
-        cfg = dict(st.secrets.get("google_oauth_user", {}))
-        return bool(
-            cfg.get("client_id")
-            and cfg.get("client_secret")
-            and cfg.get("refresh_token")
-            and cfg.get("token_uri", "https://oauth2.googleapis.com/token")
-        )
+        for secao in ["google_service_account", "gcp_service_account"]:
+            cfg = dict(st.secrets.get(secao, {}))
+            if not cfg:
+                continue
+            if cfg.get("private_key"):
+                cfg["private_key"] = str(cfg["private_key"]).replace("\\n", "\n")
+            cfg.setdefault("type", "service_account")
+            cfg.setdefault("token_uri", "https://oauth2.googleapis.com/token")
+            obrigatorios = ["type", "project_id", "private_key", "client_email", "token_uri"]
+            if all(cfg.get(c) for c in obrigatorios):
+                return json.dumps({k: str(v) for k, v in cfg.items()}, sort_keys=True)
     except Exception:
+        return ""
+    return ""
+
+
+def google_configurado():
+    if build is None or MediaIoBaseUpload is None:
         return False
+    if google_service_account is not None and google_service_account_json():
+        return True
+    if Credentials is not None and Request is not None and google_oauth_user_json():
+        return True
+    return False
 
 
 def google_mensagem_configuracao():
-    if Credentials is None or Request is None or build is None or MediaIoBaseUpload is None:
+    if build is None or MediaIoBaseUpload is None:
         return (
             "Instale as dependencias do Google no ambiente: "
             "google-api-python-client, google-auth e google-auth-httplib2."
         )
     return (
-        "Configure o OAuth 2.0 da conta dona do Drive em st.secrets, na seção "
-        "[google_oauth_user], com client_id, client_secret, refresh_token e token_uri. "
-        "A conta autorizada deve ser gdautotintas@gmail.com. Enquanto o refresh_token "
-        "não estiver configurado, o app não consegue criar planilhas no Drive."
+        "Para criar Google Sheets no Drive, configure uma Service Account em st.secrets "
+        "na seção [google_service_account] e compartilhe a pasta destino com o e-mail "
+        "client_email da Service Account como Editor. A leitura do cadastro continua simples, "
+        "sem OAuth, desde que a planilha esteja pública como Leitor."
     )
 
 
 def google_oauth_user_json():
+    """
+    Mantém compatibilidade com OAuth antigo, mas ignora placeholders/Client ID inválido
+    para não disparar o erro invalid_client quando o segredo antigo ficou salvo.
+    """
     try:
         cfg = dict(st.secrets.get("google_oauth_user", {}))
         cfg["token_uri"] = cfg.get("token_uri", "https://oauth2.googleapis.com/token")
         campos = ["client_id", "client_secret", "refresh_token", "token_uri"]
-        if all(cfg.get(c) for c in campos):
-            return json.dumps({c: str(cfg.get(c)) for c in campos}, sort_keys=True)
+        if not all(cfg.get(c) for c in campos):
+            return ""
+
+        client_id = str(cfg.get("client_id", "")).strip()
+        client_secret = str(cfg.get("client_secret", "")).strip()
+        refresh_token = str(cfg.get("refresh_token", "")).strip()
+        invalidos = ["...", "seu_client_id", "seu client_id", "seu_client_secret", "seu client_secret"]
+        if client_id.lower() in invalidos or client_secret.lower() in invalidos or refresh_token.lower() in invalidos:
+            return ""
+        if not client_id.endswith(".apps.googleusercontent.com"):
+            return ""
+
+        return json.dumps({c: str(cfg.get(c)) for c in campos}, sort_keys=True)
     except Exception:
         return ""
     return ""
 
 
 @st.cache_resource(show_spinner=False)
-def google_get_services_cached(oauth_json):
-    info = json.loads(oauth_json)
+def google_get_services_cached(auth_json):
+    info = json.loads(auth_json)
     scopes = [
         "https://www.googleapis.com/auth/drive",
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/gmail.send",
     ]
-    credentials = Credentials(
-        token=None,
-        refresh_token=info["refresh_token"],
-        token_uri=info["token_uri"],
-        client_id=info["client_id"],
-        client_secret=info["client_secret"],
-        scopes=scopes,
-    )
-    credentials.refresh(Request())
+
+    if info.get("type") == "service_account":
+        if google_service_account is None:
+            raise RuntimeError("Biblioteca google-auth sem suporte a service_account no ambiente.")
+        credentials = google_service_account.Credentials.from_service_account_info(info, scopes=scopes)
+        gmail_service = None
+    else:
+        credentials = Credentials(
+            token=None,
+            refresh_token=info["refresh_token"],
+            token_uri=info["token_uri"],
+            client_id=info["client_id"],
+            client_secret=info["client_secret"],
+            scopes=scopes,
+        )
+        credentials.refresh(Request())
+        gmail_service = None
+
     drive_service = build("drive", "v3", credentials=credentials, cache_discovery=False)
     sheets_service = build("sheets", "v4", credentials=credentials, cache_discovery=False)
-    gmail_service = build("gmail", "v1", credentials=credentials, cache_discovery=False)
+
+    # Gmail só funciona com OAuth de usuário. Com Service Account, o e-mail será ignorado.
+    if info.get("type") != "service_account":
+        try:
+            gmail_service = build("gmail", "v1", credentials=credentials, cache_discovery=False)
+        except Exception:
+            gmail_service = None
+
     return drive_service, sheets_service, gmail_service
 
 
 def google_get_services():
+    service_json = google_service_account_json()
+    if service_json:
+        return google_get_services_cached(service_json)
+
     oauth_json = google_oauth_user_json()
-    if not oauth_json:
-        raise RuntimeError(google_mensagem_configuracao())
-    return google_get_services_cached(oauth_json)
+    if oauth_json:
+        return google_get_services_cached(oauth_json)
+
+    raise RuntimeError(google_mensagem_configuracao())
 
 
 def google_link_pasta(folder_id):
@@ -1665,6 +1732,8 @@ Sistema de Pedidos
 
     try:
         _, _, gmail_service = google_get_services()
+        if gmail_service is None:
+            return False, "Pedido criado. E-mail não enviado porque a autenticação atual é Service Account."
         raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
         gmail_service.users().messages().send(userId="me", body={"raw": raw}).execute()
         return True, "E-mail enviado aos aprovadores."
@@ -5137,10 +5206,13 @@ elif pagina == "🛒 Pedido de Compra":
                 st.error(str(e))
     else:
         st.info(google_mensagem_configuracao())
-        st.code("""[google_oauth_user]
+        st.code("""[google_service_account]
+type = "service_account"
+project_id = "..."
+private_key_id = "..."
+private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+client_email = "...@...iam.gserviceaccount.com"
 client_id = "..."
-client_secret = "..."
-refresh_token = "..."
 token_uri = "https://oauth2.googleapis.com/token""", language="toml")
 
     with st.expander("Fallback: baixar CSV local"):
