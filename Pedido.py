@@ -63,6 +63,7 @@ GOOGLE_PLANILHA_CADASTRO = "Cadastro de Produtos - Dauto"
 GOOGLE_PLANILHA_CADASTRO_ID = "1iu9dbvhQCqdfWTrRL2_HMnAkQQnbK_cqN_k-9pZpkBw"
 GOOGLE_MODELO_PEDIDO_ID = "1iu9dbvhQCqdfWTrRL2_HMnAkQQnbK_cqN_k-9pZpkBw"
 GOOGLE_PASTA_APROVACAO_ID = "1ZlTC720fGMHk6cqApXtjeNPBe84Vgx_b"
+APPS_SCRIPT_WEB_APP_URL_PADRAO = "https://script.google.com/macros/s/AKfycbwihVeGlWG3-SpecqZhHR2TsFVYmYZEGlvyrImpLX9eliv-fl7CqUwWCWBnmnlFIBww/exec"
 GOOGLE_PASTA_APROVADOS_ID = "1Ez4LgDFh964iF-MjUl1KFjvGGQMKtRz_"
 GOOGLE_APROVADORES_EMAILS = [
     "victor@dautotintas.com.br",
@@ -1951,9 +1952,9 @@ def google_exportar_pedido_sheets_simples(nome_pedido, fornecedor, pedido_df, cr
 def apps_script_configurado():
     try:
         cfg = dict(st.secrets.get("apps_script", {}))
-        return bool(cfg.get("web_app_url"))
+        return bool(str(cfg.get("web_app_url", "")).strip() or APPS_SCRIPT_WEB_APP_URL_PADRAO)
     except Exception:
-        return False
+        return bool(APPS_SCRIPT_WEB_APP_URL_PADRAO)
 
 
 def apps_script_mensagem_configuracao():
@@ -2009,7 +2010,7 @@ def apps_script_payload_pedido(nome_pedido, fornecedor, pedido_df, criado_por=""
 
 def apps_script_post(payload):
     cfg = dict(st.secrets.get("apps_script", {}))
-    url = str(cfg.get("web_app_url", "")).strip()
+    url = str(cfg.get("web_app_url", "")).strip() or APPS_SCRIPT_WEB_APP_URL_PADRAO
     if not url:
         raise RuntimeError(apps_script_mensagem_configuracao())
 
@@ -5220,7 +5221,7 @@ elif pagina == "🛒 Pedido de Compra":
         )
         base_completa = atualizar_valor_e_origem(base_completa)
         st.session_state["pedido_editado"] = base_completa
-        st.success("Pedido salvo. Vá para a página Exportar Pedido para baixar o Excel e a cópia para fornecedor.")
+        st.success("Pedido salvo. Vá para a página Exportar Pedido para criar o Google Sheets na pasta de aprovação.")
 
     st.markdown("---")
     st.markdown("### Exportar pedido em Google Sheets")
