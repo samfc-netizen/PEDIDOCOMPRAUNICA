@@ -4,6 +4,8 @@ import difflib
 import json
 import base64
 import unicodedata
+import urllib.request
+import urllib.error
 from email.mime.text import MIMEText
 from email.utils import formataddr
 from io import BytesIO
@@ -20,13 +22,11 @@ except Exception:
 
 try:
     from google.oauth2.credentials import Credentials
-    from google.oauth2 import service_account as google_service_account
     from google.auth.transport.requests import Request
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaIoBaseUpload
 except Exception:
     Credentials = None
-    google_service_account = None
     Request = None
     build = None
     MediaIoBaseUpload = None
@@ -1272,143 +1272,75 @@ def gerar_csv(df):
 # INTEGRACAO GOOGLE DRIVE / SHEETS
 # =========================================================
 
-def google_service_account_json():
-    """
-    Autenticação recomendada para o Streamlit/Drive.
-    Usa uma Service Account em st.secrets, sem OAuth Playground e sem refresh_token.
-
-    Secrets aceitos:
-    [google_service_account]
-    type = "service_account"
-    project_id = "..."
-    private_key_id = "..."
-    private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
-    client_email = "...@...iam.gserviceaccount.com"
-    client_id = "..."
-    token_uri = "https://oauth2.googleapis.com/token"
-
-    Também aceita [gcp_service_account], que é o nome comum usado no Streamlit.
-    """
-    try:
-        for secao in ["google_service_account", "gcp_service_account"]:
-            cfg = dict(st.secrets.get(secao, {}))
-            if not cfg:
-                continue
-            if cfg.get("private_key"):
-                pk = str(cfg["private_key"]).strip()
-                # Aceita tanto \n literal quanto chave multilinha.
-                pk = pk.replace("\\n", "\n")
-                cfg["private_key"] = pk
-            cfg.setdefault("type", "service_account")
-            cfg.setdefault("token_uri", "https://oauth2.googleapis.com/token")
-            obrigatorios = ["type", "project_id", "private_key", "client_email", "token_uri"]
-            if all(cfg.get(c) for c in obrigatorios):
-                return json.dumps({k: str(v) for k, v in cfg.items()}, sort_keys=True)
-    except Exception:
-        return ""
-    return ""
-
-
 def google_configurado():
-    if build is None or MediaIoBaseUpload is None:
+    if Credentials is None or Request is None or build is None or MediaIoBaseUpload is None:
         return False
-    if google_service_account is not None and google_service_account_json():
-        return True
-    if Credentials is not None and Request is not None and google_oauth_user_json():
-        return True
-    return False
+    try:
+        cfg = dict(st.secrets.get("google_oauth_user", {}))
+        return bool(
+            cfg.get("client_id")
+            and cfg.get("client_secret")
+            and cfg.get("refresh_token")
+            and cfg.get("token_uri", "https://oauth2.googleapis.com/token")
+        )
+    except Exception:
+        return False
 
 
 def google_mensagem_configuracao():
-    if build is None or MediaIoBaseUpload is None:
+    if Credentials is None or Request is None or build is None or MediaIoBaseUpload is None:
         return (
             "Instale as dependencias do Google no ambiente: "
             "google-api-python-client, google-auth e google-auth-httplib2."
         )
     return (
-        "Para criar Google Sheets no Drive, configure uma Service Account em st.secrets "
-        "na seção [google_service_account] e compartilhe a pasta destino com o e-mail "
-        "client_email da Service Account como Editor. A leitura do cadastro continua simples, "
-        "sem OAuth, desde que a planilha esteja pública como Leitor."
+        "Configure o OAuth 2.0 da conta dona do Drive em st.secrets, na seção "
+        "[google_oauth_user], com client_id, client_secret, refresh_token e token_uri. "
+        "A conta autorizada deve ser gdautotintas@gmail.com. Enquanto o refresh_token "
+        "não estiver configurado, o app não consegue criar planilhas no Drive."
     )
 
 
 def google_oauth_user_json():
-    """
-    Mantém compatibilidade com OAuth antigo, mas ignora placeholders/Client ID inválido
-    para não disparar o erro invalid_client quando o segredo antigo ficou salvo.
-    """
     try:
         cfg = dict(st.secrets.get("google_oauth_user", {}))
         cfg["token_uri"] = cfg.get("token_uri", "https://oauth2.googleapis.com/token")
         campos = ["client_id", "client_secret", "refresh_token", "token_uri"]
-        if not all(cfg.get(c) for c in campos):
-            return ""
-
-        client_id = str(cfg.get("client_id", "")).strip()
-        client_secret = str(cfg.get("client_secret", "")).strip()
-        refresh_token = str(cfg.get("refresh_token", "")).strip()
-        invalidos = ["...", "seu_client_id", "seu client_id", "seu_client_secret", "seu client_secret"]
-        if client_id.lower() in invalidos or client_secret.lower() in invalidos or refresh_token.lower() in invalidos:
-            return ""
-        if not client_id.endswith(".apps.googleusercontent.com"):
-            return ""
-
-        return json.dumps({c: str(cfg.get(c)) for c in campos}, sort_keys=True)
+        if all(cfg.get(c) for c in campos):
+            return json.dumps({c: str(cfg.get(c)) for c in campos}, sort_keys=True)
     except Exception:
         return ""
     return ""
 
 
 @st.cache_resource(show_spinner=False)
-def google_get_services_cached(auth_json):
-    info = json.loads(auth_json)
+def google_get_services_cached(oauth_json):
+    info = json.loads(oauth_json)
     scopes = [
         "https://www.googleapis.com/auth/drive",
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/gmail.send",
     ]
-
-    if info.get("type") == "service_account":
-        if google_service_account is None:
-            raise RuntimeError("Biblioteca google-auth sem suporte a service_account no ambiente.")
-        credentials = google_service_account.Credentials.from_service_account_info(info, scopes=scopes)
-        gmail_service = None
-    else:
-        credentials = Credentials(
-            token=None,
-            refresh_token=info["refresh_token"],
-            token_uri=info["token_uri"],
-            client_id=info["client_id"],
-            client_secret=info["client_secret"],
-            scopes=scopes,
-        )
-        credentials.refresh(Request())
-        gmail_service = None
-
+    credentials = Credentials(
+        token=None,
+        refresh_token=info["refresh_token"],
+        token_uri=info["token_uri"],
+        client_id=info["client_id"],
+        client_secret=info["client_secret"],
+        scopes=scopes,
+    )
+    credentials.refresh(Request())
     drive_service = build("drive", "v3", credentials=credentials, cache_discovery=False)
     sheets_service = build("sheets", "v4", credentials=credentials, cache_discovery=False)
-
-    # Gmail só funciona com OAuth de usuário. Com Service Account, o e-mail será ignorado.
-    if info.get("type") != "service_account":
-        try:
-            gmail_service = build("gmail", "v1", credentials=credentials, cache_discovery=False)
-        except Exception:
-            gmail_service = None
-
+    gmail_service = build("gmail", "v1", credentials=credentials, cache_discovery=False)
     return drive_service, sheets_service, gmail_service
 
 
 def google_get_services():
-    service_json = google_service_account_json()
-    if service_json:
-        return google_get_services_cached(service_json)
-
     oauth_json = google_oauth_user_json()
-    if oauth_json:
-        return google_get_services_cached(oauth_json)
-
-    raise RuntimeError(google_mensagem_configuracao())
+    if not oauth_json:
+        raise RuntimeError(google_mensagem_configuracao())
+    return google_get_services_cached(oauth_json)
 
 
 def google_link_pasta(folder_id):
@@ -1591,15 +1523,10 @@ def google_get_resources_cached(_cache_key):
 
 
 def google_get_resources():
-    service_json = google_service_account_json()
-    if service_json:
-        return google_get_resources_cached(str(hash(service_json)))
-
     oauth_json = google_oauth_user_json()
-    if oauth_json:
-        return google_get_resources_cached(str(hash(oauth_json)))
-
-    raise RuntimeError(google_mensagem_configuracao())
+    if not oauth_json:
+        raise RuntimeError(google_mensagem_configuracao())
+    return google_get_resources_cached(str(hash(oauth_json)))
 
 
 def google_listar_planilhas_pasta(drive_service, folder_id):
@@ -1740,8 +1667,6 @@ Sistema de Pedidos
 
     try:
         _, _, gmail_service = google_get_services()
-        if gmail_service is None:
-            return False, "Pedido criado. E-mail não enviado porque a autenticação atual é Service Account."
         raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
         gmail_service.users().messages().send(userId="me", body={"raw": raw}).execute()
         return True, "E-mail enviado aos aprovadores."
@@ -2013,6 +1938,120 @@ def google_exportar_pedido_sheets_simples(nome_pedido, fornecedor, pedido_df, cr
         "link": link,
         "titulo": titulo,
         "valor": valor,
+        "folder_id": GOOGLE_PASTA_APROVACAO_ID,
+        "folder_link": google_link_pasta(GOOGLE_PASTA_APROVACAO_ID),
+    }
+
+
+
+# =========================================================
+# EXPORTAÇÃO VIA GOOGLE APPS SCRIPT (SEM OAUTH / SEM SERVICE ACCOUNT)
+# =========================================================
+
+def apps_script_configurado():
+    try:
+        cfg = dict(st.secrets.get("apps_script", {}))
+        return bool(cfg.get("web_app_url"))
+    except Exception:
+        return False
+
+
+def apps_script_mensagem_configuracao():
+    return (
+        "Configure a URL do Web App do Google Apps Script em .streamlit/secrets.toml, "
+        "na seção [apps_script], campo web_app_url. Não precisa OAuth, refresh_token nem Service Account."
+    )
+
+
+def apps_script_payload_pedido(nome_pedido, fornecedor, pedido_df, criado_por=""):
+    nome_limpo = google_safe_name(nome_pedido)
+    fornecedor_limpo = google_safe_name(fornecedor)
+    pedido_id = datetime.now().strftime("%Y%m%d%H%M%S")
+    titulo = f"{datetime.now().strftime('%Y-%m-%d')} - {fornecedor_limpo or 'Fornecedor'} - {nome_limpo}"
+
+    df_export = pedido_df.copy()
+    if "zx" not in df_export.columns:
+        df_export.insert(0, "zx", df_export.get("codigo", ""))
+
+    if "Valor Final do Pedido" not in df_export.columns:
+        df_export = atualizar_valor_e_origem(df_export)
+
+    valor = totalizar_valor_pedido(df_export)
+    agora = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+    controle = [
+        ["Campo", "Valor"],
+        ["Status", "Aguardando aprovação"],
+        ["Criado por", criado_por],
+        ["Criado em", agora],
+        ["Última alteração", agora],
+        ["Aprovado por", ""],
+        ["Aprovado em", ""],
+        ["Observação", "Pedido criado pelo Streamlit via Google Apps Script."],
+        ["Fornecedor", fornecedor_limpo],
+        ["Valor do Pedido", round(float(valor or 0), 2)],
+        ["ID Pedido", pedido_id],
+    ]
+
+    return {
+        "action": "criar_pedido",
+        "folder_id": GOOGLE_PASTA_APROVACAO_ID,
+        "title": titulo,
+        "pedido_id": pedido_id,
+        "nome_pedido": nome_limpo,
+        "fornecedor": fornecedor_limpo,
+        "criado_por": criado_por,
+        "valor": round(float(valor or 0), 2),
+        "pedido": google_df_to_values(df_export),
+        "controle": controle,
+    }
+
+
+def apps_script_post(payload):
+    cfg = dict(st.secrets.get("apps_script", {}))
+    url = str(cfg.get("web_app_url", "")).strip()
+    if not url:
+        raise RuntimeError(apps_script_mensagem_configuracao())
+
+    token = str(cfg.get("token", "")).strip()
+    if token:
+        payload["token"] = token
+
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            body = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        detalhe = e.read().decode("utf-8", errors="ignore")
+        raise RuntimeError(f"Erro HTTP ao chamar o Apps Script: {e.code} - {detalhe}")
+    except Exception as e:
+        raise RuntimeError(f"Não consegui chamar o Apps Script: {e}")
+
+    try:
+        result = json.loads(body)
+    except Exception:
+        raise RuntimeError(f"Resposta inválida do Apps Script: {body[:500]}")
+
+    if not result.get("ok"):
+        raise RuntimeError(result.get("error") or result.get("message") or "Apps Script retornou erro desconhecido.")
+    return result
+
+
+def apps_script_criar_planilha_pedido(nome_pedido, fornecedor, pedido_df, criado_por=""):
+    payload = apps_script_payload_pedido(nome_pedido, fornecedor, pedido_df, criado_por=criado_por)
+    result = apps_script_post(payload)
+    return {
+        "pedido_id": payload.get("pedido_id"),
+        "spreadsheet_id": result.get("spreadsheet_id"),
+        "link": result.get("url"),
+        "titulo": payload.get("title"),
+        "valor": payload.get("valor", 0),
         "folder_id": GOOGLE_PASTA_APROVACAO_ID,
         "folder_link": google_link_pasta(GOOGLE_PASTA_APROVACAO_ID),
     }
@@ -4673,13 +4712,10 @@ def render_pagina_pedidos_drive():
         st.warning(google_mensagem_configuracao())
         st.code(
             """
-[google_service_account]
-type = "service_account"
-project_id = "..."
-private_key_id = "..."
-private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
-client_email = "...@...iam.gserviceaccount.com"
+[google_oauth_user]
 client_id = "..."
+client_secret = "..."
+refresh_token = "..."
 token_uri = "https://oauth2.googleapis.com/token"
 """.strip(),
             language="toml",
@@ -4688,7 +4724,7 @@ token_uri = "https://oauth2.googleapis.com/token"
 
     try:
         recursos = google_get_resources()
-        st.success("Google Drive conectado via Service Account.")
+        st.success(f"Google Drive conectado via OAuth: {recursos.get('oauth_user', 'gdautotintas@gmail.com')}")
         c1, c2, c3 = st.columns(3)
         c1.link_button("Pedidos para aprovação", recursos["pedidos_link"])
         c2.link_button("Pedidos aprovados", recursos["aprovados_link"])
@@ -5188,10 +5224,10 @@ elif pagina == "🛒 Pedido de Compra":
 
     st.markdown("---")
     st.markdown("### Exportar pedido em Google Sheets")
-    st.caption("Nesta versão de teste, o pedido não é exportado em Excel nesta página. Ele será criado como uma nova planilha Google Sheets diretamente na pasta de aprovação.")
+    st.caption("Nesta versão, o pedido será enviado para um Google Apps Script, que cria a planilha Google Sheets diretamente na pasta de aprovação. Não usa OAuth, refresh_token nem Service Account no Python.")
     st.link_button("📁 Abrir pasta destino no Drive", google_link_pasta(GOOGLE_PASTA_APROVACAO_ID), use_container_width=True)
 
-    if google_configurado():
+    if apps_script_configurado():
         with st.form("form_exportar_pedido_sheets"):
             nome_pedido_drive = st.text_input("Nome do pedido", value=f"Pedido {datetime.now().strftime('%d-%m-%Y')}")
             fornecedor_drive = st.text_input("Fornecedor", value="")
@@ -5203,28 +5239,23 @@ elif pagina == "🛒 Pedido de Compra":
                 pedido_para_sheets = st.session_state.get("pedido_editado", pedido_editado).copy()
                 pedido_para_sheets = atualizar_valor_e_origem(pedido_para_sheets)
                 pedido_para_sheets = pedido_para_sheets[colunas_pedido_compras(MESES)]
-                resultado_sheets = google_exportar_pedido_sheets_simples(
+                resultado_sheets = apps_script_criar_planilha_pedido(
                     nome_pedido_drive,
                     fornecedor_drive,
                     pedido_para_sheets,
                     criado_por=usuario_drive,
                 )
-                st.success("Pedido exportado em Google Sheets com sucesso.")
+                st.success("Pedido exportado em Google Sheets com sucesso via Apps Script.")
                 st.write(f"Valor do pedido: **{format_moeda_br(resultado_sheets.get('valor', 0))}**")
                 st.link_button("Abrir planilha criada", resultado_sheets["link"], use_container_width=True)
                 st.link_button("Abrir pasta no Drive", resultado_sheets["folder_link"], use_container_width=True)
             except Exception as e:
                 st.error(str(e))
     else:
-        st.info(google_mensagem_configuracao())
-        st.code("""[google_service_account]
-type = "service_account"
-project_id = "..."
-private_key_id = "..."
-private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
-client_email = "...@...iam.gserviceaccount.com"
-client_id = "..."
-token_uri = "https://oauth2.googleapis.com/token""", language="toml")
+        st.info(apps_script_mensagem_configuracao())
+        st.code("""[apps_script]
+web_app_url = "https://script.google.com/macros/s/SEU_DEPLOY_ID/exec"
+# token = "opcional""", language="toml")
 
     with st.expander("Fallback: baixar CSV local"):
         st.download_button(
