@@ -2,8 +2,8 @@ import re
 import math
 import difflib
 import json
+import base64
 import unicodedata
-import smtplib
 from email.mime.text import MIMEText
 from email.utils import formataddr
 from io import BytesIO
@@ -19,11 +19,13 @@ except Exception:
     Workbook = None
 
 try:
-    from google.oauth2 import service_account
+    from google.oauth2.credentials import Credentials
+    from google.auth.transport.requests import Request
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaIoBaseUpload
 except Exception:
-    service_account = None
+    Credentials = None
+    Request = None
     build = None
     MediaIoBaseUpload = None
 
@@ -901,10 +903,10 @@ def ler_cadastro_produtos_google_cached(_cache_key, spreadsheet_id):
 
 
 def ler_cadastro_produtos_google():
-    info_json = google_service_account_json()
-    if not info_json:
+    oauth_json = google_oauth_user_json()
+    if not oauth_json:
         return pd.DataFrame()
-    return ler_cadastro_produtos_google_cached(str(hash(info_json)), GOOGLE_PLANILHA_CADASTRO_ID)
+    return ler_cadastro_produtos_google_cached(str(hash(oauth_json)), GOOGLE_PLANILHA_CADASTRO_ID)
 
 
 def aplicar_cadastro_dataframe(df_giro, cadastro):
@@ -1262,59 +1264,74 @@ def gerar_csv(df):
 # =========================================================
 
 def google_configurado():
-    if service_account is None or build is None or MediaIoBaseUpload is None:
+    if Credentials is None or Request is None or build is None or MediaIoBaseUpload is None:
         return False
     try:
-        return "google_service_account" in st.secrets or "GOOGLE_SERVICE_ACCOUNT_JSON" in st.secrets
+        cfg = dict(st.secrets.get("google_oauth_user", {}))
+        return bool(
+            cfg.get("client_id")
+            and cfg.get("client_secret")
+            and cfg.get("refresh_token")
+            and cfg.get("token_uri", "https://oauth2.googleapis.com/token")
+        )
     except Exception:
         return False
 
 
 def google_mensagem_configuracao():
-    if service_account is None or build is None or MediaIoBaseUpload is None:
+    if Credentials is None or Request is None or build is None or MediaIoBaseUpload is None:
         return (
             "Instale as dependencias do Google no ambiente: "
             "google-api-python-client, google-auth e google-auth-httplib2."
         )
     return (
-        "Configure a conta de servico em st.secrets e compartilhe a pasta do Drive "
-        "com o e-mail dessa conta como Editor."
+        "Configure o OAuth 2.0 da conta dona do Drive em st.secrets, na seção "
+        "[google_oauth_user], com client_id, client_secret, refresh_token e token_uri. "
+        "A conta autorizada deve ser gdautotintas@gmail.com. Enquanto o refresh_token "
+        "não estiver configurado, o app não consegue criar planilhas no Drive."
     )
 
 
-def google_service_account_json():
+def google_oauth_user_json():
     try:
-        if "google_service_account" in st.secrets:
-            return json.dumps(dict(st.secrets["google_service_account"]), sort_keys=True)
-        if "GOOGLE_SERVICE_ACCOUNT_JSON" in st.secrets:
-            raw = st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"]
-            if isinstance(raw, str):
-                json.loads(raw)
-                return raw
-            return json.dumps(dict(raw), sort_keys=True)
+        cfg = dict(st.secrets.get("google_oauth_user", {}))
+        cfg["token_uri"] = cfg.get("token_uri", "https://oauth2.googleapis.com/token")
+        campos = ["client_id", "client_secret", "refresh_token", "token_uri"]
+        if all(cfg.get(c) for c in campos):
+            return json.dumps({c: str(cfg.get(c)) for c in campos}, sort_keys=True)
     except Exception:
         return ""
     return ""
 
 
 @st.cache_resource(show_spinner=False)
-def google_get_services_cached(info_json):
-    info = json.loads(info_json)
+def google_get_services_cached(oauth_json):
+    info = json.loads(oauth_json)
     scopes = [
         "https://www.googleapis.com/auth/drive",
         "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/gmail.send",
     ]
-    credentials = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+    credentials = Credentials(
+        token=None,
+        refresh_token=info["refresh_token"],
+        token_uri=info["token_uri"],
+        client_id=info["client_id"],
+        client_secret=info["client_secret"],
+        scopes=scopes,
+    )
+    credentials.refresh(Request())
     drive_service = build("drive", "v3", credentials=credentials, cache_discovery=False)
     sheets_service = build("sheets", "v4", credentials=credentials, cache_discovery=False)
-    return drive_service, sheets_service, info.get("client_email", "")
+    gmail_service = build("gmail", "v1", credentials=credentials, cache_discovery=False)
+    return drive_service, sheets_service, gmail_service
 
 
 def google_get_services():
-    info_json = google_service_account_json()
-    if not info_json:
+    oauth_json = google_oauth_user_json()
+    if not oauth_json:
         raise RuntimeError(google_mensagem_configuracao())
-    return google_get_services_cached(info_json)
+    return google_get_services_cached(oauth_json)
 
 
 def google_link_pasta(folder_id):
@@ -1480,29 +1497,27 @@ def google_get_resources_cached(_cache_key):
       arquivos nativos do Google Sheets no Meu Drive.
     - Os pedidos são gerados do zero pelo código, sem copiar planilha modelo.
     """
-    drive_service, sheets_service, client_email = google_get_services()
+    google_get_services()
     return {
-        "client_email": client_email,
+        "oauth_user": "gdautotintas@gmail.com",
         "pedidos_folder_id": GOOGLE_PASTA_APROVACAO_ID,
         "aprovados_folder_id": GOOGLE_PASTA_APROVADOS_ID,
         "finais_folder_id": GOOGLE_PASTA_APROVADOS_ID,
-        "modelo_id": GOOGLE_MODELO_PEDIDO_ID,
         "cadastro_id": GOOGLE_PLANILHA_CADASTRO_ID,
         "root_link": google_link_pasta(GOOGLE_PASTA_APROVACAO_ID),
         "pedidos_link": google_link_pasta(GOOGLE_PASTA_APROVACAO_ID),
         "aprovados_link": google_link_pasta(GOOGLE_PASTA_APROVADOS_ID),
         "finais_link": google_link_pasta(GOOGLE_PASTA_APROVADOS_ID),
-        "modelo_link": google_link_planilha(GOOGLE_MODELO_PEDIDO_ID),
         "cadastro_link": google_link_planilha(GOOGLE_PLANILHA_CADASTRO_ID),
         "controle_link": google_link_pasta(GOOGLE_PASTA_APROVACAO_ID),
     }
 
 
 def google_get_resources():
-    info_json = google_service_account_json()
-    if not info_json:
+    oauth_json = google_oauth_user_json()
+    if not oauth_json:
         raise RuntimeError(google_mensagem_configuracao())
-    return google_get_resources_cached(str(hash(info_json)))
+    return google_get_resources_cached(str(hash(oauth_json)))
 
 
 def google_listar_planilhas_pasta(drive_service, folder_id):
@@ -1617,33 +1632,7 @@ def google_escrever_controle_pedido(spreadsheet_id, **kwargs):
 
 
 def google_enviar_email_aprovadores(nome_pedido, fornecedor, valor, link_pedido, criado_por=""):
-    """
-    Envia e-mail aos aprovadores se SMTP estiver configurado nos Secrets.
-
-    Configure no Streamlit Secrets:
-    [email_smtp]
-    host = "smtp.gmail.com"
-    port = 587
-    user = "seu_email@dautotintas.com.br"
-    password = "SENHA_DE_APP_DO_GMAIL"
-    from_name = "Sistema de Pedidos"
-    from_email = "seu_email@dautotintas.com.br"
-    """
-    try:
-        cfg = dict(st.secrets.get("email_smtp", {}))
-    except Exception:
-        cfg = {}
-
-    if not cfg or not cfg.get("user") or not cfg.get("password"):
-        return False, "E-mail não enviado: configure [email_smtp] nos Secrets do Streamlit."
-
-    host = cfg.get("host", "smtp.gmail.com")
-    port = int(cfg.get("port", 587))
-    user = cfg.get("user")
-    password = cfg.get("password")
-    from_email = cfg.get("from_email", user)
-    from_name = cfg.get("from_name", "Sistema de Pedidos")
-
+    """Envia e-mail aos aprovadores via Gmail API usando o OAuth configurado."""
     assunto = f"Novo pedido aguardando aprovação - {fornecedor or nome_pedido}"
     corpo = f"""Olá,
 
@@ -1664,17 +1653,16 @@ Sistema de Pedidos
 """
     msg = MIMEText(corpo, "plain", "utf-8")
     msg["Subject"] = assunto
-    msg["From"] = formataddr((from_name, from_email))
+    msg["From"] = formataddr(("Sistema de Pedidos", "gdautotintas@gmail.com"))
     msg["To"] = ", ".join(GOOGLE_APROVADORES_EMAILS)
 
     try:
-        with smtplib.SMTP(host, port, timeout=20) as server:
-            server.starttls()
-            server.login(user, password)
-            server.sendmail(from_email, GOOGLE_APROVADORES_EMAILS, msg.as_string())
+        _, _, gmail_service = google_get_services()
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
+        gmail_service.users().messages().send(userId="me", body={"raw": raw}).execute()
         return True, "E-mail enviado aos aprovadores."
     except Exception as e:
-        return False, f"Pedido criado, mas não consegui enviar e-mail: {e}"
+        return False, f"Pedido criado, mas não consegui enviar e-mail pela Gmail API: {e}"
 
 
 def google_criar_spreadsheet_do_zero(drive_service, sheets_service, titulo, folder_id):
@@ -4547,13 +4535,10 @@ def render_pagina_pedidos_drive():
         st.warning(google_mensagem_configuracao())
         st.code(
             """
-[google_service_account]
-type = "service_account"
-project_id = "..."
-private_key_id = "..."
-private_key = "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"
-client_email = "sua-conta@projeto.iam.gserviceaccount.com"
+[google_oauth_user]
 client_id = "..."
+client_secret = "..."
+refresh_token = "..."
 token_uri = "https://oauth2.googleapis.com/token"
 """.strip(),
             language="toml",
@@ -4562,12 +4547,11 @@ token_uri = "https://oauth2.googleapis.com/token"
 
     try:
         recursos = google_get_resources()
-        st.success(f"Google Drive conectado: {recursos.get('client_email', '')}")
-        c1, c2, c3, c4 = st.columns(4)
+        st.success(f"Google Drive conectado via OAuth: {recursos.get('oauth_user', 'gdautotintas@gmail.com')}")
+        c1, c2, c3 = st.columns(3)
         c1.link_button("Pedidos para aprovação", recursos["pedidos_link"])
         c2.link_button("Pedidos aprovados", recursos["aprovados_link"])
-        c3.link_button("Planilha modelo", recursos["modelo_link"])
-        c4.link_button("Cadastro", recursos["cadastro_link"])
+        c3.link_button("Cadastro", recursos["cadastro_link"])
 
         st.markdown("### Sincronizar aprovações")
         st.caption("Altere o Status para Aprovado na aba Controle da planilha. Depois clique abaixo para mover os pedidos aprovados para a pasta PEDIDOS APROVADOS.")
@@ -4614,29 +4598,13 @@ token_uri = "https://oauth2.googleapis.com/token"
         }
         pedido_label = st.selectbox("Pedido", list(opcoes.keys()), key="drive_pedido_status")
         usuario = st.text_input("Usuario responsavel", value="", key="drive_usuario_status")
-        status = st.selectbox("Status", ["Aprovado", "Em edicao", "Reprovado", "Finalizado"], key="drive_status")
+        status = st.selectbox("Status", ["Aprovado", "Em edição", "Reprovado", "Finalizado"], key="drive_status")
         observacao = st.text_input("Observacao", key="drive_observacao_status")
 
         if st.button("Salvar status no controle", type="primary"):
             atualizado = google_atualizar_status_pedido(opcoes[pedido_label], status, usuario=usuario, observacao=observacao)
             st.success(f"Status atualizado para {atualizado.get('status')}.")
             st.rerun()
-
-        try:
-            _, sheets_service, _ = google_get_services()
-            acomp = google_read_df(sheets_service, recursos["controle_id"], "Acompanhamento")
-            if not acomp.empty:
-                st.markdown("### Acompanhamento mensal")
-                acomp["valor"] = pd.to_numeric(acomp.get("valor", 0), errors="coerce").fillna(0)
-                resumo_mes = acomp.groupby(["mes", "fornecedor"], as_index=False)["valor"].sum()
-                st.dataframe(
-                    resumo_mes,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={"valor": st.column_config.NumberColumn("Valor", format="R$ %.2f")},
-                )
-        except Exception:
-            pass
     except Exception as e:
         st.error(str(e))
 
@@ -5118,7 +5086,7 @@ elif pagina == "🛒 Pedido de Compra":
                 if resultado_drive.get("email_ok"):
                     st.success(resultado_drive.get("email_msg", "E-mail enviado aos aprovadores."))
                 else:
-                    st.warning(resultado_drive.get("email_msg", "E-mail não enviado. Configure [email_smtp] nos Secrets."))
+                    st.warning(resultado_drive.get("email_msg", "E-mail não enviado pela Gmail API. Verifique o OAuth e o escopo gmail.send."))
             except Exception as e:
                 st.error(str(e))
     else:
@@ -5183,3 +5151,4 @@ elif pagina == "📄 Exportações":
             "copia_fornecedor.csv",
             "text/csv",
         )
+
