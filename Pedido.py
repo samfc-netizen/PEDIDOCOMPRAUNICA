@@ -3,6 +3,9 @@ import math
 import difflib
 import json
 import unicodedata
+import smtplib
+from email.mime.text import MIMEText
+from email.utils import formataddr
 from io import BytesIO
 from datetime import datetime, date
 
@@ -54,6 +57,13 @@ GOOGLE_SUBPASTA_FINAIS = "Arquivos Finais"
 GOOGLE_PLANILHA_CONTROLE = "Controle de Pedidos - Dauto"
 GOOGLE_PLANILHA_CADASTRO = "Cadastro de Produtos - Dauto"
 GOOGLE_PLANILHA_CADASTRO_ID = "1iu9dbvhQCqdfWTrRL2_HMnAkQQnbK_cqN_k-9pZpkBw"
+GOOGLE_MODELO_PEDIDO_ID = "1iu9dbvhQCqdfWTrRL2_HMnAkQQnbK_cqN_k-9pZpkBw"
+GOOGLE_PASTA_APROVACAO_ID = "1ZlTC720fGMHk6cqApXtjeNPBe84Vgx_b"
+GOOGLE_PASTA_APROVADOS_ID = "1Ez4LgDFh964iF-MjUl1KFjvGGQMKtRz_"
+GOOGLE_APROVADORES_EMAILS = [
+    "victor@dautotintas.com.br",
+    "samuel@dautotintas.com.br",
+]
 GOOGLE_PEDIDOS_COLUNAS = [
     "id_pedido", "nome_pedido", "fornecedor", "status", "valor",
     "criado_em", "criado_por", "aprovado_em", "aprovado_por",
@@ -1458,26 +1468,33 @@ def google_ensure_headers(sheets_service, spreadsheet_id, sheet_name, columns):
         google_write_df(sheets_service, spreadsheet_id, sheet_name, pd.DataFrame(columns=columns))
 
 
+
 @st.cache_data(show_spinner=False, ttl=60)
 def google_get_resources_cached(_cache_key):
+    """
+    Recursos fixos do Drive/Sheets.
+
+    Importante:
+    - Não cria novas pastas nem planilhas centrais aqui.
+    - Isso evita o erro storageQuotaExceeded da conta de serviço ao tentar criar
+      arquivos nativos do Google Sheets no Meu Drive.
+    - Os pedidos são criados copiando a planilha modelo informada.
+    """
     drive_service, sheets_service, client_email = google_get_services()
-    pedidos_folder_id = google_ensure_folder(drive_service, GOOGLE_SUBPASTA_PEDIDOS, GOOGLE_DRIVE_ROOT_FOLDER_ID)
-    finais_folder_id = google_ensure_folder(drive_service, GOOGLE_SUBPASTA_FINAIS, GOOGLE_DRIVE_ROOT_FOLDER_ID)
-    controle_id = google_ensure_spreadsheet(drive_service, GOOGLE_PLANILHA_CONTROLE, GOOGLE_DRIVE_ROOT_FOLDER_ID)
-    cadastro_id = GOOGLE_PLANILHA_CADASTRO_ID
-    google_ensure_headers(sheets_service, controle_id, "Pedidos", GOOGLE_PEDIDOS_COLUNAS)
-    google_ensure_headers(sheets_service, controle_id, "Acompanhamento", GOOGLE_ACOMPANHAMENTO_COLUNAS)
     return {
         "client_email": client_email,
-        "pedidos_folder_id": pedidos_folder_id,
-        "finais_folder_id": finais_folder_id,
-        "controle_id": controle_id,
-        "cadastro_id": cadastro_id,
-        "root_link": google_link_pasta(GOOGLE_DRIVE_ROOT_FOLDER_ID),
-        "pedidos_link": google_link_pasta(pedidos_folder_id),
-        "finais_link": google_link_pasta(finais_folder_id),
-        "controle_link": google_link_planilha(controle_id),
-        "cadastro_link": google_link_planilha(cadastro_id),
+        "pedidos_folder_id": GOOGLE_PASTA_APROVACAO_ID,
+        "aprovados_folder_id": GOOGLE_PASTA_APROVADOS_ID,
+        "finais_folder_id": GOOGLE_PASTA_APROVADOS_ID,
+        "modelo_id": GOOGLE_MODELO_PEDIDO_ID,
+        "cadastro_id": GOOGLE_PLANILHA_CADASTRO_ID,
+        "root_link": google_link_pasta(GOOGLE_PASTA_APROVACAO_ID),
+        "pedidos_link": google_link_pasta(GOOGLE_PASTA_APROVACAO_ID),
+        "aprovados_link": google_link_pasta(GOOGLE_PASTA_APROVADOS_ID),
+        "finais_link": google_link_pasta(GOOGLE_PASTA_APROVADOS_ID),
+        "modelo_link": google_link_planilha(GOOGLE_MODELO_PEDIDO_ID),
+        "cadastro_link": google_link_planilha(GOOGLE_PLANILHA_CADASTRO_ID),
+        "controle_link": google_link_pasta(GOOGLE_PASTA_APROVACAO_ID),
     }
 
 
@@ -1488,75 +1505,344 @@ def google_get_resources():
     return google_get_resources_cached(str(hash(info_json)))
 
 
+def google_listar_planilhas_pasta(drive_service, folder_id):
+    q = " and ".join([
+        "mimeType = 'application/vnd.google-apps.spreadsheet'",
+        f"'{google_q_text(folder_id)}' in parents",
+        "trashed = false",
+    ])
+    arquivos = []
+    page_token = None
+    while True:
+        result = drive_service.files().list(
+            q=q,
+            spaces="drive",
+            fields="nextPageToken, files(id, name, webViewLink, createdTime, modifiedTime)",
+            pageSize=100,
+            pageToken=page_token,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        ).execute()
+        arquivos.extend(result.get("files", []))
+        page_token = result.get("nextPageToken")
+        if not page_token:
+            break
+    return arquivos
+
+
+def google_controle_padrao(status="Em edição", criado_por="", criado_em="", fornecedor="", valor="", pedido_id="", observacao=""):
+    return pd.DataFrame([
+        {"Campo": "Status", "Valor": status},
+        {"Campo": "Criado por", "Valor": criado_por},
+        {"Campo": "Criado em", "Valor": criado_em},
+        {"Campo": "Última alteração", "Valor": datetime.now().strftime("%d/%m/%Y %H:%M")},
+        {"Campo": "Aprovado por", "Valor": ""},
+        {"Campo": "Aprovado em", "Valor": ""},
+        {"Campo": "Observação", "Valor": observacao},
+        {"Campo": "Fornecedor", "Valor": fornecedor},
+        {"Campo": "Valor do Pedido", "Valor": valor},
+        {"Campo": "ID Pedido", "Valor": pedido_id},
+    ])
+
+
+def google_normalizar_chave_controle(valor):
+    txt = str(valor or "").strip().lower()
+    txt = unicodedata.normalize("NFKD", txt).encode("ascii", "ignore").decode("ascii")
+    txt = re.sub(r"[^a-z0-9]+", "_", txt).strip("_")
+    return txt
+
+
+def google_ler_controle_pedido(spreadsheet_id):
+    """Lê a aba Controle. Aceita layout Campo/Valor ou layout antigo por cabeçalhos."""
+    _, sheets_service, _ = google_get_services()
+    try:
+        df = google_read_df(sheets_service, spreadsheet_id, "Controle")
+    except Exception:
+        try:
+            df = google_read_df(sheets_service, spreadsheet_id, "Aprovacao")
+        except Exception:
+            return {}
+
+    if df is None or df.empty:
+        return {}
+
+    cols_norm = {google_normalizar_chave_controle(c): c for c in df.columns}
+    dados = {}
+
+    # Layout recomendado: Campo | Valor
+    if "campo" in cols_norm and "valor" in cols_norm:
+        col_campo = cols_norm["campo"]
+        col_valor = cols_norm["valor"]
+        for _, row in df.iterrows():
+            chave = google_normalizar_chave_controle(row.get(col_campo, ""))
+            if chave:
+                dados[chave] = str(row.get(col_valor, "") or "").strip()
+        return dados
+
+    # Layout antigo: status | aprovado_por | aprovado_em | observacao
+    primeira = df.iloc[0].to_dict()
+    for col, val in primeira.items():
+        dados[google_normalizar_chave_controle(col)] = str(val or "").strip()
+    return dados
+
+
+def google_escrever_controle_pedido(spreadsheet_id, **kwargs):
+    _, sheets_service, _ = google_get_services()
+    atual = google_ler_controle_pedido(spreadsheet_id)
+    mapa = {
+        "status": kwargs.get("status", atual.get("status", "Em edição")),
+        "criado_por": kwargs.get("criado_por", atual.get("criado_por", "")),
+        "criado_em": kwargs.get("criado_em", atual.get("criado_em", "")),
+        "ultima_alteracao": datetime.now().strftime("%d/%m/%Y %H:%M"),
+        "aprovado_por": kwargs.get("aprovado_por", atual.get("aprovado_por", "")),
+        "aprovado_em": kwargs.get("aprovado_em", atual.get("aprovado_em", "")),
+        "observacao": kwargs.get("observacao", atual.get("observacao", "")),
+        "fornecedor": kwargs.get("fornecedor", atual.get("fornecedor", "")),
+        "valor_do_pedido": kwargs.get("valor", atual.get("valor_do_pedido", atual.get("valor", ""))),
+        "id_pedido": kwargs.get("pedido_id", atual.get("id_pedido", "")),
+    }
+    df = pd.DataFrame([
+        {"Campo": "Status", "Valor": mapa["status"]},
+        {"Campo": "Criado por", "Valor": mapa["criado_por"]},
+        {"Campo": "Criado em", "Valor": mapa["criado_em"]},
+        {"Campo": "Última alteração", "Valor": mapa["ultima_alteracao"]},
+        {"Campo": "Aprovado por", "Valor": mapa["aprovado_por"]},
+        {"Campo": "Aprovado em", "Valor": mapa["aprovado_em"]},
+        {"Campo": "Observação", "Valor": mapa["observacao"]},
+        {"Campo": "Fornecedor", "Valor": mapa["fornecedor"]},
+        {"Campo": "Valor do Pedido", "Valor": mapa["valor_do_pedido"]},
+        {"Campo": "ID Pedido", "Valor": mapa["id_pedido"]},
+    ])
+    google_write_df(sheets_service, spreadsheet_id, "Controle", df)
+
+
+def google_enviar_email_aprovadores(nome_pedido, fornecedor, valor, link_pedido, criado_por=""):
+    """
+    Envia e-mail aos aprovadores se SMTP estiver configurado nos Secrets.
+
+    Configure no Streamlit Secrets:
+    [email_smtp]
+    host = "smtp.gmail.com"
+    port = 587
+    user = "seu_email@dautotintas.com.br"
+    password = "SENHA_DE_APP_DO_GMAIL"
+    from_name = "Sistema de Pedidos"
+    from_email = "seu_email@dautotintas.com.br"
+    """
+    try:
+        cfg = dict(st.secrets.get("email_smtp", {}))
+    except Exception:
+        cfg = {}
+
+    if not cfg or not cfg.get("user") or not cfg.get("password"):
+        return False, "E-mail não enviado: configure [email_smtp] nos Secrets do Streamlit."
+
+    host = cfg.get("host", "smtp.gmail.com")
+    port = int(cfg.get("port", 587))
+    user = cfg.get("user")
+    password = cfg.get("password")
+    from_email = cfg.get("from_email", user)
+    from_name = cfg.get("from_name", "Sistema de Pedidos")
+
+    assunto = f"Novo pedido aguardando aprovação - {fornecedor or nome_pedido}"
+    corpo = f"""Olá,
+
+Um novo pedido foi gerado e está aguardando aprovação.
+
+Pedido: {nome_pedido}
+Fornecedor: {fornecedor}
+Valor estimado: {format_moeda_br(valor)}
+Criado por: {criado_por}
+
+Acesse a planilha para revisar e aprovar:
+{link_pedido}
+
+Para aprovar, altere o Status na aba Controle para Aprovado.
+
+Atenciosamente,
+Sistema de Pedidos
+"""
+    msg = MIMEText(corpo, "plain", "utf-8")
+    msg["Subject"] = assunto
+    msg["From"] = formataddr((from_name, from_email))
+    msg["To"] = ", ".join(GOOGLE_APROVADORES_EMAILS)
+
+    try:
+        with smtplib.SMTP(host, port, timeout=20) as server:
+            server.starttls()
+            server.login(user, password)
+            server.sendmail(from_email, GOOGLE_APROVADORES_EMAILS, msg.as_string())
+        return True, "E-mail enviado aos aprovadores."
+    except Exception as e:
+        return False, f"Pedido criado, mas não consegui enviar e-mail: {e}"
+
+
 def google_criar_planilha_pedido(nome_pedido, fornecedor, pedido_df, criado_por=""):
     drive_service, sheets_service, _ = google_get_services()
     recursos = google_get_resources()
     nome_limpo = google_safe_name(nome_pedido)
     fornecedor_limpo = google_safe_name(fornecedor)
+    pedido_id = datetime.now().strftime("%Y%m%d%H%M%S")
     titulo = f"{datetime.now().strftime('%Y-%m-%d')} - {fornecedor_limpo} - {nome_limpo}"
-    spreadsheet_id = google_ensure_spreadsheet(drive_service, titulo, recursos["pedidos_folder_id"])
+
+    # Copia a planilha modelo para a pasta PEDIDOS PARA APROVAÇÃO.
+    # Não usamos files().create com Google Sheets vazio, pois isso pode gerar storageQuotaExceeded
+    # com conta de serviço em Meu Drive.
+    try:
+        criado = drive_service.files().copy(
+            fileId=GOOGLE_MODELO_PEDIDO_ID,
+            body={"name": titulo, "parents": [GOOGLE_PASTA_APROVACAO_ID]},
+            fields="id, webViewLink",
+            supportsAllDrives=True,
+        ).execute()
+    except Exception as e:
+        raise RuntimeError(
+            "Não consegui copiar a planilha modelo para a pasta de aprovação. "
+            "Confirme que a planilha modelo e a pasta PEDIDOS PARA APROVAÇÃO estão compartilhadas "
+            "com a conta de serviço como Editor. Erro original: " + str(e)
+        )
+
+    spreadsheet_id = criado["id"]
+    link = criado.get("webViewLink") or google_link_planilha(spreadsheet_id)
 
     df_export = pedido_df.copy()
     if "zx" not in df_export.columns:
         df_export.insert(0, "zx", df_export.get("codigo", ""))
-    google_write_df(sheets_service, spreadsheet_id, "Pedido", df_export)
-    google_write_df(sheets_service, spreadsheet_id, "Aprovacao", pd.DataFrame([{
-        "status": "Em edicao",
-        "aprovado_por": "",
-        "aprovado_em": "",
-        "observacao": "",
-    }]))
 
-    agora = datetime.now().strftime("%d/%m/%Y %H:%M")
-    pedido_id = datetime.now().strftime("%Y%m%d%H%M%S")
-    link = google_link_planilha(spreadsheet_id)
     valor = totalizar_valor_pedido(df_export)
-    google_append_rows(sheets_service, recursos["controle_id"], "Pedidos", [[
-        pedido_id, nome_limpo, fornecedor_limpo, "Em edicao", round(float(valor or 0), 2),
-        agora, criado_por, "", "", link, spreadsheet_id, "", "", "",
-    ]])
-    return {"pedido_id": pedido_id, "spreadsheet_id": spreadsheet_id, "link": link, "titulo": titulo}
+    agora = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+    google_write_df(sheets_service, spreadsheet_id, "Pedido", df_export)
+    google_escrever_controle_pedido(
+        spreadsheet_id,
+        status="Aguardando aprovação",
+        criado_por=criado_por,
+        criado_em=agora,
+        fornecedor=fornecedor_limpo,
+        valor=round(float(valor or 0), 2),
+        pedido_id=pedido_id,
+    )
+
+    email_ok, email_msg = google_enviar_email_aprovadores(nome_limpo, fornecedor_limpo, valor, link, criado_por=criado_por)
+
+    return {
+        "pedido_id": pedido_id,
+        "spreadsheet_id": spreadsheet_id,
+        "link": link,
+        "titulo": titulo,
+        "email_ok": email_ok,
+        "email_msg": email_msg,
+    }
+
+
+def google_linha_pedido_por_arquivo(arquivo, status_pasta=""):
+    spreadsheet_id = arquivo.get("id", "")
+    controle = google_ler_controle_pedido(spreadsheet_id)
+    status = controle.get("status", "") or status_pasta or ""
+    valor = controle.get("valor_do_pedido", controle.get("valor", ""))
+    pedido_id = controle.get("id_pedido", "") or spreadsheet_id
+    fornecedor = controle.get("fornecedor", "")
+    nome = arquivo.get("name", "")
+    return {
+        "id_pedido": pedido_id,
+        "nome_pedido": nome,
+        "fornecedor": fornecedor,
+        "status": status,
+        "valor": valor,
+        "criado_em": controle.get("criado_em", arquivo.get("createdTime", "")),
+        "criado_por": controle.get("criado_por", ""),
+        "aprovado_em": controle.get("aprovado_em", ""),
+        "aprovado_por": controle.get("aprovado_por", ""),
+        "link_pedido": arquivo.get("webViewLink", google_link_planilha(spreadsheet_id)),
+        "spreadsheet_id": spreadsheet_id,
+        "link_autcom": "",
+        "link_fornecedor": "",
+        "observacao": controle.get("observacao", ""),
+    }
 
 
 def google_listar_pedidos():
-    _, sheets_service, _ = google_get_services()
-    recursos = google_get_resources()
-    df = google_read_df(sheets_service, recursos["controle_id"], "Pedidos")
+    drive_service, _, _ = google_get_services()
+    linhas = []
+    for arq in google_listar_planilhas_pasta(drive_service, GOOGLE_PASTA_APROVACAO_ID):
+        linhas.append(google_linha_pedido_por_arquivo(arq, "Aguardando aprovação"))
+    for arq in google_listar_planilhas_pasta(drive_service, GOOGLE_PASTA_APROVADOS_ID):
+        linhas.append(google_linha_pedido_por_arquivo(arq, "Aprovado"))
+    df = pd.DataFrame(linhas)
     for col in GOOGLE_PEDIDOS_COLUNAS:
         if col not in df.columns:
             df[col] = ""
+    if not df.empty:
+        df = df.sort_values("criado_em", ascending=False)
     return df[GOOGLE_PEDIDOS_COLUNAS]
 
 
 def google_salvar_pedidos_controle(df):
-    _, sheets_service, _ = google_get_services()
-    recursos = google_get_resources()
-    df = df.copy()
-    for col in GOOGLE_PEDIDOS_COLUNAS:
-        if col not in df.columns:
-            df[col] = ""
-    google_write_df(sheets_service, recursos["controle_id"], "Pedidos", df[GOOGLE_PEDIDOS_COLUNAS])
+    # Mantido por compatibilidade. O controle agora fica dentro de cada planilha de pedido.
+    return None
+
+
+def google_mover_arquivo(file_id, origem_folder_id, destino_folder_id):
+    drive_service, _, _ = google_get_services()
+    return drive_service.files().update(
+        fileId=file_id,
+        addParents=destino_folder_id,
+        removeParents=origem_folder_id,
+        fields="id, parents, webViewLink",
+        supportsAllDrives=True,
+    ).execute()
+
+
+def google_sincronizar_aprovacoes(usuario=""):
+    drive_service, _, _ = google_get_services()
+    movidos = []
+    ignorados = []
+    arquivos = google_listar_planilhas_pasta(drive_service, GOOGLE_PASTA_APROVACAO_ID)
+    agora = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+    for arq in arquivos:
+        spreadsheet_id = arq.get("id")
+        controle = google_ler_controle_pedido(spreadsheet_id)
+        status = str(controle.get("status", "")).strip().lower()
+        status_norm = unicodedata.normalize("NFKD", status).encode("ascii", "ignore").decode("ascii")
+        if status_norm == "aprovado":
+            aprovado_por = controle.get("aprovado_por", "") or usuario
+            aprovado_em = controle.get("aprovado_em", "") or agora
+            google_escrever_controle_pedido(
+                spreadsheet_id,
+                status="Aprovado",
+                aprovado_por=aprovado_por,
+                aprovado_em=aprovado_em,
+            )
+            google_mover_arquivo(spreadsheet_id, GOOGLE_PASTA_APROVACAO_ID, GOOGLE_PASTA_APROVADOS_ID)
+            movidos.append(arq.get("name", spreadsheet_id))
+        else:
+            ignorados.append({"arquivo": arq.get("name", spreadsheet_id), "status": controle.get("status", "")})
+
+    return movidos, ignorados
 
 
 def google_atualizar_status_pedido(pedido_id, status, usuario="", observacao="", link_autcom="", link_fornecedor=""):
-    df = google_listar_pedidos()
-    mask = df["id_pedido"].astype(str) == str(pedido_id)
+    pedidos = google_listar_pedidos()
+    mask = pedidos["id_pedido"].astype(str) == str(pedido_id)
     if not mask.any():
-        raise ValueError("Pedido nao encontrado no controle.")
-    idx = df[mask].index[0]
+        raise ValueError("Pedido nao encontrado no Drive.")
+    row = pedidos[mask].iloc[0].to_dict()
+    spreadsheet_id = row.get("spreadsheet_id")
     agora = datetime.now().strftime("%d/%m/%Y %H:%M")
-    df.loc[idx, "status"] = status
+    kwargs = {"status": status, "observacao": observacao}
     if status.lower().startswith("aprov"):
-        df.loc[idx, "aprovado_em"] = agora
-        df.loc[idx, "aprovado_por"] = usuario
-    if observacao:
-        df.loc[idx, "observacao"] = observacao
-    if link_autcom:
-        df.loc[idx, "link_autcom"] = link_autcom
-    if link_fornecedor:
-        df.loc[idx, "link_fornecedor"] = link_fornecedor
-    google_salvar_pedidos_controle(df)
-    return df.loc[idx].to_dict()
+        kwargs["aprovado_por"] = usuario
+        kwargs["aprovado_em"] = agora
+    google_escrever_controle_pedido(spreadsheet_id, **kwargs)
+
+    if status.lower().startswith("aprov"):
+        try:
+            google_mover_arquivo(spreadsheet_id, GOOGLE_PASTA_APROVACAO_ID, GOOGLE_PASTA_APROVADOS_ID)
+        except Exception:
+            pass
+    row.update(kwargs)
+    return row
 
 
 def google_ler_pedido_drive(spreadsheet_id):
@@ -1579,21 +1865,9 @@ def google_upload_bytes(nome_arquivo, dados, mime_type, folder_id):
 
 
 def google_registrar_acompanhamento(pedido_info):
-    _, sheets_service, _ = google_get_services()
-    recursos = google_get_resources()
-    data_atual = datetime.now().strftime("%d/%m/%Y")
-    mes_atual = datetime.now().strftime("%m/%Y")
-    google_append_rows(sheets_service, recursos["controle_id"], "Acompanhamento", [[
-        data_atual,
-        mes_atual,
-        pedido_info.get("fornecedor", ""),
-        pedido_info.get("nome_pedido", ""),
-        pedido_info.get("valor", ""),
-        pedido_info.get("status", ""),
-        pedido_info.get("link_pedido", ""),
-        pedido_info.get("link_autcom", ""),
-        pedido_info.get("link_fornecedor", ""),
-    ]])
+    # Nesta versão, o acompanhamento principal é feito pela leitura das próprias
+    # planilhas nas pastas de aprovação/aprovados. Mantido por compatibilidade.
+    return None
 
 
 def google_finalizar_pedido(pedido_id, df_tratamento, usuario=""):
@@ -4134,10 +4408,23 @@ token_uri = "https://oauth2.googleapis.com/token"
         recursos = google_get_resources()
         st.success(f"Google Drive conectado: {recursos.get('client_email', '')}")
         c1, c2, c3, c4 = st.columns(4)
-        c1.link_button("Pasta raiz", recursos["root_link"])
-        c2.link_button("Pedidos editaveis", recursos["pedidos_link"])
-        c3.link_button("Arquivos finais", recursos["finais_link"])
-        c4.link_button("Controle", recursos["controle_link"])
+        c1.link_button("Pedidos para aprovação", recursos["pedidos_link"])
+        c2.link_button("Pedidos aprovados", recursos["aprovados_link"])
+        c3.link_button("Planilha modelo", recursos["modelo_link"])
+        c4.link_button("Cadastro", recursos["cadastro_link"])
+
+        st.markdown("### Sincronizar aprovações")
+        st.caption("Altere o Status para Aprovado na aba Controle da planilha. Depois clique abaixo para mover os pedidos aprovados para a pasta PEDIDOS APROVADOS.")
+        usuario_sync = st.text_input("Responsável pela sincronização", value="", key="drive_usuario_sync")
+        if st.button("🔄 Sincronizar aprovações", type="primary"):
+            movidos, ignorados = google_sincronizar_aprovacoes(usuario=usuario_sync)
+            if movidos:
+                st.success(f"{len(movidos)} pedido(s) movido(s) para PEDIDOS APROVADOS.")
+                for nome in movidos[:10]:
+                    st.caption(f"✅ {nome}")
+            else:
+                st.info("Nenhum pedido com Status = Aprovado foi encontrado na pasta de aprovação.")
+            st.rerun()
 
         pedidos = google_listar_pedidos()
         if pedidos.empty:
@@ -4670,8 +4957,12 @@ elif pagina == "🛒 Pedido de Compra":
                     pedido_para_drive,
                     criado_por=usuario_drive,
                 )
-                st.success("Pedido criado no Google Drive.")
+                st.success("Pedido criado no Google Drive e salvo na pasta PEDIDOS PARA APROVAÇÃO.")
                 st.link_button("Abrir planilha do pedido", resultado_drive["link"])
+                if resultado_drive.get("email_ok"):
+                    st.success(resultado_drive.get("email_msg", "E-mail enviado aos aprovadores."))
+                else:
+                    st.warning(resultado_drive.get("email_msg", "E-mail não enviado. Configure [email_smtp] nos Secrets."))
             except Exception as e:
                 st.error(str(e))
     else:
