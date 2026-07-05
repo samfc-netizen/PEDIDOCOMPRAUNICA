@@ -1879,6 +1879,60 @@ def google_criar_planilha_pedido(nome_pedido, fornecedor, pedido_df, criado_por=
     }
 
 
+
+def google_exportar_pedido_sheets_simples(nome_pedido, fornecedor, pedido_df, criado_por=""):
+    """
+    Exporta o pedido de compra diretamente para uma nova planilha Google Sheets
+    na pasta de aprovação configurada, sem gerar Excel e sem depender do envio de e-mail.
+    """
+    drive_service, sheets_service, _ = google_get_services()
+
+    nome_limpo = google_safe_name(nome_pedido)
+    fornecedor_limpo = google_safe_name(fornecedor)
+    pedido_id = datetime.now().strftime("%Y%m%d%H%M%S")
+    titulo = f"{datetime.now().strftime('%Y-%m-%d')} - {fornecedor_limpo or 'Fornecedor'} - {nome_limpo}"
+
+    df_export = pedido_df.copy()
+    if "zx" not in df_export.columns:
+        df_export.insert(0, "zx", df_export.get("codigo", ""))
+
+    if "Valor Final do Pedido" not in df_export.columns:
+        df_export = atualizar_valor_e_origem(df_export)
+
+    valor = totalizar_valor_pedido(df_export)
+    agora = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+    spreadsheet_id, link = google_criar_spreadsheet_do_zero(
+        drive_service,
+        sheets_service,
+        titulo,
+        GOOGLE_PASTA_APROVACAO_ID,
+    )
+
+    google_write_df(sheets_service, spreadsheet_id, "Pedido", df_export)
+    google_escrever_controle_pedido(
+        spreadsheet_id,
+        status="Exportado em Sheets",
+        criado_por=criado_por,
+        criado_em=agora,
+        fornecedor=fornecedor_limpo,
+        valor=round(float(valor or 0), 2),
+        pedido_id=pedido_id,
+        observacao="Pedido exportado diretamente pelo Streamlit para Google Sheets.",
+    )
+    google_remover_abas_padrao(sheets_service, spreadsheet_id, ["Pedido", "Controle"])
+    google_formatar_planilha_pedido(sheets_service, spreadsheet_id, df_export)
+
+    return {
+        "pedido_id": pedido_id,
+        "spreadsheet_id": spreadsheet_id,
+        "link": link,
+        "titulo": titulo,
+        "valor": valor,
+        "folder_id": GOOGLE_PASTA_APROVACAO_ID,
+        "folder_link": google_link_pasta(GOOGLE_PASTA_APROVACAO_ID),
+    }
+
 def google_linha_pedido_por_arquivo(arquivo, status_pasta=""):
     spreadsheet_id = arquivo.get("id", "")
     controle = google_ler_controle_pedido(spreadsheet_id)
@@ -5044,53 +5098,50 @@ elif pagina == "🛒 Pedido de Compra":
         st.session_state["pedido_editado"] = base_completa
         st.success("Pedido salvo. Vá para a página Exportar Pedido para baixar o Excel e a cópia para fornecedor.")
 
-    try:
-        excel_editavel_bytes = gerar_excel_pedido_editavel(pedido_editado)
-        st.download_button(
-            "⬇️ Baixar pedido editável em Excel",
-            excel_editavel_bytes,
-            "pedido_editavel.xlsx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-        st.download_button(
-            "⬇️ Baixar pedido editável em CSV",
-            gerar_csv(pedido_editado[colunas_pedido_compras(MESES)]),
-            "pedido_editavel.csv",
-            "text/csv",
-        )
-    except RuntimeError as e:
-        st.error(str(e))
-
     st.markdown("---")
-    st.markdown("### Enviar pedido editável para o Google Drive")
+    st.markdown("### Exportar pedido em Google Sheets")
+    st.caption("Nesta versão de teste, o pedido não é exportado em Excel nesta página. Ele será criado como uma nova planilha Google Sheets diretamente na pasta de aprovação.")
+    st.link_button("📁 Abrir pasta destino no Drive", google_link_pasta(GOOGLE_PASTA_APROVACAO_ID), use_container_width=True)
+
     if google_configurado():
-        with st.form("form_exportar_pedido_drive"):
+        with st.form("form_exportar_pedido_sheets"):
             nome_pedido_drive = st.text_input("Nome do pedido", value=f"Pedido {datetime.now().strftime('%d-%m-%Y')}")
             fornecedor_drive = st.text_input("Fornecedor", value="")
             usuario_drive = st.text_input("Criado por", value="")
-            enviar_drive = st.form_submit_button("Criar planilha editável no Drive", type="primary")
+            enviar_drive = st.form_submit_button("Criar Google Sheets na pasta", type="primary")
 
         if enviar_drive:
             try:
-                pedido_para_drive = st.session_state.get("pedido_editado", pedido_editado).copy()
-                pedido_para_drive = atualizar_valor_e_origem(pedido_para_drive)
-                pedido_para_drive = pedido_para_drive[colunas_pedido_compras(MESES)]
-                resultado_drive = google_criar_planilha_pedido(
+                pedido_para_sheets = st.session_state.get("pedido_editado", pedido_editado).copy()
+                pedido_para_sheets = atualizar_valor_e_origem(pedido_para_sheets)
+                pedido_para_sheets = pedido_para_sheets[colunas_pedido_compras(MESES)]
+                resultado_sheets = google_exportar_pedido_sheets_simples(
                     nome_pedido_drive,
                     fornecedor_drive,
-                    pedido_para_drive,
+                    pedido_para_sheets,
                     criado_por=usuario_drive,
                 )
-                st.success("Pedido criado no Google Drive e salvo na pasta PEDIDOS PARA APROVAÇÃO.")
-                st.link_button("Abrir planilha do pedido", resultado_drive["link"])
-                if resultado_drive.get("email_ok"):
-                    st.success(resultado_drive.get("email_msg", "E-mail enviado aos aprovadores."))
-                else:
-                    st.warning(resultado_drive.get("email_msg", "E-mail não enviado pela Gmail API. Verifique o OAuth e o escopo gmail.send."))
+                st.success("Pedido exportado em Google Sheets com sucesso.")
+                st.write(f"Valor do pedido: **{format_moeda_br(resultado_sheets.get('valor', 0))}**")
+                st.link_button("Abrir planilha criada", resultado_sheets["link"], use_container_width=True)
+                st.link_button("Abrir pasta no Drive", resultado_sheets["folder_link"], use_container_width=True)
             except Exception as e:
                 st.error(str(e))
     else:
         st.info(google_mensagem_configuracao())
+        st.code("""[google_oauth_user]
+client_id = "..."
+client_secret = "..."
+refresh_token = "..."
+token_uri = "https://oauth2.googleapis.com/token""", language="toml")
+
+    with st.expander("Fallback: baixar CSV local"):
+        st.download_button(
+            "⬇️ Baixar pedido em CSV",
+            gerar_csv(pedido_editado[colunas_pedido_compras(MESES)]),
+            "pedido_editavel.csv",
+            "text/csv",
+        )
 
 elif pagina == "📄 Exportações":
     st.markdown('<div class="section-title">📄 Exportações</div>', unsafe_allow_html=True)
