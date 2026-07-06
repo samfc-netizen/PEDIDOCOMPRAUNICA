@@ -285,6 +285,57 @@ def extract_text_from_pdf(uploaded_file, max_pages=PDF_MAX_PAGINAS_PADRAO):
     return extract_text_from_pdf_cached(_pdf_bytes(uploaded_file), max_pages=max_pages)
 
 
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=8)
+def extract_text_from_pdf_pdfplumber_cached(pdf_bytes, max_pages=PDF_MAX_PAGINAS_PADRAO):
+    """
+    Extrai texto preservando melhor a ordem visual do relatório.
+    Uso recomendado para o PDF de Giro de Estoque, porque o PyMuPDF pode
+    reorganizar as linhas e quebrar o parser por empresa/produto.
+    """
+    pdf_bytes = bytes(pdf_bytes or b"")
+    if not pdf_bytes:
+        return ""
+
+    textos = []
+    with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+        total = min(len(pdf.pages), int(max_pages or len(pdf.pages)))
+        for i in range(total):
+            page = pdf.pages[i]
+            page_text = page.extract_text(x_tolerance=1, y_tolerance=3) or ""
+            if page_text.strip():
+                textos.append(page_text)
+    return "\n".join(textos)
+
+
+def extract_text_from_pdf_pdfplumber(uploaded_file, max_pages=PDF_MAX_PAGINAS_PADRAO):
+    return extract_text_from_pdf_pdfplumber_cached(_pdf_bytes(uploaded_file), max_pages=max_pages)
+
+
+def diagnosticar_pdf_giro(texto):
+    """Retorna uma mensagem amigável quando o arquivo no campo Giro não é o relatório esperado."""
+    txt = str(texto or "")
+    up = txt.upper()
+    if not txt.strip():
+        return (
+            "O PDF enviado no campo Giro de Estoque não retornou texto. "
+            "Provavelmente ele é escaneado/imagem ou está protegido. Gere/exporte o relatório em PDF textual pelo sistema."
+        )
+    if "ABERTO" in up and ("PEDIDO" in up or "PEDIDOS" in up or "QTDE" in up):
+        return (
+            "O arquivo enviado no campo Giro de Estoque parece ser o relatório de Pedidos em Aberto. "
+            "Na primeira caixa envie o PDF de Giro de Estoque; na segunda caixa envie o PDF de Pedidos em Aberto."
+        )
+    if "GIRO" not in up and "EMPRESA" not in up:
+        return (
+            "O arquivo enviado no campo Giro de Estoque não parece ter o layout do relatório de Giro. "
+            "Confira se você selecionou o PDF correto."
+        )
+    return (
+        "Não consegui extrair os dados do Giro de Estoque. "
+        "Confira se o PDF é o relatório de Giro de Estoque no layout padrão, com EMPRESA, código do item, meses, estoque e preço."
+    )
+
+
 def aviso_pdf_grande(uploaded_file, limite_mb=25):
     try:
         tamanho_mb = len(_pdf_bytes(uploaded_file)) / (1024 * 1024)
@@ -5087,12 +5138,16 @@ if not giro_pdf:
 
 aviso_pdf_grande(giro_pdf)
 with st.spinner("Lendo Giro de Estoque com cache otimizado..."):
-    texto_giro = extract_text_from_pdf(giro_pdf)
+    # Giro precisa manter a ordem visual das linhas; por isso usa pdfplumber, não PyMuPDF.
+    texto_giro = extract_text_from_pdf_pdfplumber(giro_pdf)
     MESES = extrair_meses_giro_pdf(texto_giro)
     df_giro = parse_giro_estoque(texto_giro, MESES)
 
 if df_giro.empty:
-    st.error("Não consegui extrair os dados do Giro de Estoque.")
+    st.error(diagnosticar_pdf_giro(texto_giro))
+    with st.expander("Diagnóstico técnico do PDF de Giro"):
+        st.write(f"Meses identificados: {MESES}")
+        st.text((texto_giro or "")[:4000])
     st.stop()
 
 if cadastro_google is not None and not cadastro_google.empty:
