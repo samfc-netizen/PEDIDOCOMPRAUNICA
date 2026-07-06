@@ -6,6 +6,7 @@ import base64
 import unicodedata
 import urllib.request
 import urllib.error
+import urllib.parse
 from email.mime.text import MIMEText
 from email.utils import formataddr
 from io import BytesIO
@@ -2687,6 +2688,59 @@ def ler_planilha_tratamento_pedido(uploaded_file):
     raise RuntimeError(f"Não consegui ler a planilha enviada. Último erro: {ultimo_erro}")
 
 
+def extrair_google_sheet_id_e_gid(link):
+    link = str(link or "").strip()
+    if not link:
+        return "", "0"
+
+    match_id = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", link)
+    if not match_id:
+        match_id = re.search(r"[?&]id=([a-zA-Z0-9-_]+)", link)
+    if not match_id:
+        raise ValueError("Link do Google Sheets invalido. Cole o link completo da planilha.")
+
+    parsed = urllib.parse.urlparse(link)
+    query = urllib.parse.parse_qs(parsed.query)
+    gid = "0"
+    if query.get("gid"):
+        gid = str(query["gid"][0] or "0")
+    else:
+        match_gid = re.search(r"(?:#|&)gid=([0-9]+)", link)
+        if match_gid:
+            gid = match_gid.group(1)
+
+    return match_id.group(1), gid
+
+
+@st.cache_data(show_spinner=False, ttl=300, max_entries=16)
+def ler_planilha_tratamento_google_sheets_cached(link):
+    sheet_id, gid = extrair_google_sheet_id_e_gid(link)
+    export_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+
+    try:
+        req = urllib.request.Request(export_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            conteudo = resp.read()
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403, 404):
+            raise RuntimeError(
+                "Nao consegui acessar a planilha sem credenciais. "
+                "Compartilhe a planilha como 'Qualquer pessoa com o link - Leitor' e tente novamente."
+            ) from e
+        raise RuntimeError(f"Erro ao baixar a planilha do Google Sheets: HTTP {e.code}") from e
+    except Exception as e:
+        raise RuntimeError(f"Erro ao baixar a planilha do Google Sheets: {e}") from e
+
+    if not conteudo:
+        return pd.DataFrame()
+
+    return pd.read_csv(BytesIO(conteudo), dtype=str, keep_default_na=False)
+
+
+def ler_planilha_tratamento_google_sheets(link):
+    return ler_planilha_tratamento_google_sheets_cached(str(link or "").strip())
+
+
 def gerar_excel_autcom_tratamento(df_tratamento):
     """
     Gera o Excel para importação no Autcom a partir da planilha de Tratamento de Pedido Final.
@@ -5018,7 +5072,7 @@ render_header()
 st.sidebar.markdown("### 📊 Análise de Giro")
 pagina = st.sidebar.radio(
     "Navegação",
-    ["📦 Giro Consolidado", "🛒 Pedido de Compra", "📄 Exportações", "📁 Pedidos no Drive", "🏷️ Ruptura por Marca", "⚖️ Comparativo de Pedidos", "⚙️ Tratamento Final"],
+    ["📦 Giro Consolidado", "🛒 Pedido de Compra", "📄 Exportações", "🏷️ Ruptura por Marca", "⚖️ Comparativo de Pedidos", "⚙️ Tratamento Final"],
     label_visibility="collapsed",
 )
 
@@ -5051,11 +5105,6 @@ if pagina == "🏷️ Ruptura por Marca":
 if pagina == "⚖️ Comparativo de Pedidos":
     render_pagina_comparativo_pedidos()
     st.stop()
-
-if pagina == "📁 Pedidos no Drive":
-    render_pagina_pedidos_drive()
-    st.stop()
-
 
 st.markdown('<div class="section-title">Upload dos arquivos</div>', unsafe_allow_html=True)
 st.caption("Envie o PDF de Giro para iniciar. Os demais arquivos enriquecem a análise e o pedido final.")
@@ -5096,7 +5145,7 @@ if pagina == "⚙️ Tratamento Final":
         "coluna B = zx, coluna F = PEDIDO Final e coluna H = Preço Última Compra."
     )
 
-    if google_configurado():
+    if False and google_configurado():
         st.markdown("### Usar pedido aprovado do Google Drive")
         try:
             pedidos_drive = google_listar_pedidos()
@@ -5145,21 +5194,37 @@ if pagina == "⚙️ Tratamento Final":
         st.markdown("---")
         st.markdown("### Upload manual")
 
+    st.markdown("### Ler planilha aprovada por link")
+    link_tratamento = st.text_input(
+        "Link do Google Sheets aprovado",
+        value="",
+        key="link_tratamento_google_sheets",
+        placeholder="https://docs.google.com/spreadsheets/d/.../edit#gid=0",
+    )
+    link_tratamento = str(link_tratamento or "").strip()
+    st.caption("Para funcionar sem credenciais, a planilha precisa estar compartilhada como 'Qualquer pessoa com o link - Leitor'.")
+
+    st.markdown("### Ou envie o arquivo manualmente")
     planilha_tratamento = st.file_uploader(
         "Planilha do Pedido Final",
         type=["xlsx", "xls", "csv"],
         key="upload_tratamento_pedido_final",
     )
 
-    if not planilha_tratamento:
-        st.info("Envie a planilha do pedido final para gerar o arquivo de importação Autcom.")
+    if not link_tratamento and not planilha_tratamento:
+        st.info("Cole o link da planilha aprovada ou envie a planilha do pedido final para gerar o arquivo de importação Autcom.")
         st.stop()
 
     try:
-        df_tratamento = ler_planilha_tratamento_pedido(planilha_tratamento)
+        if link_tratamento:
+            df_tratamento = ler_planilha_tratamento_google_sheets(link_tratamento)
+            origem_tratamento = "Google Sheets"
+        else:
+            df_tratamento = ler_planilha_tratamento_pedido(planilha_tratamento)
+            origem_tratamento = "upload"
         df_tratamento.columns = [str(c).strip() for c in df_tratamento.columns]
 
-        st.success(f"Planilha lida com sucesso: {len(df_tratamento)} linha(s).")
+        st.success(f"Planilha lida com sucesso via {origem_tratamento}: {len(df_tratamento)} linha(s).")
 
         colunas_preview = [c for c in ["zx", "descricao", "Código Fábrica", "PEDIDO Final", "Preço Última Compra", "Valor Final do Pedido", "Total Geral do Pedido"] if c in df_tratamento.columns]
         if colunas_preview:
