@@ -12,6 +12,12 @@ from io import BytesIO
 from datetime import datetime, date
 
 import pdfplumber
+
+try:
+    import fitz  # PyMuPDF - leitura de PDF muito mais rápida quando instalado
+except Exception:
+    fitz = None
+
 import pandas as pd
 import streamlit as st
 
@@ -219,14 +225,109 @@ def format_moeda_br(value):
         return "R$ 0,00"
 
 
-def extract_text_from_pdf(uploaded_file):
-    text = ""
-    with pdfplumber.open(uploaded_file) as pdf:
-        for page in pdf.pages:
-            page_text = page.extract_text(x_tolerance=1, y_tolerance=3)
-            if page_text:
-                text += page_text + "\n"
-    return text
+PDF_MAX_PAGINAS_PADRAO = 1000
+
+
+def _pdf_bytes(uploaded_file):
+    """Transforma UploadedFile/bytes em bytes e reposiciona o arquivo quando possível."""
+    if uploaded_file is None:
+        return b""
+    if isinstance(uploaded_file, (bytes, bytearray)):
+        return bytes(uploaded_file)
+    try:
+        return uploaded_file.getvalue()
+    except Exception:
+        try:
+            uploaded_file.seek(0)
+            return uploaded_file.read()
+        except Exception:
+            return b""
+
+
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=8)
+def extract_text_from_pdf_cached(pdf_bytes, max_pages=PDF_MAX_PAGINAS_PADRAO):
+    """
+    Extrai texto de PDF com cache para evitar que o Streamlit releia o mesmo arquivo
+    a cada interação. Prioriza PyMuPDF quando disponível, que costuma ser muito mais
+    rápido que pdfplumber para PDFs grandes.
+    """
+    pdf_bytes = bytes(pdf_bytes or b"")
+    if not pdf_bytes:
+        return ""
+
+    textos = []
+
+    # Caminho rápido: PyMuPDF. Se não estiver instalado, cai para pdfplumber.
+    if fitz is not None:
+        try:
+            with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+                total = min(len(doc), int(max_pages or len(doc)))
+                for i in range(total):
+                    page_text = doc[i].get_text("text") or ""
+                    if page_text.strip():
+                        textos.append(page_text)
+            return "\n".join(textos)
+        except Exception:
+            textos = []
+
+    # Fallback: pdfplumber, página a página.
+    with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+        total = min(len(pdf.pages), int(max_pages or len(pdf.pages)))
+        for i in range(total):
+            page_text = pdf.pages[i].extract_text(x_tolerance=1, y_tolerance=3) or ""
+            if page_text.strip():
+                textos.append(page_text)
+
+    return "\n".join(textos)
+
+
+def extract_text_from_pdf(uploaded_file, max_pages=PDF_MAX_PAGINAS_PADRAO):
+    return extract_text_from_pdf_cached(_pdf_bytes(uploaded_file), max_pages=max_pages)
+
+
+def aviso_pdf_grande(uploaded_file, limite_mb=25):
+    try:
+        tamanho_mb = len(_pdf_bytes(uploaded_file)) / (1024 * 1024)
+        if tamanho_mb >= limite_mb:
+            st.warning(
+                f"PDF com {tamanho_mb:.1f} MB. A leitura pode demorar. "
+                "O app agora usa cache e leitura otimizada para evitar travamentos."
+            )
+    except Exception:
+        pass
+
+
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=8)
+def extract_pdf_linhas_e_tabelas_cached(pdf_bytes, max_pages=PDF_MAX_PAGINAS_PADRAO):
+    """Extrai linhas de texto e linhas de tabelas com cache para PDFs de fornecedor."""
+    pdf_bytes = bytes(pdf_bytes or b"")
+    linhas_texto = []
+    linhas_tabela = []
+    if not pdf_bytes:
+        return linhas_texto, linhas_tabela
+
+    with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+        total = min(len(pdf.pages), int(max_pages or len(pdf.pages)))
+        for i in range(total):
+            page = pdf.pages[i]
+            for tabela in (page.extract_tables() or []):
+                for linha in tabela:
+                    celulas = [str(c or "").strip() for c in (linha or [])]
+                    if any(celulas):
+                        linhas_tabela.append(celulas)
+                        linhas_texto.append(" | ".join(celulas))
+
+            page_text = page.extract_text(x_tolerance=1, y_tolerance=3) or ""
+            for linha in page_text.splitlines():
+                linha = linha.strip()
+                if linha:
+                    linhas_texto.append(linha)
+
+    return linhas_texto, linhas_tabela
+
+
+def extract_pdf_linhas_e_tabelas(uploaded_file, max_pages=PDF_MAX_PAGINAS_PADRAO):
+    return extract_pdf_linhas_e_tabelas_cached(_pdf_bytes(uploaded_file), max_pages=max_pages)
 
 
 MESES_ABREV_PT = {
@@ -2805,28 +2906,7 @@ def extrair_itens_pdf_por_codigos(uploaded_file, codigos_referencia=None):
         if norm and len(norm) >= 3:
             referencias[norm] = str(c).strip()
 
-    linhas_texto = []
-
-    try:
-        uploaded_file.seek(0)
-    except Exception:
-        pass
-
-    with pdfplumber.open(uploaded_file) as pdf:
-        for page in pdf.pages:
-            # Linhas extraídas de tabelas, quando o PDF permitir.
-            for tabela in (page.extract_tables() or []):
-                for linha in tabela:
-                    celulas = [str(c or "").strip() for c in (linha or [])]
-                    if any(celulas):
-                        linhas_texto.append(" | ".join(celulas))
-
-            # Linhas extraídas como texto livre, cobrindo PDFs sem tabela estruturada.
-            page_text = page.extract_text(x_tolerance=1, y_tolerance=3) or ""
-            for linha in page_text.splitlines():
-                linha = linha.strip()
-                if linha:
-                    linhas_texto.append(linha)
+    linhas_texto, _linhas_tabela_pdf = extract_pdf_linhas_e_tabelas(uploaded_file)
 
     registros = []
     vistos = set()
@@ -2976,15 +3056,8 @@ def extrair_itens_pdf_por_blocos(uploaded_file, codigos_referencia=None):
             referencias.add(norm)
 
     try:
-        uploaded_file.seek(0)
-    except Exception:
-        pass
-
-    textos_paginas = []
-    try:
-        with pdfplumber.open(uploaded_file) as pdf:
-            for page in pdf.pages:
-                textos_paginas.append(page.extract_text(x_tolerance=1, y_tolerance=3) or "")
+        texto_pdf_completo = extract_text_from_pdf(uploaded_file)
+        textos_paginas = [texto_pdf_completo]
     except Exception:
         return pd.DataFrame()
 
@@ -3250,18 +3323,7 @@ def ler_arquivo_comparativo(uploaded_file, codigos_referencia=None):
             return df_pdf
 
         # Fallback antigo: tenta tabelas com cabeçalho quando não encontrou códigos no texto.
-        linhas = []
-        try:
-            uploaded_file.seek(0)
-        except Exception:
-            pass
-        with pdfplumber.open(uploaded_file) as pdf:
-            for page in pdf.pages:
-                tabelas = page.extract_tables() or []
-                for tabela in tabelas:
-                    for linha in tabela:
-                        if linha and any(str(c or "").strip() for c in linha):
-                            linhas.append([str(c or "").strip() for c in linha])
+        _linhas_texto_pdf, linhas = extract_pdf_linhas_e_tabelas(uploaded_file)
         if not linhas:
             return pd.DataFrame()
 
@@ -5023,7 +5085,8 @@ if not giro_pdf:
     st.info("Envie o PDF de Giro de Estoque para iniciar a análise.")
     st.stop()
 
-with st.spinner("Lendo Giro de Estoque..."):
+aviso_pdf_grande(giro_pdf)
+with st.spinner("Lendo Giro de Estoque com cache otimizado..."):
     texto_giro = extract_text_from_pdf(giro_pdf)
     MESES = extrair_meses_giro_pdf(texto_giro)
     df_giro = parse_giro_estoque(texto_giro, MESES)
@@ -5039,7 +5102,8 @@ else:
 
 df_transito = pd.DataFrame(columns=["codigo", "Saldo em Trânsito/ABERTO"])
 if pedidos_pdf:
-    with st.spinner("Lendo Pedidos de Compra em Aberto..."):
+    aviso_pdf_grande(pedidos_pdf)
+    with st.spinner("Lendo Pedidos de Compra em Aberto com cache otimizado..."):
         df_transito = parse_pedidos_compra_aberto_pdf(pedidos_pdf)
 
 tabela_resumo = montar_tabela_consolidada(
