@@ -263,7 +263,7 @@ def extract_text_from_pdf_cached(pdf_bytes, max_pages=PDF_MAX_PAGINAS_PADRAO):
             with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
                 total = min(len(doc), int(max_pages or len(doc)))
                 for i in range(total):
-                    page_text = doc[i].get_text("text") or ""
+                    page_text = doc[i].get_text("text", sort=True) or ""
                     if page_text.strip():
                         textos.append(page_text)
             return "\n".join(textos)
@@ -309,6 +309,20 @@ def extract_text_from_pdf_pdfplumber_cached(pdf_bytes, max_pages=PDF_MAX_PAGINAS
 
 def extract_text_from_pdf_pdfplumber(uploaded_file, max_pages=PDF_MAX_PAGINAS_PADRAO):
     return extract_text_from_pdf_pdfplumber_cached(_pdf_bytes(uploaded_file), max_pages=max_pages)
+
+
+def aviso_pymupdf_ausente_para_giro(uploaded_file):
+    try:
+        tamanho_mb = len(_pdf_bytes(uploaded_file)) / (1024 * 1024)
+    except Exception:
+        tamanho_mb = 0
+
+    if fitz is None and tamanho_mb >= 3:
+        st.warning(
+            "Este PDF de Giro tem muitas paginas e o PyMuPDF nao esta ativo neste ambiente. "
+            "A leitura ainda funciona pelo fallback, mas pode demorar bastante. "
+            "Para leitura rapida, instale/atualize as dependencias com: pip install -r requirements.txt"
+        )
 
 
 def diagnosticar_pdf_giro(texto):
@@ -641,6 +655,54 @@ def parse_giro_estoque(text, meses_ref=None):
 
     return pd.DataFrame(registros)
 
+
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=4)
+def parse_giro_estoque_pdf_cached(pdf_bytes, max_pages=PDF_MAX_PAGINAS_PADRAO):
+    """
+    Le o PDF de Giro ja retornando o DataFrame.
+
+    O relatorio pode ter centenas de paginas. PyMuPDF costuma ler esse PDF em
+    segundos; pdfplumber fica como fallback para ambientes sem a dependencia rapida.
+    """
+    pdf_bytes = bytes(pdf_bytes or b"")
+    if not pdf_bytes:
+        return pd.DataFrame(), MESES_PADRAO.copy(), "", "vazio"
+
+    textos = []
+
+    if fitz is not None:
+        try:
+            with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+                total = min(len(doc), int(max_pages or len(doc)))
+                for i in range(total):
+                    page_text = doc[i].get_text("text") or ""
+                    if page_text.strip():
+                        textos.append(page_text)
+
+            texto = "\n".join(textos)
+            meses_ref = extrair_meses_giro_pdf(texto)
+            df = parse_giro_estoque(texto, meses_ref)
+            if df is not None and not df.empty:
+                return df, meses_ref, texto[:4000], "pymupdf"
+        except Exception:
+            textos = []
+
+    with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+        total = min(len(pdf.pages), int(max_pages or len(pdf.pages)))
+        for i in range(total):
+            page_text = pdf.pages[i].extract_text(x_tolerance=1, y_tolerance=3) or ""
+            if page_text.strip():
+                textos.append(page_text)
+
+    texto = "\n".join(textos)
+    meses_ref = extrair_meses_giro_pdf(texto)
+    df = parse_giro_estoque(texto, meses_ref)
+    return df, meses_ref, texto[:4000], "pdfplumber"
+
+
+def parse_giro_estoque_pdf(uploaded_file, max_pages=PDF_MAX_PAGINAS_PADRAO):
+    return parse_giro_estoque_pdf_cached(_pdf_bytes(uploaded_file), max_pages=max_pages)
+
 # =========================================================
 # LEITURA DO PDF DE PEDIDOS EM ABERTO / SALDO EM TRÂNSITO
 # =========================================================
@@ -752,7 +814,7 @@ def parse_pedidos_compra_aberto_pdf(uploaded_file):
         pass
 
     try:
-        texto = extract_text_from_pdf(uploaded_file)
+        texto = extract_text_from_pdf_pdfplumber(uploaded_file)
         df_texto = parse_pedidos_compra_aberto(texto)
         if df_texto is not None and not df_texto.empty:
             df_texto["codigo"] = df_texto["codigo"].astype(str).str.extract(r"(\d+)", expand=False).fillna("").str.zfill(5)
@@ -5137,15 +5199,14 @@ if not giro_pdf:
     st.stop()
 
 aviso_pdf_grande(giro_pdf)
+aviso_pymupdf_ausente_para_giro(giro_pdf)
 with st.spinner("Lendo Giro de Estoque com cache otimizado..."):
-    # Giro precisa manter a ordem visual das linhas; por isso usa pdfplumber, não PyMuPDF.
-    texto_giro = extract_text_from_pdf_pdfplumber(giro_pdf)
-    MESES = extrair_meses_giro_pdf(texto_giro)
-    df_giro = parse_giro_estoque(texto_giro, MESES)
+    df_giro, MESES, texto_giro, metodo_giro = parse_giro_estoque_pdf(giro_pdf)
 
 if df_giro.empty:
     st.error(diagnosticar_pdf_giro(texto_giro))
     with st.expander("Diagnóstico técnico do PDF de Giro"):
+        st.write(f"Metodo de leitura: {metodo_giro}")
         st.write(f"Meses identificados: {MESES}")
         st.text((texto_giro or "")[:4000])
     st.stop()
@@ -5490,4 +5551,3 @@ elif pagina == "📄 Exportações":
             "copia_fornecedor.csv",
             "text/csv",
         )
-
