@@ -2,7 +2,7 @@ streamlit
 pandas
 pdfplumber
 openpyxl
-PyMuPDF
+pymupdf
 xlrd
 lxml
 google-api-python-client
