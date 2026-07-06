@@ -675,7 +675,7 @@ def parse_giro_estoque_pdf_cached(pdf_bytes, max_pages=PDF_MAX_PAGINAS_PADRAO):
             with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
                 total = min(len(doc), int(max_pages or len(doc)))
                 for i in range(total):
-                    page_text = doc[i].get_text("text") or ""
+                    page_text = doc[i].get_text("text", sort=True) or ""
                     if page_text.strip():
                         textos.append(page_text)
 
