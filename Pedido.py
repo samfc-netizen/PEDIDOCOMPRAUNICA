@@ -1972,13 +1972,42 @@ def apps_script_payload_pedido(nome_pedido, fornecedor, pedido_df, criado_por=""
     titulo = f"{datetime.now().strftime('%Y-%m-%d')} - {fornecedor_limpo or 'Fornecedor'} - {nome_limpo}"
 
     df_export = pedido_df.copy()
-    if "zx" not in df_export.columns:
-        df_export.insert(0, "zx", df_export.get("codigo", ""))
+
+    # IMPORTANTE:
+    # Para o Google Sheets, a ordem precisa ficar sem a coluna auxiliar "zx",
+    # porque a fórmula solicitada considera:
+    # P = Preço Última Compra
+    # R = PEDIDO Final
+    # T = Valor Final do Pedido = R * P
+    # W = Total Geral do Pedido = soma da coluna T
+    df_export = df_export.drop(columns=["zx"], errors="ignore")
 
     if "Valor Final do Pedido" not in df_export.columns:
         df_export = atualizar_valor_e_origem(df_export)
 
-    valor = totalizar_valor_pedido(df_export)
+    ordem_oficial = [c for c in colunas_pedido_compras() if c in df_export.columns]
+    extras = [c for c in df_export.columns if c not in ordem_oficial]
+    df_export = df_export[ordem_oficial + extras]
+
+    # Garante que a coluna T venha como fórmula no Sheets.
+    # Na ordem oficial:
+    # P = Preço Última Compra
+    # R = PEDIDO Final
+    # T = Valor Final do Pedido
+    if "Valor Final do Pedido" in df_export.columns:
+        df_export["Valor Final do Pedido"] = [
+            f"=R{i}*P{i}" for i in range(2, len(df_export) + 2)
+        ]
+
+    # Garante a coluna W com o total geral.
+    # Na ordem oficial, após adicionar esta coluna, ela fica em W.
+    if "Total Geral do Pedido" not in df_export.columns:
+        df_export["Total Geral do Pedido"] = ""
+
+    if len(df_export) > 0:
+        df_export.loc[df_export.index[0], "Total Geral do Pedido"] = f"=SUM(T2:T{len(df_export) + 1})"
+
+    valor = totalizar_valor_pedido(pedido_df)
     agora = datetime.now().strftime("%d/%m/%Y %H:%M")
 
     controle = [
