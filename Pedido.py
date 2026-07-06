@@ -1440,7 +1440,8 @@ def google_prepare_value(value):
 
 def google_df_to_values(df):
     df = df.copy() if df is not None else pd.DataFrame()
-    return [list(df.columns)] + [
+    header = ["" if str(col).startswith("__blank_") else col for col in df.columns]
+    return [header] + [
         [google_prepare_value(row.get(col, "")) for col in df.columns]
         for _, row in df.iterrows()
     ]
@@ -1989,23 +1990,36 @@ def apps_script_payload_pedido(nome_pedido, fornecedor, pedido_df, criado_por=""
     extras = [c for c in df_export.columns if c not in ordem_oficial]
     df_export = df_export[ordem_oficial + extras]
 
-    # Garante que a coluna T venha como fórmula no Sheets.
-    # Na ordem oficial:
-    # P = Preço Última Compra
-    # R = PEDIDO Final
-    # T = Valor Final do Pedido
+    # Garante fórmula do valor final usando as colunas corretas por NOME,
+    # sem depender da letra fixa da coluna.
+    # Valor Final do Pedido = PEDIDO Final * Preço Última Compra
+    def _excel_col_name(idx_zero_based):
+        idx = int(idx_zero_based) + 1
+        letras = ""
+        while idx:
+            idx, resto = divmod(idx - 1, 26)
+            letras = chr(65 + resto) + letras
+        return letras
+
     if "Valor Final do Pedido" in df_export.columns:
+        col_preco = _excel_col_name(df_export.columns.get_loc("Preço Última Compra"))
+        col_pedido = _excel_col_name(df_export.columns.get_loc("PEDIDO Final"))
         df_export["Valor Final do Pedido"] = [
-            f"=R{i}*P{i}" for i in range(2, len(df_export) + 2)
+            f'=IFERROR(VALUE(SUBSTITUTE(SUBSTITUTE({col_preco}{i},"R$",""),",","."))*VALUE({col_pedido}{i}),0)'
+            for i in range(2, len(df_export) + 2)
         ]
 
-    # Garante a coluna W com o total geral.
-    # Na ordem oficial, após adicionar esta coluna, ela fica em W.
+    # Garante que "Total Geral do Pedido" fique na coluna W.
+    # Se a tabela terminar antes da coluna V, adiciona colunas em branco até W.
+    while len(df_export.columns) < 22:
+        df_export[f"__blank_{len(df_export.columns) + 1}__"] = ""
+
     if "Total Geral do Pedido" not in df_export.columns:
         df_export["Total Geral do Pedido"] = ""
 
-    if len(df_export) > 0:
-        df_export.loc[df_export.index[0], "Total Geral do Pedido"] = f"=SUM(T2:T{len(df_export) + 1})"
+    if len(df_export) > 0 and "Valor Final do Pedido" in df_export.columns:
+        col_valor = _excel_col_name(df_export.columns.get_loc("Valor Final do Pedido"))
+        df_export.loc[df_export.index[0], "Total Geral do Pedido"] = f"=SUM({col_valor}2:{col_valor}{len(df_export) + 1})"
 
     valor = totalizar_valor_pedido(pedido_df)
     agora = datetime.now().strftime("%d/%m/%Y %H:%M")
