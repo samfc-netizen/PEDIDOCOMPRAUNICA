@@ -66,8 +66,9 @@ GOOGLE_PASTA_APROVACAO_ID = "1ZlTC720fGMHk6cqApXtjeNPBe84Vgx_b"
 APPS_SCRIPT_WEB_APP_URL_PADRAO = "https://script.google.com/macros/s/AKfycbwihVeGlWG3-SpecqZhHR2TsFVYmYZEGlvyrImpLX9eliv-fl7CqUwWCWBnmnlFIBww/exec"
 GOOGLE_PASTA_APROVADOS_ID = "1Ez4LgDFh964iF-MjUl1KFjvGGQMKtRz_"
 GOOGLE_APROVADORES_EMAILS = [
-    "victor@dautotintas.com.br",
     "samuel@dautotintas.com.br",
+    "victor@dautotintas.com.br",
+    "compras@dautotintas.com.br",
 ]
 GOOGLE_PEDIDOS_COLUNAS = [
     "id_pedido", "nome_pedido", "fornecedor", "status", "valor",
@@ -1997,6 +1998,8 @@ def apps_script_payload_pedido(nome_pedido, fornecedor, pedido_df, criado_por=""
     return {
         "action": "criar_pedido",
         "folder_id": GOOGLE_PASTA_APROVACAO_ID,
+        "approved_folder_id": GOOGLE_PASTA_APROVADOS_ID,
+        "approver_emails": GOOGLE_APROVADORES_EMAILS,
         "title": titulo,
         "pedido_id": pedido_id,
         "nome_pedido": nome_limpo,
@@ -2050,7 +2053,7 @@ def apps_script_criar_planilha_pedido(nome_pedido, fornecedor, pedido_df, criado
     return {
         "pedido_id": payload.get("pedido_id"),
         "spreadsheet_id": result.get("spreadsheet_id"),
-        "link": result.get("url"),
+        "link": result.get("url") or result.get("spreadsheet_url") or result.get("edit_url"),
         "titulo": payload.get("title"),
         "valor": payload.get("valor", 0),
         "folder_id": GOOGLE_PASTA_APROVACAO_ID,
