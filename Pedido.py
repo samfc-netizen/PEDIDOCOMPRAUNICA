@@ -463,6 +463,11 @@ def col_giro(prefixo, mes):
     return f"{prefixo} {label_mes_giro(mes)}"
 
 
+def mes_atual_referencia():
+    hoje = date.today()
+    return f"{hoje.month:02d}/{hoje.year}"
+
+
 def colunas_pedido_compras(meses_ref=None):
     """
     Ordem oficial da tela Pedido de Compra e do download Pedido Editável.
@@ -1254,7 +1259,13 @@ def arredondar_para_embalagem(sugestao, embalagem):
             return 0
 
 
-def montar_tabela_consolidada(df_giro, df_transito=None, dias_estoque_alvo=60, meses_alerta_sem_compra=3):
+def montar_tabela_consolidada(
+    df_giro,
+    df_transito=None,
+    dias_estoque_alvo=60,
+    meses_alerta_sem_compra=3,
+    considerar_mes_atual_media=True,
+):
     df_giro = df_giro.copy()
 
     # Garantias para evitar KeyError quando algum upload não trouxer cadastro/embalagem.
@@ -1336,7 +1347,13 @@ def montar_tabela_consolidada(df_giro, df_transito=None, dias_estoque_alvo=60, m
         resumo[col_geral] = resumo[f"Giro Lojas {label}"] + resumo[f"Giro Única {label}"]
         colunas_giro_geral.append(col_geral)
 
-    resumo["Média Giro Geral"] = resumo[colunas_giro_geral].mean(axis=1).round(1) if colunas_giro_geral else 0
+    meses_media_geral = list(meses_ref)
+    mes_atual = mes_atual_referencia()
+    if not considerar_mes_atual_media and mes_atual in meses_media_geral and len(meses_media_geral) > 1:
+        meses_media_geral = [m for m in meses_media_geral if m != mes_atual]
+
+    colunas_media_giro_geral = [col_giro("Giro Geral", mes) for mes in meses_media_geral if col_giro("Giro Geral", mes) in resumo.columns]
+    resumo["Média Giro Geral"] = resumo[colunas_media_giro_geral].mean(axis=1).round(1) if colunas_media_giro_geral else 0
 
     for col in ["Estoque Lojas", "Estoque Única", "Média Giro Lojas", "Média Giro Única"]:
         if col not in resumo.columns:
@@ -5834,6 +5851,19 @@ if cadastro_google is not None and not cadastro_google.empty:
 else:
     df_giro = aplicar_cadastro(df_giro, cadastro_csv)
 
+mes_atual_pdf = mes_atual_referencia()
+if mes_atual_pdf in MESES:
+    considerar_mes_atual_media = st.radio(
+        f"Considerar {label_mes_giro(mes_atual_pdf)} no cálculo da Média Giro Geral?",
+        ["Não", "Sim"],
+        index=0,
+        horizontal=True,
+        key="considerar_mes_atual_media_giro",
+        help="Se escolher Não, o mês atual continua aparecendo na tabela, mas não entra na Média Giro Geral nem na sugestão do pedido.",
+    ) == "Sim"
+else:
+    considerar_mes_atual_media = True
+
 df_transito = pd.DataFrame(columns=["codigo", "Saldo em Trânsito/ABERTO"])
 if pedidos_pdf:
     aviso_pdf_grande(pedidos_pdf)
@@ -5845,13 +5875,14 @@ tabela_resumo = montar_tabela_consolidada(
     df_transito=df_transito,
     dias_estoque_alvo=dias_estoque_alvo,
     meses_alerta_sem_compra=meses_alerta_sem_compra,
+    considerar_mes_atual_media=considerar_mes_atual_media,
 )
 
 assinatura_base = (
     tabela_resumo["codigo"].astype(str).str.cat(sep="|")
     + "|fab=" + tabela_resumo.get("Código Fábrica", pd.Series(dtype=str)).astype(str).str.cat(sep="|")
     + "|emb=" + tabela_resumo.get("Embalagem", pd.Series(dtype=str)).astype(str).str.cat(sep="|")
-    + f"|dias={dias_estoque_alvo}|alerta={meses_alerta_sem_compra}"
+    + f"|dias={dias_estoque_alvo}|alerta={meses_alerta_sem_compra}|mes_atual_media={int(considerar_mes_atual_media)}"
 )
 if st.session_state.get("assinatura_base_pedido") != assinatura_base:
     st.session_state["pedido_editado"] = inicializar_pedido_editavel(tabela_resumo)
