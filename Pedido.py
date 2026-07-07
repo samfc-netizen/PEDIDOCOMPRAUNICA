@@ -2872,7 +2872,7 @@ def ler_pedido_unica_comparativo_google_sheets(link):
     if df is None or df.empty:
         return pd.DataFrame()
     df.columns = [str(c).strip() for c in df.columns]
-    return df
+    return aplicar_cabecalho_pedido_unica_sheets(df)
 
 
 def gerar_excel_autcom_tratamento(df_tratamento):
@@ -3022,6 +3022,61 @@ def _coluna_por_candidatos(df, candidatos):
     return None
 
 
+CABECALHO_PEDIDO_UNICA_SHEETS = [
+    "codigo",
+    "descricao",
+    "Giro Geral Abr/26",
+    "Giro Geral Mai/26",
+    "Giro Geral Jun/26",
+    "Média Giro Geral",
+    "Estoque Lojas",
+    "Estoque Única",
+    "Estoque Geral",
+    "Saldo em Trânsito/ABERTO",
+    "Estoque Final",
+    "Estoque Alvo",
+    "Sugestão Sistema",
+    "Sugestão arredondada",
+    "Preço Última Compra",
+    "Data Última Compra",
+    "PEDIDO Final",
+    "Origem Sugestão",
+    "Valor Final do Pedido",
+    "Embalagem",
+    "Código Fábrica",
+]
+
+
+def aplicar_cabecalho_pedido_unica_sheets(df):
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    df = df.copy()
+    colunas = [str(c or "").strip() for c in df.columns]
+    colunas_norm = [normalizar_coluna(c) for c in colunas]
+
+    tem_codigo = any(c in ["CODIGO", "CÓDIGO"] for c in colunas_norm)
+    tem_pedido_final = "PEDIDO FINAL" in colunas_norm
+    qtd_sem_nome = sum(
+        1 for c in colunas
+        if not c or c.lower().startswith("unnamed") or c.upper().startswith("COLUNA ")
+    )
+
+    if tem_codigo and tem_pedido_final and qtd_sem_nome <= 2:
+        df.columns = [str(c).strip() for c in df.columns]
+        return df
+
+    novos = []
+    for i, col in enumerate(colunas):
+        if i < len(CABECALHO_PEDIDO_UNICA_SHEETS):
+            novos.append(CABECALHO_PEDIDO_UNICA_SHEETS[i])
+        else:
+            novos.append(col if col and not col.lower().startswith("unnamed") else f"COLUNA {i + 1}")
+
+    df.columns = _deduplicar_headers_planilha(novos)
+    return df
+
+
 def _normalizar_nome_coluna_flex(nome):
     """Normaliza nome de coluna para reconhecimento flexível."""
     txt = _texto_sem_acentos(nome).upper().strip()
@@ -3083,6 +3138,58 @@ def _coluna_quantidade_flexivel(df):
         if any(compact.startswith(p) for p in ["QTD", "QTDE", "QTE", "QTY", "QUANT", "QUANTIDADE"]):
             if not any(b in norm for b in bloqueios):
                 return col
+
+    return None
+
+
+def _coluna_valor_unitario_flexivel(df):
+    if df is None or df.empty:
+        return None
+
+    candidatos_exatos = {
+        "PRECO ULTIMA COMPRA", "PRECO", "PRECO UNITARIO", "VALOR UNITARIO",
+        "VLR UNIT", "VL UNIT", "VL UNITARIO", "VR UNIT", "VR UNITARIO",
+        "UNITARIO", "UNIT TOT", "UNIT TOTAL",
+    }
+    bloqueios = ["IPI", "ST", "QTDE", "QTD", "QUANT", "QUANTIDADE", "COD", "CODIGO", "DESCR"]
+
+    for col in df.columns:
+        norm = _normalizar_nome_coluna_flex(col)
+        if norm in candidatos_exatos:
+            return col
+
+    for col in df.columns:
+        norm = _normalizar_nome_coluna_flex(col)
+        if not norm:
+            continue
+        tem_preco = ("PRECO" in norm or "VALOR UNIT" in norm or "VLR UNIT" in norm or "VL UNIT" in norm or "VR UNIT" in norm or "UNITARIO" in norm)
+        if tem_preco and not any(b in norm for b in bloqueios):
+            if "TOTAL" not in norm or "UNIT" in norm or "UNITARIO" in norm:
+                return col
+
+    return None
+
+
+def _coluna_valor_total_flexivel(df):
+    if df is None or df.empty:
+        return None
+
+    candidatos_exatos = {
+        "VALOR FINAL DO PEDIDO", "VALOR TOTAL", "VL TOTAL", "VLR TOTAL",
+        "TOTAL", "TOTAL GERAL", "VALOR MERCADORIA", "VL MERCADORIA",
+    }
+
+    for col in df.columns:
+        norm = _normalizar_nome_coluna_flex(col)
+        if norm in candidatos_exatos:
+            return col
+
+    for col in df.columns:
+        norm = _normalizar_nome_coluna_flex(col)
+        if not norm:
+            continue
+        if ("TOTAL" in norm or "VALOR MERCADORIA" in norm) and "UNIT" not in norm and "UNITARIO" not in norm:
+            return col
 
     return None
 
@@ -3689,11 +3796,11 @@ def _mapear_colunas_comparativo(df, prefixo, origem):
     default_qtd = _coluna_quantidade_flexivel(df) or _primeira_coluna_existente(df, [
         "PEDIDO Final", "Quantidade", "Qtd", "Qtde", "Quant", "Qte", "Qty", "QTDE"
     ], permitir_vazio=True)
-    default_preco = _primeira_coluna_existente(df, [
+    default_preco = _coluna_valor_unitario_flexivel(df) or _primeira_coluna_existente(df, [
         "Preço Última Compra", "Preco Ultima Compra", "Preço", "Preco", "Preço Unitário", "Preco Unitario",
         "Valor Unitário", "Valor Unitario", "Vlr Unit", "Vl Unit", "VL. UNIT.", "VL UNIT", "VR.UNIT", "UNIT.TOT"
     ], permitir_vazio=True)
-    default_total = _primeira_coluna_existente(df, [
+    default_total = _coluna_valor_total_flexivel(df) or _primeira_coluna_existente(df, [
         "Valor Final do Pedido", "Valor Total", "VL. TOTAL", "VL TOTAL", "Vlr Total", "Total", "Valor"
     ], permitir_vazio=True)
 
@@ -3746,13 +3853,13 @@ def normalizar_pedido_comparativo(df, origem, mapa_colunas=None):
         "Quantidade Faturada", "Qtd Faturada", "Qtde Faturada",
         "Volume", "Vol",
     ])
-    col_preco = mapa_colunas.get("preco_unitario") or _coluna_por_candidatos(df, [
+    col_preco = mapa_colunas.get("preco_unitario") or _coluna_valor_unitario_flexivel(df) or _coluna_por_candidatos(df, [
         "Preço Última Compra", "Preco Ultima Compra", "Preço", "Preco", "Preço Unitário", "Preco Unitario",
         "Valor Unitário", "Valor Unitario", "Vlr Unit", "Vl Unit", "VL. UNIT.", "VL UNIT",
         "Vr.Unit", "VR.UNIT", "VR UNIT", "Unitário", "Unitario", "Preço Uni",
         "UNIT.TOT", "UNIT TOT", "Unit Total",
     ])
-    col_total = mapa_colunas.get("valor_total") or _coluna_por_candidatos(df, [
+    col_total = mapa_colunas.get("valor_total") or _coluna_valor_total_flexivel(df) or _coluna_por_candidatos(df, [
         "Valor Final do Pedido", "Valor Total", "VL. TOTAL", "VL TOTAL", "Vlr Total",
         "Total", "Total Geral", "Valor", "Valor Mercadoria",
     ])
