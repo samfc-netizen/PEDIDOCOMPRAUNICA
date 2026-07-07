@@ -2917,7 +2917,8 @@ def ler_csv_pedido_google_sheets(conteudo):
 
 
 @st.cache_data(show_spinner=False, ttl=300, max_entries=16)
-def ler_planilha_tratamento_google_sheets_cached(link):
+def ler_planilha_tratamento_google_sheets_cached(link, versao_leitura="menu-pedido-v3"):
+    _ = versao_leitura
     sheet_id, gid_link = extrair_google_sheet_id_e_gid(link)
     gid_pedido = buscar_gid_aba_google_sheets(sheet_id, "Pedido")
     gids_tentativa = [g for g in [gid_pedido, gid_link, "0"] if str(g or "").strip()]
@@ -3179,6 +3180,80 @@ def _coluna_por_candidatos(df, candidatos):
     return None
 
 
+def _serie_parece_data(series):
+    if series is None:
+        return False
+    valores = [str(v or "").strip() for v in series.head(60).tolist()]
+    valores = [v for v in valores if v and v.lower() not in ["nan", "none", "-"]]
+    if not valores:
+        return False
+    qtd_datas = sum(bool(re.match(r"^\d{1,2}/\d{1,2}/\d{2,4}$", v)) for v in valores)
+    return qtd_datas >= max(1, int(len(valores) * 0.55))
+
+
+def _serie_parece_quantidade(series):
+    if series is None:
+        return False
+    valores = [str(v or "").strip() for v in series.head(80).tolist()]
+    valores = [v for v in valores if v and v.lower() not in ["nan", "none", "-"]]
+    if not valores:
+        return False
+    if sum(bool(re.match(r"^\d{1,2}/\d{1,2}/\d{2,4}$", v)) for v in valores) >= max(2, int(len(valores) * 0.35)):
+        return False
+    numericos = [numero_planilha_para_float(v) for v in valores]
+    qtd_validos = sum(1 for n in numericos if n >= 0)
+    qtd_positivos = sum(1 for n in numericos if n > 0)
+    qtd_inteiros = sum(1 for n in numericos if abs(n - round(n)) < 0.0001)
+    return qtd_validos >= int(len(valores) * 0.75) and qtd_inteiros >= int(len(valores) * 0.70) and qtd_positivos > 0
+
+
+def _serie_parece_origem_sugestao(series):
+    if series is None:
+        return False
+    valores = [normalizar_texto_simples(v) for v in series.head(80).tolist()]
+    valores = [v for v in valores if v]
+    if not valores:
+        return False
+    qtd_origem = sum(("sugestao" in v or "alterado" in v or "sistema" in v) for v in valores)
+    return qtd_origem >= max(3, int(len(valores) * 0.45))
+
+
+def corrigir_desalinhamento_menu_pedido(df):
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    df = df.copy()
+    colunas = list(df.columns)
+    norm_para_col = {normalizar_coluna(c): c for c in colunas}
+    col_pedido = norm_para_col.get("PEDIDO FINAL")
+    if not col_pedido or col_pedido not in df.columns or not _serie_parece_data(df[col_pedido]):
+        return df
+
+    idx_pedido = colunas.index(col_pedido)
+    if idx_pedido + 1 >= len(colunas) or not _serie_parece_quantidade(df.iloc[:, idx_pedido + 1]):
+        return df
+
+    col_data_real = col_pedido
+    col_pedido_real = colunas[idx_pedido + 1]
+    col_origem_real = colunas[idx_pedido + 2] if idx_pedido + 2 < len(colunas) else None
+    col_valor_real = colunas[idx_pedido + 3] if idx_pedido + 3 < len(colunas) else None
+    col_embalagem_real = colunas[idx_pedido + 4] if idx_pedido + 4 < len(colunas) else None
+    col_fabrica_real = colunas[idx_pedido + 5] if idx_pedido + 5 < len(colunas) else None
+
+    df["Data Última Compra"] = df[col_data_real]
+    df["PEDIDO Final"] = df[col_pedido_real]
+    if col_origem_real is not None:
+        df["Origem Sugestão"] = df[col_origem_real]
+    if col_valor_real is not None:
+        df["Valor Final do Pedido"] = df[col_valor_real]
+    if col_embalagem_real is not None:
+        df["Embalagem"] = df[col_embalagem_real]
+    if col_fabrica_real is not None:
+        df["Código Fábrica"] = df[col_fabrica_real]
+
+    return df
+
+
 CABECALHO_PEDIDO_UNICA_SHEETS = [
     "codigo",
     "descricao",
@@ -3221,7 +3296,7 @@ def aplicar_cabecalho_pedido_unica_sheets(df):
 
     if tem_codigo and tem_pedido_final and qtd_sem_nome <= 2:
         df.columns = [str(c).strip() for c in df.columns]
-        return df
+        return corrigir_desalinhamento_menu_pedido(df)
 
     novos = []
     for i, col in enumerate(colunas):
@@ -3231,7 +3306,7 @@ def aplicar_cabecalho_pedido_unica_sheets(df):
             novos.append(col if col and not col.lower().startswith("unnamed") else f"COLUNA {i + 1}")
 
     df.columns = _deduplicar_headers_planilha(novos)
-    return df
+    return corrigir_desalinhamento_menu_pedido(df)
 
 
 def planilha_tratamento_tem_colunas_obrigatorias(df):
