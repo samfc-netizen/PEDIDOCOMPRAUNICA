@@ -1,6 +1,7 @@
 import re
 import math
 import difflib
+import csv
 import json
 import base64
 import unicodedata
@@ -9,7 +10,7 @@ import urllib.error
 import urllib.parse
 from email.mime.text import MIMEText
 from email.utils import formataddr
-from io import BytesIO
+from io import BytesIO, StringIO
 from datetime import datetime, date
 
 import pdfplumber
@@ -2835,6 +2836,86 @@ def baixar_csv_google_sheets_por_aba(sheet_id, nome_aba="Pedido"):
         return resp.read()
 
 
+def csv_bytes_para_dataframe_raw(conteudo):
+    if not conteudo:
+        return pd.DataFrame()
+
+    for encoding in ["utf-8-sig", "latin1"]:
+        try:
+            texto = bytes(conteudo).decode(encoding)
+            break
+        except Exception:
+            texto = ""
+    if not texto:
+        return pd.DataFrame()
+
+    linhas = list(csv.reader(StringIO(texto)))
+    if not linhas:
+        return pd.DataFrame()
+
+    max_cols = max(len(linha) for linha in linhas)
+    linhas = [linha + [""] * (max_cols - len(linha)) for linha in linhas]
+    return pd.DataFrame(linhas)
+
+
+def detectar_linha_cabecalho_pedido(df_raw, max_linhas=50):
+    if df_raw is None or df_raw.empty:
+        return None
+
+    limite = min(int(max_linhas), len(df_raw))
+    melhor_idx = None
+    melhor_score = -1
+
+    termos_fortes = [
+        "CODIGO", "CÓDIGO", "DESCRICAO", "DESCRIÇÃO", "PEDIDO FINAL",
+        "PREÇO ÚLTIMA COMPRA", "PRECO ULTIMA COMPRA", "DATA ÚLTIMA COMPRA",
+        "DATA ULTIMA COMPRA", "VALOR FINAL DO PEDIDO",
+    ]
+
+    for idx in range(limite):
+        valores = [str(v or "").strip() for v in df_raw.iloc[idx].tolist()]
+        norm = [normalizar_coluna(v) for v in valores if str(v or "").strip()]
+        if not norm:
+            continue
+
+        tem_descricao = any(v in ["DESCRICAO", "DESCRIÇÃO"] for v in norm)
+        tem_codigo = any(v in ["CODIGO", "CÓDIGO", "ZX"] for v in norm)
+        tem_pedido = "PEDIDO FINAL" in norm
+        tem_preco = any(v in ["PREÇO ÚLTIMA COMPRA", "PRECO ULTIMA COMPRA"] for v in norm)
+        score = sum(1 for termo in termos_fortes if termo in norm)
+
+        if tem_descricao and (tem_codigo or tem_pedido or tem_preco):
+            score += 10
+        if tem_pedido and tem_preco:
+            score += 5
+
+        if score > melhor_score:
+            melhor_idx = idx
+            melhor_score = score
+
+    return melhor_idx if melhor_score >= 12 else None
+
+
+def ler_csv_pedido_google_sheets(conteudo):
+    if not conteudo:
+        return pd.DataFrame()
+
+    df_raw = csv_bytes_para_dataframe_raw(conteudo)
+    idx_header = detectar_linha_cabecalho_pedido(df_raw)
+
+    if idx_header is not None:
+        headers = [str(v or "").strip() for v in df_raw.iloc[idx_header].tolist()]
+        df = df_raw.iloc[idx_header + 1:].copy()
+        df.columns = _deduplicar_headers_planilha(headers)
+        df = df.dropna(how="all")
+        df = df.loc[:, [str(c).strip() != "" for c in df.columns]]
+        df = df[~df.apply(lambda row: all(str(v or "").strip() == "" for v in row), axis=1)]
+        return aplicar_cabecalho_pedido_unica_sheets(df)
+
+    df = pd.read_csv(BytesIO(conteudo), dtype=str, keep_default_na=False)
+    return aplicar_cabecalho_pedido_unica_sheets(df)
+
+
 @st.cache_data(show_spinner=False, ttl=300, max_entries=16)
 def ler_planilha_tratamento_google_sheets_cached(link):
     sheet_id, gid_link = extrair_google_sheet_id_e_gid(link)
@@ -2847,8 +2928,7 @@ def ler_planilha_tratamento_google_sheets_cached(link):
         try:
             conteudo = baixar_csv_google_sheets_por_aba(sheet_id, "Pedido")
             if conteudo:
-                df = pd.read_csv(BytesIO(conteudo), dtype=str, keep_default_na=False)
-                df = aplicar_cabecalho_pedido_unica_sheets(df)
+                df = ler_csv_pedido_google_sheets(conteudo)
                 if planilha_tratamento_tem_colunas_obrigatorias(df):
                     return df
         except Exception as e:
@@ -2859,8 +2939,7 @@ def ler_planilha_tratamento_google_sheets_cached(link):
             if not conteudo:
                 continue
 
-            df = pd.read_csv(BytesIO(conteudo), dtype=str, keep_default_na=False)
-            df = aplicar_cabecalho_pedido_unica_sheets(df)
+            df = ler_csv_pedido_google_sheets(conteudo)
             if planilha_tratamento_tem_colunas_obrigatorias(df):
                 return df
 
@@ -2934,11 +3013,11 @@ def ler_pedido_unica_comparativo_google_sheets(link):
     except Exception as e:
         raise RuntimeError(f"Erro ao baixar a aba Pedido do Google Sheets: {e}") from e
 
-    df = pd.read_csv(BytesIO(conteudo), dtype=str, keep_default_na=False)
+    df = ler_csv_pedido_google_sheets(conteudo)
     if df is None or df.empty:
         return pd.DataFrame()
     df.columns = [str(c).strip() for c in df.columns]
-    return aplicar_cabecalho_pedido_unica_sheets(df)
+    return df
 
 
 def gerar_excel_autcom_tratamento(df_tratamento):
