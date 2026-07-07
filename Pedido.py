@@ -2917,7 +2917,7 @@ def ler_csv_pedido_google_sheets(conteudo):
 
 
 @st.cache_data(show_spinner=False, ttl=300, max_entries=16)
-def ler_planilha_tratamento_google_sheets_cached(link, versao_leitura="menu-pedido-v3"):
+def ler_planilha_tratamento_google_sheets_cached(link, versao_leitura="menu-pedido-v4"):
     _ = versao_leitura
     sheet_id, gid_link = extrair_google_sheet_id_e_gid(link)
     gid_pedido = buscar_gid_aba_google_sheets(sheet_id, "Pedido")
@@ -3279,6 +3279,53 @@ CABECALHO_PEDIDO_UNICA_SHEETS = [
 ]
 
 
+def montar_cabecalho_pedido_dinamico(qtd_colunas, linha_menu=None):
+    qtd_colunas = int(qtd_colunas or 0)
+    if qtd_colunas <= 0:
+        return []
+
+    valores_menu = [str(v or "").strip() for v in (linha_menu or [])]
+    origem_idx = None
+    for i, valor in enumerate(valores_menu):
+        if normalizar_coluna(valor) == "ORIGEM SUGESTÃO":
+            origem_idx = i
+            break
+
+    if origem_idx is not None and origem_idx >= 14:
+        qtd_giros = max(1, origem_idx - 14)
+    else:
+        qtd_giros = max(1, qtd_colunas - 19)
+
+    labels_giro = [f"Giro Geral {i + 1}" for i in range(qtd_giros)]
+    headers = [
+        "codigo",
+        "descricao",
+        *labels_giro,
+        "Média Giro Geral",
+        "Estoque Lojas",
+        "Estoque Única",
+        "Estoque Geral",
+        "Saldo em Trânsito/ABERTO",
+        "Estoque Final",
+        "Estoque Alvo",
+        "Sugestão Sistema",
+        "Sugestão arredondada",
+        "Preço Última Compra",
+        "Data Última Compra",
+        "PEDIDO Final",
+        "Origem Sugestão",
+        "Valor Final do Pedido",
+        "Embalagem",
+        "Código Fábrica",
+        "Total Geral do Pedido",
+    ]
+
+    while len(headers) < qtd_colunas:
+        headers.append(f"COLUNA {len(headers) + 1}")
+
+    return headers[:qtd_colunas]
+
+
 def aplicar_cabecalho_pedido_unica_sheets(df):
     if df is None or df.empty:
         return pd.DataFrame()
@@ -3289,6 +3336,11 @@ def aplicar_cabecalho_pedido_unica_sheets(df):
 
     tem_codigo = any(c in ["CODIGO", "CÓDIGO"] for c in colunas_norm)
     tem_pedido_final = "PEDIDO FINAL" in colunas_norm
+    tem_menu_parcial_sheets = (
+        any(c in ["DESCRICAO", "DESCRIÇÃO"] for c in colunas_norm)
+        and "ORIGEM SUGESTÃO" in colunas_norm
+        and not tem_pedido_final
+    )
     qtd_sem_nome = sum(
         1 for c in colunas
         if not c or c.lower().startswith("unnamed") or c.upper().startswith("COLUNA ")
@@ -3298,10 +3350,15 @@ def aplicar_cabecalho_pedido_unica_sheets(df):
         df.columns = [str(c).strip() for c in df.columns]
         return corrigir_desalinhamento_menu_pedido(df)
 
+    if tem_menu_parcial_sheets:
+        df.columns = _deduplicar_headers_planilha(montar_cabecalho_pedido_dinamico(len(colunas), colunas))
+        return corrigir_desalinhamento_menu_pedido(df)
+
     novos = []
     for i, col in enumerate(colunas):
-        if i < len(CABECALHO_PEDIDO_UNICA_SHEETS):
-            novos.append(CABECALHO_PEDIDO_UNICA_SHEETS[i])
+        headers_dinamicos = montar_cabecalho_pedido_dinamico(len(colunas), colunas)
+        if i < len(headers_dinamicos):
+            novos.append(headers_dinamicos[i])
         else:
             novos.append(col if col and not col.lower().startswith("unnamed") else f"COLUNA {i + 1}")
 
