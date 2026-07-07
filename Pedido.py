@@ -2194,15 +2194,16 @@ def google_exportar_pedido_sheets_simples(nome_pedido, fornecedor, pedido_df, cr
 def apps_script_configurado():
     try:
         cfg = dict(st.secrets.get("apps_script", {}))
-        return bool(str(cfg.get("web_app_url", "")).strip() or APPS_SCRIPT_WEB_APP_URL_PADRAO)
+        return bool(str(cfg.get("web_app_url", "")).strip())
     except Exception:
-        return bool(APPS_SCRIPT_WEB_APP_URL_PADRAO)
+        return False
 
 
 def apps_script_mensagem_configuracao():
     return (
         "Configure a URL do Web App do Google Apps Script em .streamlit/secrets.toml, "
-        "na seção [apps_script], campo web_app_url. Não precisa OAuth, refresh_token nem Service Account."
+        "na seção [apps_script], campo web_app_url. Use a URL terminada em /exec do deploy atual. "
+        "Não precisa OAuth, refresh_token nem Service Account."
     )
 
 
@@ -2301,9 +2302,14 @@ def apps_script_payload_pedido(nome_pedido, fornecedor, pedido_df, criado_por=""
 
 def apps_script_post(payload):
     cfg = dict(st.secrets.get("apps_script", {}))
-    url = str(cfg.get("web_app_url", "")).strip() or APPS_SCRIPT_WEB_APP_URL_PADRAO
+    url = str(cfg.get("web_app_url", "")).strip()
     if not url:
         raise RuntimeError(apps_script_mensagem_configuracao())
+    if "/macros/s/" not in url or not url.rstrip("/").endswith("/exec"):
+        raise RuntimeError(
+            "URL do Apps Script inválida. Use a URL do Web App implantado, no formato "
+            "https://script.google.com/macros/s/SEU_DEPLOY_ID/exec"
+        )
 
     token = str(cfg.get("token", "")).strip()
     if token:
@@ -2321,6 +2327,12 @@ def apps_script_post(payload):
             body = resp.read().decode("utf-8")
     except urllib.error.HTTPError as e:
         detalhe = e.read().decode("utf-8", errors="ignore")
+        if e.code == 404:
+            raise RuntimeError(
+                "Apps Script retornou 404. A URL do Web App está inválida, antiga ou o deploy não foi publicado. "
+                "No Apps Script, clique em Implantar > Gerenciar implantações > copie a URL do app da web terminada em /exec "
+                "e atualize o secret [apps_script].web_app_url no Streamlit."
+            ) from e
         raise RuntimeError(f"Erro HTTP ao chamar o Apps Script: {e.code} - {detalhe}")
     except Exception as e:
         raise RuntimeError(f"Não consegui chamar o Apps Script: {e}")
@@ -2688,7 +2700,13 @@ def ler_planilha_tratamento_pedido(uploaded_file):
         pass
 
     if nome.endswith((".xlsx", ".xls")):
-        return pd.read_excel(uploaded_file, dtype=str)
+        xls = pd.ExcelFile(uploaded_file)
+        aba_pedido = next(
+            (aba for aba in xls.sheet_names if normalizar_texto_simples(aba) == "PEDIDO"),
+            xls.sheet_names[0] if xls.sheet_names else 0,
+        )
+        df = pd.read_excel(xls, sheet_name=aba_pedido, dtype=str)
+        return aplicar_cabecalho_pedido_unica_sheets(df)
 
     tentativas = [
         {"sep": ";", "encoding": "utf-8-sig"},
@@ -2703,7 +2721,7 @@ def ler_planilha_tratamento_pedido(uploaded_file):
     for tentativa in tentativas:
         try:
             uploaded_file.seek(0)
-            return pd.read_csv(
+            df = pd.read_csv(
                 uploaded_file,
                 sep=tentativa["sep"],
                 encoding=tentativa["encoding"],
@@ -2711,6 +2729,7 @@ def ler_planilha_tratamento_pedido(uploaded_file):
                 engine="python",
                 on_bad_lines="skip",
             )
+            return aplicar_cabecalho_pedido_unica_sheets(df)
         except Exception as e:
             ultimo_erro = str(e)
             continue
@@ -2799,8 +2818,8 @@ def ler_planilha_tratamento_google_sheets_cached(link):
             conteudo = baixar_csv_google_sheets_por_aba(sheet_id, "Pedido")
             if conteudo:
                 df = pd.read_csv(BytesIO(conteudo), dtype=str, keep_default_na=False)
-                colunas_norm = {normalizar_coluna(c): c for c in df.columns}
-                if "PEDIDO FINAL" in colunas_norm or "ZX" in colunas_norm or "CODIGO" in colunas_norm or "CÓDIGO" in colunas_norm:
+                df = aplicar_cabecalho_pedido_unica_sheets(df)
+                if planilha_tratamento_tem_colunas_obrigatorias(df):
                     return df
         except Exception as e:
             ultimo_erro = str(e)
@@ -2811,8 +2830,8 @@ def ler_planilha_tratamento_google_sheets_cached(link):
                 continue
 
             df = pd.read_csv(BytesIO(conteudo), dtype=str, keep_default_na=False)
-            colunas_norm = {normalizar_coluna(c): c for c in df.columns}
-            if "PEDIDO FINAL" in colunas_norm or "ZX" in colunas_norm or "CODIGO" in colunas_norm or "CÓDIGO" in colunas_norm:
+            df = aplicar_cabecalho_pedido_unica_sheets(df)
+            if planilha_tratamento_tem_colunas_obrigatorias(df):
                 return df
 
         return pd.DataFrame()
@@ -2914,7 +2933,7 @@ def gerar_excel_autcom_tratamento(df_tratamento):
 
     faltantes = []
     if not col_codigo:
-        faltantes.append("zx")
+        faltantes.append("zx/codigo")
     if not col_qtd:
         faltantes.append("PEDIDO Final")
     if not col_preco:
@@ -3092,6 +3111,17 @@ def aplicar_cabecalho_pedido_unica_sheets(df):
 
     df.columns = _deduplicar_headers_planilha(novos)
     return df
+
+
+def planilha_tratamento_tem_colunas_obrigatorias(df):
+    if df is None or df.empty:
+        return False
+
+    colunas_norm = {normalizar_coluna(c): c for c in df.columns}
+    tem_codigo = any(col in colunas_norm for col in ["ZX", "CODIGO", "CÓDIGO"])
+    tem_pedido_final = "PEDIDO FINAL" in colunas_norm
+    tem_preco = any(col in colunas_norm for col in ["PREÇO ÚLTIMA COMPRA", "PRECO ULTIMA COMPRA"])
+    return tem_codigo and tem_pedido_final and tem_preco
 
 
 def _normalizar_nome_coluna_flex(nome):
