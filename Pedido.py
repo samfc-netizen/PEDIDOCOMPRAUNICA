@@ -749,6 +749,31 @@ def encontrar_indice_aberto_no_cabecalho(text):
 
     Portanto, ABERTO é sempre o 6º número depois do UN, índice 5.
     """
+    for raw_line in str(text or "").splitlines():
+        line = str(raw_line or "").strip().upper()
+        if " UN " not in f" {line} " or "ABERTO" not in line or "BAIXADO" not in line:
+            continue
+
+        tokens = line.split()
+        try:
+            un_index = tokens.index("UN")
+        except ValueError:
+            continue
+
+        campos = []
+        i = un_index + 1
+        while i < len(tokens):
+            token = tokens[i].strip()
+            if token == "PES." and i + 1 < len(tokens) and tokens[i + 1].strip() == "ITE":
+                campos.append("PES.ITE")
+                i += 2
+                continue
+            campos.append(token)
+            i += 1
+
+        if "ABERTO" in campos:
+            return campos.index("ABERTO")
+
     return 5
 
 
@@ -833,10 +858,12 @@ def parse_pedidos_compra_aberto_pdf(uploaded_file):
         if df_texto is not None and not df_texto.empty:
             df_texto["codigo"] = df_texto["codigo"].astype(str).str.extract(r"(\d+)", expand=False).fillna("").str.zfill(5)
             df_texto["Saldo em Trânsito/ABERTO"] = pd.to_numeric(df_texto["Saldo em Trânsito/ABERTO"], errors="coerce").fillna(0)
-            return df_texto.groupby("codigo", as_index=False).agg({
+            df_texto = df_texto.groupby("codigo", as_index=False).agg({
                 "descricao": "first",
                 "Saldo em Trânsito/ABERTO": "sum",
             })
+            if float(df_texto["Saldo em Trânsito/ABERTO"].sum()) > 0:
+                return df_texto
     except Exception:
         pass
 
@@ -1365,6 +1392,9 @@ def montar_tabela_consolidada(
     if df_transito is not None and not df_transito.empty:
         df_transito = df_transito.copy()
         df_transito["codigo"] = df_transito["codigo"].astype(str).str.extract(r"(\d+)", expand=False).fillna("").str.zfill(5)
+        df_transito["Saldo em Trânsito/ABERTO"] = pd.to_numeric(df_transito.get("Saldo em Trânsito/ABERTO", 0), errors="coerce").fillna(0)
+        df_transito = df_transito[df_transito["codigo"].str.strip().ne("")]
+        df_transito = df_transito.groupby("codigo", as_index=False)["Saldo em Trânsito/ABERTO"].sum()
         resumo = pd.merge(resumo, df_transito.drop(columns=["descricao"], errors="ignore"), on="codigo", how="left")
     else:
         resumo["Saldo em Trânsito/ABERTO"] = 0
@@ -2922,7 +2952,7 @@ def gerar_excel_autcom_tratamento(df_tratamento):
     if Workbook is None:
         raise RuntimeError("A biblioteca openpyxl não está instalada. Rode: python -m pip install openpyxl")
 
-    df = df_tratamento.copy()
+    df = aplicar_cabecalho_pedido_unica_sheets(df_tratamento)
     df.columns = [str(c).strip() for c in df.columns]
 
     colunas_norm = {normalizar_coluna(c): c for c in df.columns}
@@ -2952,7 +2982,7 @@ def gerar_excel_autcom_tratamento(df_tratamento):
         codigo_match = re.search(r"(\d+)", codigo_raw)
         codigo = codigo_match.group(1).zfill(5) if codigo_match else ""
 
-        qtd = br_to_float(row.get(col_qtd, 0))
+        qtd = numero_planilha_para_float(row.get(col_qtd, 0))
         preco = numero_planilha_para_float(row.get(col_preco, 0))
 
         try:
@@ -2969,6 +2999,12 @@ def gerar_excel_autcom_tratamento(df_tratamento):
         ws.cell(row=linha_excel, column=8).number_format = 'R$ #,##0.00'
         linha_excel += 1
 
+    if linha_excel == 1:
+        raise ValueError(
+            "Nenhum item com PEDIDO Final maior que zero foi encontrado para exportar. "
+            "Confira se a aba Pedido possui quantidades preenchidas na coluna PEDIDO Final."
+        )
+
     output = BytesIO()
     wb.save(output)
     output.seek(0)
@@ -2982,7 +3018,7 @@ def gerar_excel_fornecedor_tratamento(df_tratamento):
     if Workbook is None:
         raise RuntimeError("A biblioteca openpyxl não está instalada. Rode: python -m pip install openpyxl")
 
-    df = df_tratamento.copy()
+    df = aplicar_cabecalho_pedido_unica_sheets(df_tratamento)
     df.columns = [str(c).strip() for c in df.columns]
     colunas_norm = {normalizar_coluna(c): c for c in df.columns}
 
@@ -3013,7 +3049,7 @@ def gerar_excel_fornecedor_tratamento(df_tratamento):
     ws.append(["Código", "Descrição", "Código de Fábrica", "Quantidade"])
 
     for _, row in df.iterrows():
-        qtd = br_to_float(row.get(col_qtd, 0))
+        qtd = numero_planilha_para_float(row.get(col_qtd, 0))
         try:
             qtd = int(round(float(qtd)))
         except Exception:
@@ -3031,6 +3067,12 @@ def gerar_excel_fornecedor_tratamento(df_tratamento):
             str(row.get(col_fabrica, "")).strip(),
             qtd,
         ])
+
+    if ws.max_row == 1:
+        raise ValueError(
+            "Nenhum item com PEDIDO Final/Quantidade maior que zero foi encontrado para exportar. "
+            "Confira se a aba Pedido possui quantidades preenchidas."
+        )
 
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
@@ -5912,6 +5954,7 @@ assinatura_base = (
     tabela_resumo["codigo"].astype(str).str.cat(sep="|")
     + "|fab=" + tabela_resumo.get("Código Fábrica", pd.Series(dtype=str)).astype(str).str.cat(sep="|")
     + "|emb=" + tabela_resumo.get("Embalagem", pd.Series(dtype=str)).astype(str).str.cat(sep="|")
+    + "|aberto=" + tabela_resumo.get("Saldo em Trânsito/ABERTO", pd.Series(dtype=str)).astype(str).str.cat(sep="|")
     + f"|dias={dias_estoque_alvo}|alerta={meses_alerta_sem_compra}|mes_atual_media={int(considerar_mes_atual_media)}"
 )
 if st.session_state.get("assinatura_base_pedido") != assinatura_base:
