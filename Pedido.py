@@ -169,6 +169,14 @@ def normalizar_coluna(nome):
     return nome
 
 
+def normalizar_texto_simples(value):
+    texto = str(value or "").strip().lower()
+    texto = unicodedata.normalize("NFD", texto)
+    texto = "".join(ch for ch in texto if unicodedata.category(ch) != "Mn")
+    texto = re.sub(r"\s+", " ", texto)
+    return texto
+
+
 def parse_data_br(value):
     if value is None:
         return pd.NaT
@@ -2205,36 +2213,41 @@ def apps_script_payload_pedido(nome_pedido, fornecedor, pedido_df, criado_por=""
     extras = [c for c in df_export.columns if c not in ordem_oficial]
     df_export = df_export[ordem_oficial + extras]
 
-    # Garante fórmula do valor final usando as colunas corretas por NOME,
-    # sem depender da letra fixa da coluna.
-    # Valor Final do Pedido = PEDIDO Final * Preço Última Compra
-    def _excel_col_name(idx_zero_based):
-        idx = int(idx_zero_based) + 1
-        letras = ""
-        while idx:
-            idx, resto = divmod(idx - 1, 26)
-            letras = chr(65 + resto) + letras
-        return letras
+    colunas_numericas = [
+        c for c in df_export.columns
+        if (
+            c.startswith("Giro ")
+            or c.startswith("Média ")
+            or c.startswith("Estoque")
+            or c.startswith("Sugestão")
+            or c in [
+                "Saldo em Trânsito/ABERTO",
+                "PEDIDO Final",
+                "Preço Última Compra",
+                "Valor Final do Pedido",
+                "Embalagem",
+            ]
+        )
+    ]
+    for col in colunas_numericas:
+        if col in df_export.columns:
+            if col in ["PEDIDO Final", "Sugestão Sistema", "Sugestão arredondada", "Embalagem"]:
+                df_export[col] = pd.to_numeric(df_export[col], errors="coerce").fillna(0).round(0).astype(int)
+            else:
+                df_export[col] = df_export[col].apply(numero_planilha_para_float)
 
-    if "Valor Final do Pedido" in df_export.columns:
-        col_preco = _excel_col_name(df_export.columns.get_loc("Preço Última Compra"))
-        col_pedido = _excel_col_name(df_export.columns.get_loc("PEDIDO Final"))
-        df_export["Valor Final do Pedido"] = [
-            f'=IFERROR(VALUE(SUBSTITUTE(SUBSTITUTE({col_preco}{i},"R$",""),",","."))*VALUE({col_pedido}{i}),0)'
-            for i in range(2, len(df_export) + 2)
-        ]
+    if "PEDIDO Final" in df_export.columns and "Preço Última Compra" in df_export.columns:
+        df_export["Valor Final do Pedido"] = (
+            pd.to_numeric(df_export["PEDIDO Final"], errors="coerce").fillna(0)
+            * pd.to_numeric(df_export["Preço Última Compra"], errors="coerce").fillna(0)
+        ).round(2)
 
-    # Garante que "Total Geral do Pedido" fique na coluna W.
-    # Se a tabela terminar antes da coluna V, adiciona colunas em branco até W.
+    # Garante que "Total Geral do Pedido" fique na coluna W apenas para o Apps Script
+    # preencher o menu/cabecalho com a soma fixa.
+    df_export = df_export.drop(columns=["Total Geral do Pedido"], errors="ignore")
     while len(df_export.columns) < 22:
         df_export[f"__blank_{len(df_export.columns) + 1}__"] = ""
-
-    if "Total Geral do Pedido" not in df_export.columns:
-        df_export["Total Geral do Pedido"] = ""
-
-    if len(df_export) > 0 and "Valor Final do Pedido" in df_export.columns:
-        col_valor = _excel_col_name(df_export.columns.get_loc("Valor Final do Pedido"))
-        df_export.loc[df_export.index[0], "Total Geral do Pedido"] = f"=SUM({col_valor}2:{col_valor}{len(df_export) + 1})"
+    df_export["Total Geral do Pedido"] = ""
 
     valor = totalizar_valor_pedido(pedido_df)
     agora = datetime.now().strftime("%d/%m/%Y %H:%M")
@@ -2713,28 +2726,90 @@ def extrair_google_sheet_id_e_gid(link):
 
 
 @st.cache_data(show_spinner=False, ttl=300, max_entries=16)
-def ler_planilha_tratamento_google_sheets_cached(link):
-    sheet_id, gid = extrair_google_sheet_id_e_gid(link)
-    export_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+def buscar_gid_aba_google_sheets(sheet_id, nome_aba="Pedido"):
+    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit?usp=sharing"
 
     try:
-        req = urllib.request.Request(export_url, headers={"User-Agent": "Mozilla/5.0"})
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=30) as resp:
-            conteudo = resp.read()
+            html = resp.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+    nome_alvo = normalizar_texto_simples(nome_aba)
+    padroes = [
+        r'\["([^"]+)",\s*(\d+)\s*,',
+        r'"name"\s*:\s*"([^"]+)"\s*,\s*"gid"\s*:\s*"?(\d+)"?',
+    ]
+
+    for padrao in padroes:
+        for nome, gid in re.findall(padrao, html):
+            if normalizar_texto_simples(nome) == nome_alvo:
+                return str(gid).strip()
+
+    match = re.search(r'Pedido[^0-9]{1,80}(\d{4,})', html, flags=re.IGNORECASE)
+    if match:
+        return match.group(1)
+
+    return ""
+
+
+def baixar_csv_google_sheets(sheet_id, gid):
+    export_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+    req = urllib.request.Request(export_url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return resp.read()
+
+
+def baixar_csv_google_sheets_por_aba(sheet_id, nome_aba="Pedido"):
+    sheet_name = urllib.parse.quote(str(nome_aba or "Pedido"))
+    export_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={sheet_name}"
+    req = urllib.request.Request(export_url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return resp.read()
+
+
+@st.cache_data(show_spinner=False, ttl=300, max_entries=16)
+def ler_planilha_tratamento_google_sheets_cached(link):
+    sheet_id, gid_link = extrair_google_sheet_id_e_gid(link)
+    gid_pedido = buscar_gid_aba_google_sheets(sheet_id, "Pedido")
+    gids_tentativa = [g for g in [gid_pedido, gid_link, "0"] if str(g or "").strip()]
+    gids_tentativa = list(dict.fromkeys(gids_tentativa))
+
+    ultimo_erro = None
+    try:
+        try:
+            conteudo = baixar_csv_google_sheets_por_aba(sheet_id, "Pedido")
+            if conteudo:
+                df = pd.read_csv(BytesIO(conteudo), dtype=str, keep_default_na=False)
+                colunas_norm = {normalizar_coluna(c): c for c in df.columns}
+                if "PEDIDO FINAL" in colunas_norm or "ZX" in colunas_norm or "CODIGO" in colunas_norm or "CÓDIGO" in colunas_norm:
+                    return df
+        except Exception as e:
+            ultimo_erro = str(e)
+
+        for gid in gids_tentativa:
+            conteudo = baixar_csv_google_sheets(sheet_id, gid)
+            if not conteudo:
+                continue
+
+            df = pd.read_csv(BytesIO(conteudo), dtype=str, keep_default_na=False)
+            colunas_norm = {normalizar_coluna(c): c for c in df.columns}
+            if "PEDIDO FINAL" in colunas_norm or "ZX" in colunas_norm or "CODIGO" in colunas_norm or "CÓDIGO" in colunas_norm:
+                return df
+
+        return pd.DataFrame()
     except urllib.error.HTTPError as e:
         if e.code in (401, 403, 404):
             raise RuntimeError(
                 "Nao consegui acessar a planilha sem credenciais. "
                 "Compartilhe a planilha como 'Qualquer pessoa com o link - Leitor' e tente novamente."
             ) from e
-        raise RuntimeError(f"Erro ao baixar a planilha do Google Sheets: HTTP {e.code}") from e
+        ultimo_erro = f"HTTP {e.code}"
     except Exception as e:
-        raise RuntimeError(f"Erro ao baixar a planilha do Google Sheets: {e}") from e
+        ultimo_erro = str(e)
 
-    if not conteudo:
-        return pd.DataFrame()
-
-    return pd.read_csv(BytesIO(conteudo), dtype=str, keep_default_na=False)
+    raise RuntimeError(f"Erro ao baixar a aba Pedido do Google Sheets: {ultimo_erro}")
 
 
 def ler_planilha_tratamento_google_sheets(link):
