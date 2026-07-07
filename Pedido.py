@@ -2816,6 +2816,65 @@ def ler_planilha_tratamento_google_sheets(link):
     return ler_planilha_tratamento_google_sheets_cached(str(link or "").strip())
 
 
+@st.cache_data(show_spinner=False, ttl=300, max_entries=16)
+def ler_planilha_google_sheets_aba_cached(link, nome_aba="Pedido"):
+    sheet_id, gid_link = extrair_google_sheet_id_e_gid(link)
+    gid_aba = buscar_gid_aba_google_sheets(sheet_id, nome_aba)
+    gids_tentativa = [g for g in [gid_aba, gid_link, "0"] if str(g or "").strip()]
+    gids_tentativa = list(dict.fromkeys(gids_tentativa))
+
+    ultimo_erro = None
+    try:
+        try:
+            conteudo = baixar_csv_google_sheets_por_aba(sheet_id, nome_aba)
+            if conteudo:
+                df = pd.read_csv(BytesIO(conteudo), dtype=str, keep_default_na=False)
+                if not df.empty:
+                    return df
+        except Exception as e:
+            ultimo_erro = str(e)
+
+        for gid in gids_tentativa:
+            conteudo = baixar_csv_google_sheets(sheet_id, gid)
+            if not conteudo:
+                continue
+            df = pd.read_csv(BytesIO(conteudo), dtype=str, keep_default_na=False)
+            if not df.empty:
+                return df
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403, 404):
+            raise RuntimeError(
+                "Nao consegui acessar a planilha sem credenciais. "
+                "Compartilhe a planilha como 'Qualquer pessoa com o link - Leitor' e tente novamente."
+            ) from e
+        ultimo_erro = f"HTTP {e.code}"
+    except Exception as e:
+        ultimo_erro = str(e)
+
+    raise RuntimeError(f"Erro ao baixar a aba {nome_aba} do Google Sheets: {ultimo_erro}")
+
+
+def ler_pedido_unica_comparativo_google_sheets(link):
+    sheet_id, _gid = extrair_google_sheet_id_e_gid(str(link or "").strip())
+    try:
+        conteudo = baixar_csv_google_sheets_por_aba(sheet_id, "Pedido")
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403, 404):
+            raise RuntimeError(
+                "Nao consegui acessar a aba Pedido sem credenciais. "
+                "Compartilhe a planilha como 'Qualquer pessoa com o link - Leitor' e tente novamente."
+            ) from e
+        raise RuntimeError(f"Erro ao baixar a aba Pedido do Google Sheets: HTTP {e.code}") from e
+    except Exception as e:
+        raise RuntimeError(f"Erro ao baixar a aba Pedido do Google Sheets: {e}") from e
+
+    df = pd.read_csv(BytesIO(conteudo), dtype=str, keep_default_na=False)
+    if df is None or df.empty:
+        return pd.DataFrame()
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
 def gerar_excel_autcom_tratamento(df_tratamento):
     """
     Gera o Excel para importação no Autcom a partir da planilha de Tratamento de Pedido Final.
@@ -4170,19 +4229,33 @@ def render_pagina_comparativo_pedidos():
 
     col1, col2 = st.columns(2)
     with col1:
+        link_unica_sheets = st.text_input(
+            "Link do Google Sheets do pedido da Única",
+            value="",
+            key="link_comparativo_unica_sheets",
+            placeholder="https://docs.google.com/spreadsheets/d/.../edit#gid=...",
+        )
+        link_unica_sheets = str(link_unica_sheets or "").strip()
+        st.caption("Opcional. Se preenchido, o sistema lê a aba 'Pedido' do Sheets e ignora o upload da Única.")
         pedido_unica = st.file_uploader("Planilha do pedido da Única", type=["xlsx", "xls", "csv", "html", "htm"], key="upload_comparativo_unica")
     with col2:
         pedido_fornecedor = st.file_uploader("Pedido do fornecedor", type=["xlsx", "xls", "csv", "pdf", "html", "htm"], key="upload_comparativo_fornecedor")
 
-    if not pedido_unica or not pedido_fornecedor:
-        st.info("Envie o pedido da Única e o arquivo do fornecedor para iniciar o comparativo.")
+    if (not link_unica_sheets and not pedido_unica) or not pedido_fornecedor:
+        st.info("Cole o link ou envie o pedido da Única, e envie o arquivo do fornecedor para iniciar o comparativo.")
         return
 
     try:
-        df_unica = ler_arquivo_comparativo(pedido_unica)
+        if link_unica_sheets:
+            df_unica = ler_pedido_unica_comparativo_google_sheets(link_unica_sheets)
+            origem_unica = "Google Sheets"
+        else:
+            df_unica = ler_arquivo_comparativo(pedido_unica)
+            origem_unica = "upload"
         if df_unica.empty:
             st.error("Não consegui ler o pedido da Única.")
             return
+        st.success(f"Pedido da Única lido via {origem_unica}: {len(df_unica)} linha(s).")
 
         st.markdown("### 1. Conferência e mapeamento das colunas")
         with st.expander("Prévia do Pedido Única", expanded=False):
