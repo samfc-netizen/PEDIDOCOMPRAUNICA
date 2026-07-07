@@ -4328,8 +4328,7 @@ def gerar_excel_comparativo_pedidos(df_comparativo):
 
 
 def render_pagina_comparativo_pedidos():
-    st.markdown('<div class="section-title">Comparativo de Pedidos</div>', unsafe_allow_html=True)
-    st.caption("Novo modelo: o sistema compara somente pelo Código de Fábrica. A descrição fica apenas para conferência visual e não é usada para vínculo automático, evitando relacionamentos errados.")
+    st.markdown('<div class="page-card"><div class="page-card-title">Comparativo de Pedidos</div><div class="page-card-subtitle">Compare o pedido da Única com o fornecedor usando o Código de Fábrica como vínculo principal.</div>', unsafe_allow_html=True)
 
     if "relacionamentos_comparativo" not in st.session_state:
         st.session_state["relacionamentos_comparativo"] = {}
@@ -4347,6 +4346,8 @@ def render_pagina_comparativo_pedidos():
         pedido_unica = st.file_uploader("Planilha do pedido da Única", type=["xlsx", "xls", "csv", "html", "htm"], key="upload_comparativo_unica")
     with col2:
         pedido_fornecedor = st.file_uploader("Pedido do fornecedor", type=["xlsx", "xls", "csv", "pdf", "html", "htm"], key="upload_comparativo_fornecedor")
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
     if (not link_unica_sheets and not pedido_unica) or not pedido_fornecedor:
         st.info("Cole o link ou envie o pedido da Única, e envie o arquivo do fornecedor para iniciar o comparativo.")
@@ -4724,6 +4725,172 @@ def aplicar_css_global():
                 border-radius: 12px !important;
                 font-weight: 800 !important;
             }
+
+
+            /* Navegação lateral profissional */
+            [data-testid="stSidebar"] {
+                background: radial-gradient(circle at top left, #1e3a8a 0%, #0f172a 38%, #07111f 100%) !important;
+                border-right: 1px solid rgba(148, 163, 184, .18);
+            }
+            [data-testid="stSidebar"] > div:first-child {
+                padding-top: 1.15rem;
+            }
+            [data-testid="stSidebar"] h3 {
+                font-size: 18px !important;
+                letter-spacing: -0.02em;
+                margin-bottom: 2px !important;
+            }
+            [data-testid="stSidebar"] hr {
+                border-color: rgba(148, 163, 184, .18) !important;
+                margin: 1.25rem 0 !important;
+            }
+            [data-testid="stSidebar"] [role="radiogroup"] label {
+                background: rgba(15, 23, 42, .38);
+                border: 1px solid transparent;
+                border-radius: 14px;
+                padding: 11px 12px;
+                margin: 7px 0;
+                transition: all .18s ease;
+            }
+            [data-testid="stSidebar"] [role="radiogroup"] label:hover {
+                background: rgba(37, 99, 235, .16);
+                border-color: rgba(96, 165, 250, .22);
+            }
+            [data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) {
+                background: linear-gradient(135deg, rgba(37, 99, 235, .34), rgba(30, 41, 59, .7));
+                border-color: rgba(96, 165, 250, .45);
+                box-shadow: inset 3px 0 0 #3b82f6;
+            }
+            [data-testid="stSidebar"] [role="radiogroup"] label > div:first-child {
+                display: none !important;
+            }
+            [data-testid="stSidebar"] input,
+            [data-testid="stSidebar"] textarea,
+            [data-testid="stSidebar"] [data-baseweb="input"] input {
+                color: #0f172a !important;
+                -webkit-text-fill-color: #0f172a !important;
+                background: #ffffff !important;
+                caret-color: #1d4ed8 !important;
+                font-weight: 800 !important;
+            }
+            [data-testid="stSidebar"] [data-baseweb="input"] {
+                background: #ffffff !important;
+                border-radius: 14px !important;
+                border: 1px solid rgba(96, 165, 250, .42) !important;
+                box-shadow: 0 8px 26px rgba(15, 23, 42, .28);
+            }
+            [data-testid="stSidebar"] button {
+                color: #0f172a !important;
+            }
+            .sidebar-brand {
+                display: flex;
+                gap: 12px;
+                align-items: center;
+                padding: 10px 8px 18px 2px;
+                border-bottom: 1px solid rgba(148, 163, 184, .18);
+                margin-bottom: 16px;
+            }
+            .sidebar-brand-icon {
+                width: 38px;
+                height: 38px;
+                border-radius: 12px;
+                display: grid;
+                place-items: center;
+                background: rgba(37, 99, 235, .18);
+                border: 1px solid rgba(96, 165, 250, .35);
+                color: #93c5fd;
+            }
+            .sidebar-brand-title {
+                color: #ffffff;
+                font-size: 18px;
+                line-height: 1.1;
+                font-weight: 850;
+            }
+            .sidebar-brand-subtitle {
+                margin-top: 4px;
+                color: #cbd5e1;
+                font-size: 12px;
+            }
+            .param-card {
+                background: rgba(15, 23, 42, .42);
+                border: 1px solid rgba(148, 163, 184, .22);
+                border-radius: 18px;
+                padding: 15px 14px;
+                margin-top: 8px;
+                box-shadow: 0 12px 30px rgba(2, 6, 23, .22);
+            }
+            .param-note {
+                background: rgba(37, 99, 235, .16);
+                border: 1px solid rgba(96, 165, 250, .28);
+                border-radius: 13px;
+                padding: 10px 12px;
+                color: #dbeafe;
+                font-size: 12.5px;
+                margin-top: 12px;
+            }
+
+            /* Cards e inputs principais */
+            .page-card {
+                background: #ffffff;
+                border: 1px solid #dbe3ef;
+                border-radius: 20px;
+                padding: 20px;
+                box-shadow: 0 14px 36px rgba(15, 23, 42, .06);
+                margin-bottom: 16px;
+            }
+            .page-card-title {
+                font-size: 18px;
+                font-weight: 850;
+                color: #0f172a;
+                margin-bottom: 4px;
+            }
+            .page-card-subtitle {
+                color: #64748b;
+                font-size: 13px;
+                margin-bottom: 14px;
+            }
+            div[data-testid="stFileUploader"] section {
+                background: #f8fafc !important;
+                border: 1px dashed #bfd0e6 !important;
+                border-radius: 16px !important;
+                padding: 14px !important;
+            }
+            div[data-testid="stFileUploader"] button,
+            .stLinkButton > a,
+            .stButton > button,
+            .stDownloadButton > button,
+            button[kind="formSubmit"] {
+                border-radius: 12px !important;
+                font-weight: 800 !important;
+                min-height: 38px;
+            }
+            .stLinkButton > a {
+                border: 1px solid #cbd5e1 !important;
+                background: #ffffff !important;
+                color: #0f172a !important;
+            }
+            div[data-baseweb="input"], div[data-baseweb="textarea"] {
+                border-radius: 13px !important;
+            }
+            div[data-baseweb="input"] input,
+            div[data-baseweb="textarea"] textarea {
+                color: #0f172a !important;
+                -webkit-text-fill-color: #0f172a !important;
+                font-weight: 650 !important;
+            }
+            .sheets-badge {
+                display: inline-flex;
+                align-items: center;
+                gap: 9px;
+                background: #ecfdf5;
+                border: 1px solid #bbf7d0;
+                color: #047857;
+                font-weight: 850;
+                padding: 9px 12px;
+                border-radius: 999px;
+                margin: 4px 0 10px 0;
+            }
+
         </style>
         """,
         unsafe_allow_html=True,
@@ -5324,15 +5491,30 @@ token_uri = "https://oauth2.googleapis.com/token"
 aplicar_css_global()
 render_header()
 
-st.sidebar.markdown("### 📊 Análise de Giro")
+st.sidebar.markdown(
+    """
+    <div class="sidebar-brand">
+        <div class="sidebar-brand-icon">
+            <svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 19V5"/><path d="M4 19h16"/><rect x="7" y="10" width="3" height="6" rx="1"/><rect x="12" y="6" width="3" height="10" rx="1"/><rect x="17" y="3" width="3" height="13" rx="1"/>
+            </svg>
+        </div>
+        <div>
+            <div class="sidebar-brand-title">Análise de Giro</div>
+            <div class="sidebar-brand-subtitle">Planeje melhor. Compre certo.</div>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 pagina = st.sidebar.radio(
     "Navegação",
-    ["📦 Giro Consolidado", "🛒 Pedido de Compra", "📄 Exportações", "🏷️ Ruptura por Marca", "⚖️ Comparativo de Pedidos", "⚙️ Tratamento Final"],
+    ["Giro Consolidado", "Pedido de Compra", "Exportações", "Ruptura por Marca", "Comparativo de Pedidos", "Tratamento Final"],
     label_visibility="collapsed",
 )
 
-st.sidebar.markdown("---")
-st.sidebar.markdown("### ⚙️ Parâmetros")
+st.sidebar.markdown("### Parâmetros")
+st.sidebar.markdown('<div class="param-card">', unsafe_allow_html=True)
 dias_estoque_alvo = st.sidebar.number_input(
     "Dias de estoque alvo",
     min_value=1,
@@ -5341,37 +5523,151 @@ dias_estoque_alvo = st.sidebar.number_input(
     step=1,
     help="Define quantos dias de cobertura de estoque o pedido deve considerar.",
 )
-
-meses_alerta_sem_compra = st.sidebar.number_input(
-    "Alerta sem compra acima de quantos meses?",
-    min_value=1,
-    max_value=36,
-    value=3,
-    step=1,
-    help="Mostra ⚠️ ao lado da data quando a última compra na loja 009 for mais antiga que este parâmetro.",
+meses_alerta_sem_compra = 3
+st.sidebar.markdown(
+    '<div class="param-note">Alerta sem compra fixo em <strong>03 meses</strong>.<br>Estoque Final = Estoque Atual Geral + Saldo em Trânsito/ABERTO.</div></div>',
+    unsafe_allow_html=True,
 )
 
-st.sidebar.caption("Estoque Final = Estoque Atual Geral + Saldo em Trânsito/ABERTO")
-
-if pagina == "🏷️ Ruptura por Marca":
+if pagina == "Ruptura por Marca":
     render_pagina_ruptura_por_marca()
     st.stop()
 
-if pagina == "⚖️ Comparativo de Pedidos":
+if pagina == "Comparativo de Pedidos":
     render_pagina_comparativo_pedidos()
     st.stop()
 
-st.markdown('<div class="section-title">Upload dos arquivos</div>', unsafe_allow_html=True)
-st.caption("Envie o PDF de Giro para iniciar. Os demais arquivos enriquecem a análise e o pedido final.")
+if pagina == "Tratamento Final":
+    st.markdown('<div class="section-title">Tratamento de Pedido Final</div>', unsafe_allow_html=True)
+    st.caption(
+        "Envie a planilha final editável. O sistema vai gerar um Excel para importação no Autcom: "
+        "coluna B = zx, coluna F = PEDIDO Final e coluna H = Preço Última Compra."
+    )
+
+    if False and google_configurado():
+        st.markdown("### Usar pedido aprovado do Google Drive")
+        try:
+            pedidos_drive = google_listar_pedidos()
+            pedidos_aprovados = pedidos_drive[pedidos_drive["status"].astype(str).str.lower().isin(["aprovado", "em edicao"])].copy()
+            if pedidos_aprovados.empty:
+                st.info("Não há pedidos aprovados ou em edição no controle do Drive.")
+            else:
+                opcoes_drive = {
+                    f"{r.get('id_pedido', '')} | {r.get('fornecedor', '')} | {r.get('nome_pedido', '')} | {r.get('status', '')}": r.to_dict()
+                    for _, r in pedidos_aprovados.iterrows()
+                }
+                pedido_drive_label = st.selectbox("Pedido do Drive", list(opcoes_drive.keys()), key="tratamento_pedido_drive")
+                usuario_finalizacao = st.text_input("Finalizado por", value="", key="tratamento_usuario_drive")
+                pedido_drive_info = opcoes_drive[pedido_drive_label]
+
+                if st.button("Ler pedido do Drive e gerar arquivos finais", type="primary"):
+                    df_drive = google_ler_pedido_drive(pedido_drive_info["spreadsheet_id"])
+                    st.session_state["df_tratamento_drive"] = df_drive
+                    st.session_state["pedido_tratamento_drive_id"] = pedido_drive_info["id_pedido"]
+                    st.success(f"Pedido lido do Drive: {len(df_drive)} linha(s).")
+
+                df_drive_preview = st.session_state.get("df_tratamento_drive")
+                pedido_drive_id = st.session_state.get("pedido_tratamento_drive_id")
+                if df_drive_preview is not None and pedido_drive_id:
+                    colunas_preview_drive = [c for c in ["zx", "codigo", "descricao", "Código Fábrica", "PEDIDO Final", "Preço Última Compra", "Valor Final do Pedido", "Total Geral do Pedido"] if c in df_drive_preview.columns]
+                    st.dataframe(
+                        df_drive_preview[colunas_preview_drive].head(50) if colunas_preview_drive else df_drive_preview.head(50),
+                        use_container_width=True,
+                        hide_index=True,
+                        height=320,
+                    )
+                    if st.button("Salvar arquivos finais no Drive e finalizar pedido"):
+                        link_autcom, link_fornecedor = google_finalizar_pedido(
+                            pedido_drive_id,
+                            df_drive_preview,
+                            usuario=usuario_finalizacao,
+                        )
+                        st.success("Pedido finalizado e arquivos salvos no Drive.")
+                        c_autcom, c_forn = st.columns(2)
+                        c_autcom.link_button("Abrir arquivo Autcom", link_autcom)
+                        c_forn.link_button("Abrir arquivo fornecedor", link_fornecedor)
+                        st.rerun()
+        except Exception as e:
+            st.warning(f"Não consegui usar o fluxo do Google Drive: {e}")
+
+        st.markdown("---")
+        st.markdown("### Upload manual")
+
+    st.markdown("### Ler planilha aprovada por link")
+    link_tratamento = st.text_input(
+        "Link do Google Sheets aprovado",
+        value="",
+        key="link_tratamento_google_sheets",
+        placeholder="https://docs.google.com/spreadsheets/d/.../edit#gid=0",
+    )
+    link_tratamento = str(link_tratamento or "").strip()
+    st.caption("Para funcionar sem credenciais, a planilha precisa estar compartilhada como 'Qualquer pessoa com o link - Leitor'.")
+
+    st.markdown("### Ou envie o arquivo manualmente")
+    planilha_tratamento = st.file_uploader(
+        "Planilha do Pedido Final",
+        type=["xlsx", "xls", "csv"],
+        key="upload_tratamento_pedido_final",
+    )
+
+    if not link_tratamento and not planilha_tratamento:
+        st.info("Cole o link da planilha aprovada ou envie a planilha do pedido final para gerar o arquivo de importação Autcom.")
+        st.stop()
+
+    try:
+        if link_tratamento:
+            df_tratamento = ler_planilha_tratamento_google_sheets(link_tratamento)
+            origem_tratamento = "Google Sheets"
+        else:
+            df_tratamento = ler_planilha_tratamento_pedido(planilha_tratamento)
+            origem_tratamento = "upload"
+        df_tratamento.columns = [str(c).strip() for c in df_tratamento.columns]
+
+        st.success(f"Planilha lida com sucesso via {origem_tratamento}: {len(df_tratamento)} linha(s).")
+
+        colunas_preview = [c for c in ["zx", "descricao", "Código Fábrica", "PEDIDO Final", "Preço Última Compra", "Valor Final do Pedido", "Total Geral do Pedido"] if c in df_tratamento.columns]
+        if colunas_preview:
+            st.dataframe(
+                df_tratamento[colunas_preview].head(50),
+                use_container_width=True,
+                hide_index=True,
+                height=360,
+            )
+        else:
+            st.dataframe(df_tratamento.head(50), use_container_width=True, hide_index=True, height=360)
+
+        excel_tratamento = gerar_excel_autcom_tratamento(df_tratamento)
+        col_dl_autcom, col_dl_fornecedor = st.columns(2)
+        with col_dl_autcom:
+            st.download_button(
+                "⬇️ Baixar pedido tratado para importação no Autcom",
+                excel_tratamento,
+                "pedido_tratado_importacao_autcom.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
+            )
+        with col_dl_fornecedor:
+            st.download_button(
+                "⬇️ Baixar pedido para envio ao fornecedor",
+                gerar_excel_fornecedor_tratamento(df_tratamento),
+                "pedido_envio_fornecedor.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+    except Exception as e:
+        st.error(str(e))
+
+    st.stop()
+
+st.markdown('<div class="page-card"><div class="page-card-title">Upload dos arquivos</div><div class="page-card-subtitle">Envie o PDF de Giro para iniciar. Os demais arquivos enriquecem a análise e o pedido final.</div>', unsafe_allow_html=True)
 col_upload_1, col_upload_2, col_upload_3 = st.columns(3)
 cadastro_google = pd.DataFrame()
 
 with col_upload_1:
     giro_pdf = st.file_uploader("PDF - Giro de Estoque", type=["pdf"], key="upload_giro_pdf")
-    render_upload_status("📄 Giro de Estoque", giro_pdf, obrigatorio=True)
+    render_upload_status("Giro de Estoque", giro_pdf, obrigatorio=True)
 with col_upload_2:
     pedidos_pdf = st.file_uploader("PDF - Pedidos em Aberto", type=["pdf"], key="upload_pedidos_pdf")
-    render_upload_status("📄 Pedidos em Aberto", pedidos_pdf)
+    render_upload_status("Pedidos em Aberto", pedidos_pdf)
 with col_upload_3:
     st.markdown("**Cadastro de Produtos**")
     st.link_button("🔗 Abrir / editar cadastro no Google Sheets", google_link_planilha(GOOGLE_PLANILHA_CADASTRO_ID), use_container_width=True)
@@ -5391,10 +5687,12 @@ with col_upload_3:
         )
 
     cadastro_csv = st.file_uploader("CSV - Cadastro de Produtos (fallback)", type=["csv"], key="upload_cadastro_csv")
-    render_upload_status("📄 Cadastro de Produtos", cadastro_csv)
+    render_upload_status("Cadastro de Produtos", cadastro_csv)
 
-if pagina == "⚙️ Tratamento Final":
-    st.markdown('<div class="section-title">⚙️ Tratamento de Pedido Final</div>', unsafe_allow_html=True)
+st.markdown("</div>", unsafe_allow_html=True)
+
+if False and pagina == "Tratamento Final":
+    st.markdown('<div class="section-title">Tratamento de Pedido Final</div>', unsafe_allow_html=True)
     st.caption(
         "Envie a planilha final editável. O sistema vai gerar um Excel para importação no Autcom: "
         "coluna B = zx, coluna F = PEDIDO Final e coluna H = Preço Última Compra."
@@ -5576,8 +5874,8 @@ for col in colunas_consolidadas:
 render_kpis_gerais(tabela_resumo, st.session_state.get("pedido_editado"))
 st.markdown("---")
 
-if pagina == "📦 Giro Consolidado":
-    st.markdown('<div class="section-title">📦 Giro Consolidado</div>', unsafe_allow_html=True)
+if pagina == "Giro Consolidado":
+    st.markdown('<div class="section-title">Giro Consolidado</div>', unsafe_allow_html=True)
     st.caption(
         "A data da última compra é puxada somente da loja 009. "
         "Quando a data ultrapassa o parâmetro de meses sem compra, aparece o ícone ⚠️ ao lado da data."
@@ -5620,7 +5918,7 @@ if pagina == "📦 Giro Consolidado":
             },
         )
 
-elif pagina == "🛒 Pedido de Compra":
+elif pagina == "Pedido de Compra":
     st.markdown('<div class="section-title">🛒 Pedido de Compra</div>', unsafe_allow_html=True)
     st.caption(
         "Todos os itens aparecem aqui, inclusive os com sugestão zero. "
@@ -5771,15 +6069,16 @@ elif pagina == "🛒 Pedido de Compra":
 
     st.markdown("---")
     st.markdown("### Exportar pedido em Google Sheets")
+    st.markdown('<div class="sheets-badge">▦ Google Sheets</div>', unsafe_allow_html=True)
     st.caption("Nesta versão, o pedido será enviado para um Google Apps Script, que cria a planilha Google Sheets diretamente na pasta de aprovação. Não usa OAuth, refresh_token nem Service Account no Python.")
-    st.link_button("📁 Abrir pasta destino no Drive", google_link_pasta(GOOGLE_PASTA_APROVACAO_ID), use_container_width=True)
+    st.link_button("Abrir pasta destino no Drive", google_link_pasta(GOOGLE_PASTA_APROVACAO_ID), use_container_width=True)
 
     if apps_script_configurado():
         with st.form("form_exportar_pedido_sheets"):
             nome_pedido_drive = st.text_input("Nome do pedido", value=f"Pedido {datetime.now().strftime('%d-%m-%Y')}")
             fornecedor_drive = st.text_input("Fornecedor", value="")
             usuario_drive = st.text_input("Criado por", value="")
-            enviar_drive = st.form_submit_button("Criar Google Sheets na pasta", type="primary")
+            enviar_drive = st.form_submit_button("▦ Criar Google Sheets na pasta", type="primary")
 
         if enviar_drive:
             try:
@@ -5812,8 +6111,8 @@ web_app_url = "https://script.google.com/macros/s/SEU_DEPLOY_ID/exec"
             "text/csv",
         )
 
-elif pagina == "📄 Exportações":
-    st.markdown('<div class="section-title">📄 Exportações</div>', unsafe_allow_html=True)
+elif pagina == "Exportações":
+    st.markdown('<div class="section-title">Exportações</div>', unsafe_allow_html=True)
     st.caption("O Excel será gerado para importação no Autcom: coluna B = código, coluna F = quantidade, coluna H = valor unitário, sem cabeçalho.")
 
     pedido_final = st.session_state.get("pedido_editado", inicializar_pedido_editavel(tabela_resumo)).copy()
