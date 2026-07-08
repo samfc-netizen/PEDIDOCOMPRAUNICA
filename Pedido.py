@@ -3517,15 +3517,39 @@ def _texto_sem_acentos(txt):
 def normalizar_codigo_fabrica(valor):
     """
     Normaliza código de fábrica para comparação entre Excel e PDF.
+
+    Correção importante para PDFs de fornecedores:
+    - Alguns PDFs, como propostas Akzo/Coral, trazem o código do produto com zeros à esquerda
+      (ex.: 000000000005202143), enquanto a planilha da Única pode estar como 5202143.
+    - Para códigos puramente numéricos, remove zeros à esquerda para o relacionamento não falhar.
+    - Para códigos alfanuméricos, mantém letras/números e remove apenas pontuação/espaços.
+
     Exemplos:
+    - "000000000005202143" -> "5202143"
+    - "5202143" -> "5202143"
     - "I :401" -> "I401"
     - "P-512" -> "P512"
-    - " 000123 " -> "000123"
+    - "05.66.H0035-261" -> "0566H0035261"
     """
-    txt = _texto_sem_acentos(valor).upper().strip()
-    txt = re.sub(r"[^A-Z0-9]+", "", txt)
+    raw = _texto_sem_acentos(valor).upper().strip()
+
+    # Quando o Excel/Sheets transforma código em número, pode chegar como 5202143.0
+    # ou 000000000005202143,0. Trata isso antes de remover pontuação.
+    raw_sem_espaco = re.sub(r"\s+", "", raw)
+    match_num_decimal_zero = re.fullmatch(r"(\d+)(?:[\.,]0+)?", raw_sem_espaco)
+    if match_num_decimal_zero:
+        txt = match_num_decimal_zero.group(1)
+    else:
+        txt = re.sub(r"[^A-Z0-9]+", "", raw)
+
     if txt in ["", "NAN", "NONE", "NULL", "SEM", "SNCODIGO"]:
         return ""
+
+    # PDFs de fornecedor costumam completar código numérico com zeros à esquerda.
+    # Isso quebrava o relacionamento com a planilha da Única.
+    if re.fullmatch(r"\d+", txt):
+        txt = txt.lstrip("0") or "0"
+
     return txt
 
 
