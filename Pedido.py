@@ -3204,6 +3204,17 @@ def _serie_parece_quantidade(series):
     qtd_validos = sum(1 for n in numericos if n >= 0)
     qtd_positivos = sum(1 for n in numericos if n > 0)
     qtd_inteiros = sum(1 for n in numericos if abs(n - round(n)) < 0.0001)
+
+    # Proteção: código de fábrica/EAN/produto costuma ser uma sequência inteira longa.
+    # Quantidade real geralmente é pequena/média e não deve ter maioria de valores com 6+ dígitos.
+    qtd_codigos_longos = 0
+    for v in valores:
+        bruto = re.sub(r"\D+", "", str(v or ""))
+        if len(bruto) >= 6 and abs(numero_planilha_para_float(v) - round(numero_planilha_para_float(v))) < 0.0001:
+            qtd_codigos_longos += 1
+    if qtd_codigos_longos >= max(2, int(len(valores) * 0.35)):
+        return False
+
     return qtd_validos >= int(len(valores) * 0.75) and qtd_inteiros >= int(len(valores) * 0.70) and qtd_positivos > 0
 
 
@@ -4013,6 +4024,114 @@ def ler_planilha_comparativo_fornecedor(uploaded_file):
     raise RuntimeError(f"Não consegui ler a planilha do fornecedor. Último erro: {ultimo_erro}")
 
 
+
+def _dataframe_de_tabela_pdf_fornecedor(linhas):
+    """
+    Converte uma tabela extraída do PDF do fornecedor em DataFrame padronizado.
+    Corrige principalmente PDFs Akzo/Coral em que as colunas são:
+    Código Produto | Descrição | Código EAN | Embalagem | Qtd. | ... | VL. Unitário | VL. Total
+    """
+    if not linhas:
+        return pd.DataFrame()
+
+    linhas = [[str(c or "").strip() for c in (linha or [])] for linha in linhas]
+    linhas = [linha for linha in linhas if any(str(c).strip() for c in linha)]
+    if len(linhas) < 2:
+        return pd.DataFrame()
+
+    max_cols = max(len(linha) for linha in linhas)
+    linhas = [linha + [""] * (max_cols - len(linha)) for linha in linhas]
+
+    header_idx = None
+    melhor_score = -1
+    for i, linha in enumerate(linhas[:8]):
+        joined = " ".join(_normalizar_nome_coluna_flex(c) for c in linha)
+        score = 0
+        if re.search(r"\b(CODIGO|COD|SKU|PRODUTO)\b", joined):
+            score += 2
+        if re.search(r"\b(DESCRICAO|DESCR|ITEM)\b", joined):
+            score += 2
+        if re.search(r"\b(QTD|QTDE|QUANTIDADE|QUANT)\b", joined):
+            score += 4
+        if re.search(r"\b(VL|VALOR|PRECO|UNITARIO|UNIT)\b", joined):
+            score += 2
+        if score > melhor_score:
+            melhor_score = score
+            header_idx = i
+
+    if header_idx is None or melhor_score < 4:
+        return pd.DataFrame()
+
+    headers = _deduplicar_headers_planilha([str(c).strip() or f"COLUNA {i + 1}" for i, c in enumerate(linhas[header_idx])])
+    dados = linhas[header_idx + 1:]
+    if not dados:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(dados, columns=headers)
+    df = df.dropna(how="all")
+    if df.empty:
+        return pd.DataFrame()
+
+    col_codigo = _coluna_por_candidatos(df, [
+        "Código Produto", "Codigo Produto", "Cód Produto", "Cod Produto", "Código", "Codigo",
+        "Cód.", "Cod.", "SKU", "Referência", "Referencia", "Part Number"
+    ])
+    col_desc = _coluna_por_candidatos(df, [
+        "Descrição", "Descricao", "Descrição do item", "Descricao do item", "Produto", "Item", "Nome", "Descr"
+    ])
+    col_qtd = _coluna_quantidade_flexivel(df) or _coluna_por_candidatos(df, [
+        "Qtd.", "Qtd", "Qtde", "Quantidade", "Quant", "Qte", "Qty"
+    ])
+    col_preco = _coluna_valor_unitario_flexivel(df) or _coluna_por_candidatos(df, [
+        "VL. Unitário", "VL Unitário", "VL. Unitario", "VL Unitario", "Valor Unitário", "Valor Unitario",
+        "Preço Unitário", "Preco Unitario", "Preço", "Preco"
+    ])
+    col_total = _coluna_valor_total_flexivel(df) or _coluna_por_candidatos(df, [
+        "VL. Total", "VL Total", "Valor Total", "Vlr Total", "Total"
+    ])
+
+    if not col_codigo or not col_qtd:
+        return pd.DataFrame()
+
+    # Se a coluna escolhida como quantidade parecer código/EAN, não usa esta tabela.
+    if not _serie_parece_quantidade(df[col_qtd]):
+        return pd.DataFrame()
+
+    out = pd.DataFrame()
+    out["Código Fábrica"] = df[col_codigo].astype(str).str.strip()
+    out["Descrição"] = df[col_desc].astype(str).str.strip() if col_desc else out["Código Fábrica"]
+    out["Quantidade"] = df[col_qtd].apply(numero_planilha_para_float)
+    out["Valor Unitário"] = df[col_preco].apply(numero_planilha_para_float) if col_preco else 0.0
+    out["Valor Total"] = df[col_total].apply(numero_planilha_para_float) if col_total else 0.0
+    out["Linha PDF"] = df.astype(str).agg(" | ".join, axis=1)
+
+    out = out[~out["Código Fábrica"].astype(str).str.upper().str.contains("TOTAL DO PEDIDO|NUMERO DE ITENS|NÚMERO DE ITENS", na=False)]
+    out = out[out["Código Fábrica"].astype(str).str.extract(r"([A-Za-z0-9]{3,})", expand=False).notna()]
+    out = out[out["Quantidade"] > 0].copy()
+    out.loc[(out["Valor Total"] <= 0) & (out["Valor Unitário"] > 0), "Valor Total"] = out["Quantidade"] * out["Valor Unitário"]
+    out.loc[(out["Valor Unitário"] <= 0) & (out["Valor Total"] > 0) & (out["Quantidade"] > 0), "Valor Unitário"] = out["Valor Total"] / out["Quantidade"]
+    return out.reset_index(drop=True)
+
+
+def extrair_itens_pdf_por_tabelas(uploaded_file):
+    """Lê PDFs de fornecedor com tabela real antes das heurísticas por texto."""
+    if uploaded_file is None:
+        return pd.DataFrame()
+    try:
+        pdf_bytes = _pdf_bytes(uploaded_file)
+        dfs = []
+        with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+            for page in pdf.pages:
+                for tabela in (page.extract_tables() or []):
+                    df_tab = _dataframe_de_tabela_pdf_fornecedor(tabela)
+                    if df_tab is not None and not df_tab.empty:
+                        dfs.append(df_tab)
+        if not dfs:
+            return pd.DataFrame()
+        return pd.concat(dfs, ignore_index=True)
+    except Exception:
+        return pd.DataFrame()
+
 def ler_arquivo_comparativo(uploaded_file, codigos_referencia=None):
     if uploaded_file is None:
         return pd.DataFrame()
@@ -4024,7 +4143,11 @@ def ler_arquivo_comparativo(uploaded_file, codigos_referencia=None):
         pass
 
     if nome.endswith(".pdf"):
-        df_pdf = extrair_itens_pdf_por_blocos(uploaded_file, codigos_referencia=codigos_referencia)
+        # Primeiro tenta tabela real do PDF. Isso evita confundir Código Produto/EAN/Código de Fábrica
+        # com quantidade quando o PDF possui colunas explícitas como Qtd., VL. Unitário e VL. Total.
+        df_pdf = extrair_itens_pdf_por_tabelas(uploaded_file)
+        if df_pdf.empty:
+            df_pdf = extrair_itens_pdf_por_blocos(uploaded_file, codigos_referencia=codigos_referencia)
         if df_pdf.empty:
             df_pdf = extrair_itens_pdf_por_codigos(uploaded_file, codigos_referencia=codigos_referencia)
         if not df_pdf.empty:
@@ -4163,6 +4286,18 @@ def normalizar_pedido_comparativo(df, origem, mapa_colunas=None):
         "Valor Final do Pedido", "Valor Total", "VL. TOTAL", "VL TOTAL", "Vlr Total",
         "Total", "Total Geral", "Valor", "Valor Mercadoria",
     ])
+
+    # Segurança contra PDF/Excel desalinhado: se a coluna mapeada como quantidade
+    # parecer código de fábrica/EAN/produto, procura outra coluna ou força inferência pela linha.
+    if col_qtd and col_qtd in df.columns and not _serie_parece_quantidade(df[col_qtd]):
+        col_qtd_original = col_qtd
+        col_qtd = None
+        for candidato in df.columns:
+            if candidato == col_qtd_original or candidato == col_fabrica:
+                continue
+            if _serie_parece_quantidade(df[candidato]) and _normalizar_nome_coluna_flex(candidato) not in ["CODIGO", "COD PRODUTO", "CODIGO PRODUTO", "CODIGO EAN"]:
+                col_qtd = candidato
+                break
 
     # Quando o arquivo veio de PDF sem cabeçalho perfeito, tenta inferir por linha completa.
     if (not col_qtd or not col_preco) and "Linha PDF" in df.columns:
