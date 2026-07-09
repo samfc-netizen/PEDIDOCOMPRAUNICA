@@ -3770,6 +3770,34 @@ def _celula_parece_numero_planilha(valor):
     return bool(re.fullmatch(r"-?[\d\.\,\s]+", txt_limpo))
 
 
+def _coluna_auxiliar_nao_preco_quantidade(nome_coluna):
+    norm = _normalizar_nome_coluna_flex(nome_coluna)
+    bloqueios = [
+        "LITRO", "LITROS", "LIT", "VOLUME", "VOL", "PESO", "KG", "KIL",
+        "ML", "EMB", "EMBALAGEM", "EAN", "BARRA", "BARRAS", "NCM", "IPI",
+        "ST", "ICMS", "IMPOSTO", "DESCONTO",
+    ]
+    return any(b in norm for b in bloqueios)
+
+
+def dataframe_fornecedor_tem_colunas_confiaveis(df):
+    if df is None or df.empty:
+        return False
+
+    col_codigo = _coluna_por_candidatos(df, [
+        "Código Fábrica", "Codigo Fabrica", "Código", "Codigo", "CÓDIGO", "Cód.",
+        "Cod.", "Referência", "Referencia", "SKU", "Código Produto", "Codigo Produto",
+    ])
+    col_qtd = _coluna_quantidade_flexivel(df)
+    col_preco = _coluna_valor_unitario_flexivel(df)
+
+    if not col_codigo or not col_qtd or not col_preco:
+        return False
+    if _coluna_auxiliar_nao_preco_quantidade(col_qtd) or _coluna_auxiliar_nao_preco_quantidade(col_preco):
+        return False
+    return _serie_parece_quantidade(df[col_qtd])
+
+
 def extrair_itens_por_codigos_em_dataframe(df, codigos_referencia=None):
     if df is None or df.empty:
         return pd.DataFrame()
@@ -3806,7 +3834,9 @@ def extrair_itens_por_codigos_em_dataframe(df, codigos_referencia=None):
                 idx_cod = 0
 
             candidatos = []
-            for cell in valores[idx_cod + 1:]:
+            for col_nome, cell in zip(list(df_tmp.columns)[idx_cod + 1:], valores[idx_cod + 1:]):
+                if _coluna_auxiliar_nao_preco_quantidade(col_nome):
+                    continue
                 if not _celula_parece_numero_planilha(cell):
                     continue
                 nums = _tokens_numericos_linha(cell)
@@ -4455,6 +4485,8 @@ def ler_arquivo_comparativo(uploaded_file, codigos_referencia=None):
                 if codigos_referencia:
                     extraidos = []
                     for tabela in tabelas:
+                        if dataframe_fornecedor_tem_colunas_confiaveis(tabela):
+                            continue
                         df_anchor = extrair_itens_por_codigos_em_dataframe(tabela, codigos_referencia)
                         if df_anchor is not None and not df_anchor.empty:
                             extraidos.append(df_anchor)
@@ -4480,9 +4512,10 @@ def ler_arquivo_comparativo(uploaded_file, codigos_referencia=None):
 
     df_planilha = ler_planilha_comparativo_fornecedor(uploaded_file)
     if codigos_referencia:
-        df_anchor = extrair_itens_por_codigos_em_dataframe(df_planilha, codigos_referencia)
-        if df_anchor is not None and not df_anchor.empty:
-            return df_anchor
+        if not dataframe_fornecedor_tem_colunas_confiaveis(df_planilha):
+            df_anchor = extrair_itens_por_codigos_em_dataframe(df_planilha, codigos_referencia)
+            if df_anchor is not None and not df_anchor.empty:
+                return df_anchor
     return df_planilha
 
 
@@ -4586,6 +4619,16 @@ def normalizar_pedido_comparativo(df, origem, mapa_colunas=None):
         "Valor Final do Pedido", "Valor Total", "VL. TOTAL", "VL TOTAL", "Vlr Total",
         "Total", "Total Geral", "Valor", "Valor Mercadoria",
     ])
+
+    if col_qtd and _coluna_auxiliar_nao_preco_quantidade(col_qtd):
+        col_qtd_alt = _coluna_quantidade_flexivel(df)
+        if col_qtd_alt and not _coluna_auxiliar_nao_preco_quantidade(col_qtd_alt):
+            col_qtd = col_qtd_alt
+
+    if col_preco and _coluna_auxiliar_nao_preco_quantidade(col_preco):
+        col_preco_alt = _coluna_valor_unitario_flexivel(df)
+        if col_preco_alt and not _coluna_auxiliar_nao_preco_quantidade(col_preco_alt):
+            col_preco = col_preco_alt
 
     # Segurança contra PDF/Excel desalinhado: se a coluna mapeada como quantidade
     # parecer código de fábrica/EAN/produto, procura outra coluna ou força inferência pela linha.
