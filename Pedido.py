@@ -5942,13 +5942,31 @@ def classificar_status_ruptura(media_mensal, estoque_geral, dias_cobertura):
 
 
 def montar_analise_ruptura_por_marca(df_ruptura, meses_ref, df_aberto_ruptura=None):
+    """
+    Monta a visão gerencial de ruptura por marca.
+
+    Regra de negócio desta tela:
+    - Consolida o item por Marca + Código, somando Lojas Dauto + Única.
+    - Considera o saldo de Pedidos em Aberto como estoque em trânsito.
+    - O item só entra como "gera pedido" quando tem giro e o estoque considerado
+      não cobre 30 dias de venda média.
+    - A ruptura/risco é calculada em cima do Estoque Considerado:
+      Estoque Geral + Saldo em Trânsito/ABERTO.
+    """
     if df_ruptura.empty:
         return pd.DataFrame(), pd.DataFrame()
 
     df = df_ruptura.copy()
+    meses_ref = [m for m in meses_ref if m in df.columns]
+    if not meses_ref:
+        return pd.DataFrame(), pd.DataFrame()
+
     for mes in meses_ref:
         df[mes] = pd.to_numeric(df.get(mes, 0), errors="coerce").fillna(0)
     df["estoque"] = pd.to_numeric(df.get("estoque", 0), errors="coerce").fillna(0)
+    df["codigo"] = df["codigo"].astype(str).str.extract(r"(\d+)")[0].fillna("").str.zfill(5)
+    df["marca"] = df.get("marca", "SEM MARCA").astype(str).str.strip().replace("", "SEM MARCA")
+    df["descricao"] = df.get("descricao", "").astype(str).str.strip()
 
     agg_dict = {mes: "sum" for mes in meses_ref}
     agg_dict.update({
@@ -5958,14 +5976,15 @@ def montar_analise_ruptura_por_marca(df_ruptura, meses_ref, df_aberto_ruptura=No
     })
 
     itens = df.groupby(["marca", "codigo", "descricao"], as_index=False).agg(agg_dict)
-    itens["Giro Geral"] = itens[meses_ref].sum(axis=1)
+    itens["Giro Geral"] = itens[meses_ref].sum(axis=1).round(2)
     itens["Média Giro Geral"] = itens[meses_ref].mean(axis=1).round(2)
-    itens["Estoque Geral"] = itens["estoque"].round(2)
+    itens["Estoque Geral"] = pd.to_numeric(itens["estoque"], errors="coerce").fillna(0).round(2)
 
     if df_aberto_ruptura is not None and not df_aberto_ruptura.empty:
         aberto = df_aberto_ruptura.copy()
-        aberto["codigo"] = aberto["codigo"].astype(str).str.extract(r"(\d+)")[0].str.zfill(5)
+        aberto["codigo"] = aberto["codigo"].astype(str).str.extract(r"(\d+)")[0].fillna("").str.zfill(5)
         aberto["Saldo em Trânsito/ABERTO"] = pd.to_numeric(aberto.get("Saldo em Trânsito/ABERTO", 0), errors="coerce").fillna(0)
+        aberto = aberto[aberto["codigo"].str.strip().ne("")]
         aberto = aberto.groupby("codigo", as_index=False)["Saldo em Trânsito/ABERTO"].sum()
         itens = itens.merge(aberto, on="codigo", how="left")
     else:
@@ -5973,6 +5992,11 @@ def montar_analise_ruptura_por_marca(df_ruptura, meses_ref, df_aberto_ruptura=No
 
     itens["Saldo em Trânsito/ABERTO"] = pd.to_numeric(itens["Saldo em Trânsito/ABERTO"], errors="coerce").fillna(0).round(2)
     itens["Estoque Considerado"] = (itens["Estoque Geral"] + itens["Saldo em Trânsito/ABERTO"]).round(2)
+    itens["Necessidade 30 dias"] = (itens["Média Giro Geral"] - itens["Estoque Considerado"]).apply(lambda x: max(math.ceil(float(x)), 0)).astype(int)
+    itens["Gera Pedido"] = itens.apply(
+        lambda r: "SIM" if float(r.get("Média Giro Geral", 0) or 0) > 0 and int(r.get("Necessidade 30 dias", 0) or 0) > 0 else "NÃO",
+        axis=1,
+    )
     itens["Dias de Cobertura"] = itens.apply(
         lambda r: round((float(r["Estoque Considerado"]) / float(r["Média Giro Geral"]) * 30), 1) if float(r["Média Giro Geral"] or 0) > 0 else 9999,
         axis=1,
@@ -5981,47 +6005,77 @@ def montar_analise_ruptura_por_marca(df_ruptura, meses_ref, df_aberto_ruptura=No
         lambda r: classificar_status_ruptura(r["Média Giro Geral"], r["Estoque Considerado"], r["Dias de Cobertura"]),
         axis=1,
     )
-    itens["Necessidade 30 dias"] = itens.apply(
-        lambda r: max(math.ceil(float(r["Média Giro Geral"] or 0) - float(r["Estoque Considerado"] or 0)), 0),
+    itens["Item em Ruptura"] = itens.apply(
+        lambda r: "SIM" if r.get("Gera Pedido") == "SIM" and str(r.get("Status")) in ["CRÍTICO", "ALTO", "ATENÇÃO"] else "NÃO",
         axis=1,
     )
     itens["Peso Risco"] = itens["Status"].map({"CRÍTICO": 4, "ALTO": 3, "ATENÇÃO": 2, "OK": 1, "SEM GIRO": 0}).fillna(0)
+    itens["Prioridade"] = itens.apply(
+        lambda r: "1 - Comprar agora" if r["Status"] == "CRÍTICO" else (
+            "2 - Comprar na próxima reposição" if r["Status"] == "ALTO" else (
+                "3 - Acompanhar pedido" if r["Status"] == "ATENÇÃO" else "4 - Sem ação"
+            )
+        ),
+        axis=1,
+    )
 
-    resumo = itens.groupby("marca", as_index=False).agg(
-        Itens=("codigo", "count"),
+    itens_risco = itens[itens["Item em Ruptura"] == "SIM"].copy()
+
+    resumo_base = itens.groupby("marca", as_index=False).agg(
+        Itens_Analisados=("codigo", "count"),
+        Giro_Geral_Total=("Giro Geral", "sum"),
+        Media_Giro_Total=("Média Giro Geral", "sum"),
+        Estoque_Geral_Total=("Estoque Geral", "sum"),
+        Em_Aberto_Total=("Saldo em Trânsito/ABERTO", "sum"),
+        Estoque_Considerado_Total=("Estoque Considerado", "sum"),
+    )
+
+    resumo_risco = itens_risco.groupby("marca", as_index=False).agg(
+        Itens_que_Geram_Pedido=("codigo", "count"),
         Criticos=("Status", lambda s: int((s == "CRÍTICO").sum())),
         Alto=("Status", lambda s: int((s == "ALTO").sum())),
         Atencao=("Status", lambda s: int((s == "ATENÇÃO").sum())),
-        OK=("Status", lambda s: int((s == "OK").sum())),
-        Sem_Giro=("Status", lambda s: int((s == "SEM GIRO").sum())),
-        Giro_Geral=("Giro Geral", "sum"),
-        Media_Giro_Geral=("Média Giro Geral", "sum"),
-        Estoque_Geral=("Estoque Geral", "sum"),
-        Em_Aberto=("Saldo em Trânsito/ABERTO", "sum"),
-        Estoque_Considerado=("Estoque Considerado", "sum"),
         Necessidade_30_dias=("Necessidade 30 dias", "sum"),
         Score_Risco=("Peso Risco", "sum"),
     )
-    resumo["% Itens em Risco"] = ((resumo["Criticos"] + resumo["Alto"] + resumo["Atencao"]) / resumo["Itens"].replace(0, pd.NA) * 100).fillna(0).round(1)
-    resumo["Dias Cobertura Marca"] = resumo.apply(
-        lambda r: round((float(r["Estoque_Considerado"]) / float(r["Media_Giro_Geral"]) * 30), 1) if float(r["Media_Giro_Geral"] or 0) > 0 else 9999,
+
+    resumo = resumo_base.merge(resumo_risco, on="marca", how="left").fillna(0)
+    for col in ["Itens_que_Geram_Pedido", "Criticos", "Alto", "Atencao", "Necessidade_30_dias", "Score_Risco"]:
+        resumo[col] = pd.to_numeric(resumo[col], errors="coerce").fillna(0).astype(int)
+
+    resumo["% Itens com Risco"] = (
+        resumo["Itens_que_Geram_Pedido"] / resumo["Itens_Analisados"].replace(0, pd.NA) * 100
+    ).fillna(0).round(1)
+    resumo["Dias de Cobertura"] = resumo.apply(
+        lambda r: round((float(r["Estoque_Considerado_Total"]) / float(r["Media_Giro_Total"]) * 30), 1) if float(r["Media_Giro_Total"] or 0) > 0 else 9999,
         axis=1,
     )
-    resumo = resumo.sort_values(["Score_Risco", "Criticos", "Alto", "% Itens em Risco"], ascending=[False, False, False, False])
+    resumo["Ação"] = resumo.apply(
+        lambda r: "Priorizar compra" if int(r["Criticos"] or 0) > 0 else (
+            "Comprar na próxima reposição" if int(r["Alto"] or 0) > 0 else (
+                "Acompanhar" if int(r["Atencao"] or 0) > 0 else "Sem risco relevante"
+            )
+        ),
+        axis=1,
+    )
+    resumo = resumo.sort_values(
+        ["Itens_que_Geram_Pedido", "Score_Risco", "Criticos", "Alto", "% Itens com Risco"],
+        ascending=[False, False, False, False, False],
+    )
 
     resumo = resumo.rename(columns={
         "marca": "Marca",
+        "Itens_Analisados": "Itens analisados",
+        "Itens_que_Geram_Pedido": "Itens com risco de ruptura",
         "Criticos": "Críticos",
         "Atencao": "Atenção",
-        "Sem_Giro": "Sem Giro",
-        "Giro_Geral": "Giro Geral",
-        "Media_Giro_Geral": "Média Giro Geral",
-        "Estoque_Geral": "Estoque Geral",
-        "Em_Aberto": "Em Aberto",
-        "Estoque_Considerado": "Estoque Considerado",
-        "Necessidade_30_dias": "Necessidade 30 dias",
+        "Giro_Geral_Total": "Giro Geral",
+        "Media_Giro_Total": "Média Giro Geral",
+        "Estoque_Geral_Total": "Estoque Geral",
+        "Em_Aberto_Total": "Em Aberto",
+        "Estoque_Considerado_Total": "Estoque Considerado",
+        "Necessidade_30_dias": "Sugestão de Pedido",
         "Score_Risco": "Score Risco",
-        "Dias Cobertura Marca": "Dias de Cobertura",
     })
 
     itens = itens.rename(columns={
@@ -6030,9 +6084,8 @@ def montar_analise_ruptura_por_marca(df_ruptura, meses_ref, df_aberto_ruptura=No
         "descricao": "Descrição",
         "unidade": "UN",
     })
-    itens = itens.sort_values(["Peso Risco", "Dias de Cobertura", "Média Giro Geral"], ascending=[False, True, False])
+    itens = itens.sort_values(["Item em Ruptura", "Peso Risco", "Dias de Cobertura", "Média Giro Geral"], ascending=[False, False, True, False])
     return resumo.reset_index(drop=True), itens.reset_index(drop=True)
-
 
 def colorir_status_ruptura(row):
     status = str(row.get("Status", ""))
@@ -6114,28 +6167,37 @@ def render_pagina_ruptura_por_marca():
         return
 
     total_itens = int(len(itens_marca))
+    total_risco = int((itens_marca.get("Item em Ruptura", "NÃO") == "SIM").sum())
     total_criticos = int((itens_marca["Status"] == "CRÍTICO").sum())
     total_alto = int((itens_marca["Status"] == "ALTO").sum())
-    total_atencao = int((itens_marca["Status"] == "ATENÇÃO").sum())
     total_em_aberto = float(pd.to_numeric(itens_marca.get("Saldo em Trânsito/ABERTO", 0), errors="coerce").fillna(0).sum())
+    total_sugestao = int(pd.to_numeric(itens_marca.loc[itens_marca.get("Item em Ruptura", "NÃO") == "SIM", "Necessidade 30 dias"], errors="coerce").fillna(0).sum())
 
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
         render_metric("Itens analisados", format_int_br(total_itens), "Lojas Dauto + Única")
     with c2:
-        render_metric("Críticos", format_int_br(total_criticos), "Sem estoque ou até 7 dias")
+        render_metric("Itens com risco", format_int_br(total_risco), "Geram pedido")
     with c3:
-        render_metric("Alto risco", format_int_br(total_alto), "Até 15 dias")
+        render_metric("Críticos", format_int_br(total_criticos), "Sem estoque ou até 7 dias")
     with c4:
-        render_metric("Atenção", format_int_br(total_atencao), "Até 30 dias")
+        render_metric("Sugestão total", format_int_br(total_sugestao), "Necessidade 30 dias")
     with c5:
         render_metric("Em aberto", format_num_br(total_em_aberto, 1), "Somado ao estoque")
 
     st.markdown("---")
     st.markdown('<div class="section-title">Ranking de marcas por risco</div>', unsafe_allow_html=True)
+    st.caption("O ranking abaixo mostra, por marca, quantos itens têm giro, geram pedido e continuam com risco de ruptura mesmo considerando o saldo em aberto.")
 
-    busca_marca = st.text_input("Pesquisar marca", key="busca_marca_ruptura")
+    col_busca_marca, col_zero_marca = st.columns([2, 1])
+    with col_busca_marca:
+        busca_marca = st.text_input("Pesquisar marca", key="busca_marca_ruptura")
+    with col_zero_marca:
+        mostrar_sem_risco = st.checkbox("Mostrar marcas sem risco", value=False, key="mostrar_marca_sem_risco")
+
     resumo_view = resumo_marca.copy()
+    if not mostrar_sem_risco and "Itens com risco de ruptura" in resumo_view.columns:
+        resumo_view = resumo_view[pd.to_numeric(resumo_view["Itens com risco de ruptura"], errors="coerce").fillna(0) > 0]
     if busca_marca:
         resumo_view = resumo_view[resumo_view["Marca"].astype(str).str.lower().str.contains(busca_marca.lower(), na=False)]
 
@@ -6161,13 +6223,17 @@ def render_pagina_ruptura_por_marca():
 
     itens_view = itens_marca[itens_marca["Marca"].astype(str) == str(marca_selecionada)].copy()
 
-    colf1, colf2 = st.columns([1, 1])
+    colf1, colf2, colf3 = st.columns([1, 1, 1])
     with colf1:
+        apenas_risco = st.checkbox("Apenas itens que geram pedido", value=True, key="apenas_itens_ruptura_marca")
+    with colf2:
         status_opcoes = ["Todos", "CRÍTICO", "ALTO", "ATENÇÃO", "OK", "SEM GIRO"]
         status_sel = st.selectbox("Filtrar status", status_opcoes, key="status_ruptura_marca")
-    with colf2:
+    with colf3:
         busca_item = st.text_input("Pesquisar produto dentro da marca", key="busca_item_ruptura_marca")
 
+    if apenas_risco and "Item em Ruptura" in itens_view.columns:
+        itens_view = itens_view[itens_view["Item em Ruptura"] == "SIM"]
     if status_sel != "Todos":
         itens_view = itens_view[itens_view["Status"] == status_sel]
     if busca_item:
@@ -6178,7 +6244,8 @@ def render_pagina_ruptura_por_marca():
         ]
 
     colunas_itens = ["Código", "Descrição", "UN"] + meses_ref + [
-        "Giro Geral", "Média Giro Geral", "Estoque Geral", "Saldo em Trânsito/ABERTO", "Estoque Considerado", "Dias de Cobertura", "Necessidade 30 dias", "Status"
+        "Giro Geral", "Média Giro Geral", "Estoque Geral", "Saldo em Trânsito/ABERTO", "Estoque Considerado",
+        "Dias de Cobertura", "Necessidade 30 dias", "Gera Pedido", "Item em Ruptura", "Status", "Prioridade"
     ]
     colunas_itens = [c for c in colunas_itens if c in itens_view.columns]
 
