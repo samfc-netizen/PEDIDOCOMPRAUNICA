@@ -5783,9 +5783,16 @@ def _token_numero_br_para_float(token):
 
 def _extrair_meses_cabecalho_marca(text):
     meses = []
+    for raw_line in str(text or "").splitlines():
+        line = str(raw_line or "")
+        if "COD" in line.upper() and "DESCR" in line.upper() and "MEDIA" in line.upper():
+            meses_linha = re.findall(r"\b\d{2}/\d{4}\b", line)
+            if meses_linha:
+                return meses_linha[:6]
+
     match = re.search(r"REFERENTE AOS MESES:\s*([^\n]+)", text, flags=re.IGNORECASE)
     if match:
-        meses = re.findall(r"\d{2}/\d{4}", match.group(1))
+        meses = list(reversed(re.findall(r"\d{2}/\d{4}", match.group(1))))
     if not meses:
         meses = sorted(set(re.findall(r"\b\d{2}/\d{4}\b", text)))[:4]
     return meses[:6] if meses else []
@@ -5860,12 +5867,13 @@ def parse_pdf_ruptura_por_marca(bytes_pdf):
     """
     registros = []
     empresa_atual = None
+    relatorio_consolidado = False
     marca_cod_atual = ""
     marca_nome_atual = "SEM MARCA"
     meses_ref = []
 
     def processar_texto_pagina(page_text):
-        nonlocal empresa_atual, marca_cod_atual, marca_nome_atual, meses_ref, registros
+        nonlocal empresa_atual, relatorio_consolidado, marca_cod_atual, marca_nome_atual, meses_ref, registros
 
         if not meses_ref:
             meses_extraidos = _extrair_meses_cabecalho_marca(page_text or "")
@@ -5874,6 +5882,12 @@ def parse_pdf_ruptura_por_marca(bytes_pdf):
 
         if not meses_ref:
             return
+
+        if not empresa_atual:
+            empresa_lista = re.search(r"EMPRESA\s*:\s*([0-9_]+)", str(page_text or ""), flags=re.IGNORECASE)
+            if empresa_lista and "_" in empresa_lista.group(1):
+                empresa_atual = "GERAL"
+                relatorio_consolidado = True
 
         for raw_line in str(page_text or "").splitlines():
             line = raw_line.strip()
@@ -5897,14 +5911,16 @@ def parse_pdf_ruptura_por_marca(bytes_pdf):
                     marca_nome_atual = marca_raw or "SEM MARCA"
                 continue
 
-            if not empresa_atual or empresa_atual not in LOJAS_MAP:
+            if not empresa_atual:
+                continue
+            if empresa_atual != "GERAL" and empresa_atual not in LOJAS_MAP:
                 continue
 
             produto = parse_linha_giro_marca_independente(line, meses_ref)
             if produto:
                 produto["codigo_empresa"] = empresa_atual
-                produto["loja"] = LOJAS_MAP.get(empresa_atual, empresa_atual)
-                produto["tipo_unidade"] = "ÚNICA" if empresa_atual == CODIGO_UNICA else "LOJAS DAUTO"
+                produto["loja"] = "GERAL" if empresa_atual == "GERAL" else LOJAS_MAP.get(empresa_atual, empresa_atual)
+                produto["tipo_unidade"] = "GERAL" if relatorio_consolidado else ("ÚNICA" if empresa_atual == CODIGO_UNICA else "LOJAS DAUTO")
                 produto["marca_codigo"] = marca_cod_atual
                 produto["marca"] = marca_nome_atual if marca_nome_atual else "SEM MARCA"
                 registros.append(produto)
