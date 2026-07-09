@@ -118,15 +118,20 @@ def br_to_float(value):
 
 def numero_planilha_para_float(value):
     """
-    Converte números vindos da planilha final, aceitando:
-    - 28.12  -> 28.12
-    - 28,12  -> 28.12
+    Converte números vindos de Excel/Google Sheets sem perder milhares.
+
+    Correções principais:
+    - 1,000  -> 1000   quando a vírgula vier como separador de milhar do Sheets
+    - 12,000 -> 12000
+    - 1.000  -> 1000   quando o ponto vier como separador de milhar
+    - 28,12  -> 28.12  quando a vírgula vier como decimal brasileiro
+    - 28.12  -> 28.12  quando o ponto vier como decimal
     - 1.234,56 -> 1234.56
     - 1,234.56 -> 1234.56
-    Evita o erro de transformar 28.12 em 2812.
     """
     if value is None:
         return 0.0
+
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         try:
             if pd.isna(value):
@@ -139,34 +144,35 @@ def numero_planilha_para_float(value):
     if txt == "" or txt.lower() in ["nan", "none", "-"]:
         return 0.0
 
-    txt = txt.replace("R$", "").replace(" ", "").replace("\xa0", "")
+    txt = txt.replace("R$", "").replace(" ", "").replace(" ", "")
 
-    # Se tem vírgula e ponto, decide pelo último separador como decimal
+    # Remove sinais/artefatos comuns sem afetar números válidos.
+    txt = txt.replace("+", "")
+
+    # Quando tem vírgula e ponto, o último separador define o decimal.
+    # BR: 1.234,56 | US/Sheets: 1,234.56
     if "," in txt and "." in txt:
         if txt.rfind(",") > txt.rfind("."):
-            # padrão brasileiro: 1.234,56
             txt = txt.replace(".", "").replace(",", ".")
         else:
-            # padrão americano: 1,234.56
             txt = txt.replace(",", "")
+
     elif "," in txt:
-        # padrão brasileiro simples: 28,12
-        txt = txt.replace(".", "").replace(",", ".")
-    elif "." in txt:
-        # Mantém ponto como decimal quando parecer número decimal.
-        # Também cobre floats lidos como texto pelo Excel, ex.: 25.940000000000001.
-        partes = txt.split(".")
-        if len(partes) == 2:
-            int_part, dec_part = partes[0], partes[1]
-            if len(dec_part) <= 2 or len(dec_part) > 3:
-                pass
-            elif len(int_part) <= 2:
-                pass
-            else:
-                txt = txt.replace(".", "")
+        # Google Sheets/CSV em padrão americano: 1,000 / 12,000 / 123,456
+        # Aqui a vírgula é milhar, não decimal.
+        if re.fullmatch(r"-?\d{1,3}(?:,\d{3})+", txt):
+            txt = txt.replace(",", "")
         else:
-            # caso venha como milhar: 1.234.567
+            # Decimal brasileiro simples: 28,12 / 0,5
+            txt = txt.replace(",", ".")
+
+    elif "." in txt:
+        # Ponto como milhar: 1.000 / 12.000 / 123.456
+        if re.fullmatch(r"-?\d{1,3}(?:\.\d{3})+", txt):
             txt = txt.replace(".", "")
+        else:
+            # Mantém ponto como decimal: 28.12 / 25.940000000000001
+            pass
 
     try:
         return float(txt)
