@@ -4369,6 +4369,12 @@ def agregar_pedido_comparativo(df):
         lambda r: str(r["codigo_fabrica_norm"]) if str(r["codigo_fabrica_norm"]).strip() else f"SEM_CODIGO_{r.name}",
         axis=1,
     )
+    # Mantém o preço unitário real lido do arquivo e calcula média ponderada pela quantidade.
+    # Correção para planilhas que trazem simultaneamente VL. UNIT., UNIT.TOT e VL. TOTAL:
+    # antes o agrupamento sempre fazia valor_total / quantidade, o que substituía o
+    # valor unitário pela coluna de total unitário/total do item em alguns modelos.
+    df["__valor_unitario_ponderado"] = pd.to_numeric(df["preco_unitario"], errors="coerce").fillna(0) * pd.to_numeric(df["quantidade"], errors="coerce").fillna(0)
+
     agg = df.groupby("chave", as_index=False).agg(
         codigo_fabrica=("codigo_fabrica", "first"),
         codigo_fabrica_norm=("codigo_fabrica_norm", "first"),
@@ -4376,11 +4382,17 @@ def agregar_pedido_comparativo(df):
         descricao_chave=("descricao_chave", "first"),
         quantidade=("quantidade", "sum"),
         valor_total=("valor_total", "sum"),
+        __valor_unitario_ponderado=("__valor_unitario_ponderado", "sum"),
     )
     agg["preco_unitario"] = agg.apply(
-        lambda r: float(r["valor_total"]) / float(r["quantidade"]) if float(r["quantidade"] or 0) > 0 and float(r["valor_total"] or 0) > 0 else 0,
+        lambda r: (
+            float(r["__valor_unitario_ponderado"]) / float(r["quantidade"])
+            if float(r["quantidade"] or 0) > 0 and float(r["__valor_unitario_ponderado"] or 0) > 0
+            else (float(r["valor_total"]) / float(r["quantidade"]) if float(r["quantidade"] or 0) > 0 and float(r["valor_total"] or 0) > 0 else 0)
+        ),
         axis=1,
     )
+    agg = agg.drop(columns=["__valor_unitario_ponderado"], errors="ignore")
     return agg
 
 
