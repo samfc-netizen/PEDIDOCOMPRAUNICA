@@ -1345,7 +1345,7 @@ def data_alerta_icon(data_ultima_compra, meses_alerta):
         return ""
     hoje = pd.Timestamp.today().normalize()
     limite = hoje - pd.DateOffset(months=int(meses_alerta))
-    return "⚠" if pd.Timestamp(data_ultima_compra) < limite else ""
+    return "⚠️" if pd.Timestamp(data_ultima_compra).normalize() <= limite else ""
 
 
 def montar_info_compra(df_giro, meses_alerta_sem_compra=3):
@@ -1592,7 +1592,9 @@ def colorir_colunas_consolidada(col):
         return ["background-color: #fff1df"] * len(col)
     if "Geral" in col.name:
         return ["background-color: #eaf7ea"] * len(col)
-    if "ABERTO" in col.name or "Estoque Final" in col.name:
+    if "ABERTO" in col.name:
+        return ["background-color: #cfe2ff; color: #084298; font-weight: 700"] * len(col)
+    if "Estoque Final" in col.name:
         return ["background-color: #f3e8ff; font-weight: 600"] * len(col)
     if "Sistema" in col.name or "arredondada" in col.name or "Alvo" in col.name or "PEDIDO Final" in col.name:
         return ["background-color: #ffe8e8"] * len(col)
@@ -1606,7 +1608,9 @@ def colorir_colunas_pedido(col):
         return ["background-color: #fff1df"] * len(col)
     if col.name in ["Média Giro Geral", "Estoque Geral"]:
         return ["background-color: #eaf7ea"] * len(col)
-    if col.name in ["Saldo em Trânsito/ABERTO", "Estoque Final"]:
+    if col.name in ["Saldo em Trânsito/ABERTO"]:
+        return ["background-color: #cfe2ff; color: #084298; font-weight: 700"] * len(col)
+    if col.name in ["Estoque Final"]:
         return ["background-color: #f3e8ff; font-weight: 600"] * len(col)
     if col.name in ["Estoque Alvo", "Sugestão Sistema", "Sugestão arredondada", "PEDIDO Final", "Valor Final do Pedido"]:
         return ["background-color: #ffe8e8"] * len(col)
@@ -1635,11 +1639,11 @@ def estilos_alerta_giro_fora_curva(row):
                 continue
             outros = valores.drop(index=col)
             media_outros = outros[outros > 0].mean()
-            if pd.notna(media_outros) and media_outros > 0 and valor >= media_outros * 2.2:
+            if pd.notna(media_outros) and media_outros > 0 and valor >= media_outros * 1.5:
                 colunas_alerta.add(col)
 
     for col in colunas_alerta:
-        estilos[col] = "color: #c2410c; font-weight: 700"
+        estilos[col] = "background-color: #fed7aa; color: #9a3412; font-weight: 700"
     return estilos
 
 def formatadores_para_tabela(df):
@@ -7036,20 +7040,7 @@ if df_giro.empty:
     st.stop()
 
 meses_disponiveis_pdf = list(MESES)
-st.sidebar.markdown("Meses para analise")
-meses_selecionados = st.sidebar.multiselect(
-    "Meses para análise",
-    options=meses_disponiveis_pdf,
-    default=meses_disponiveis_pdf,
-    format_func=label_mes_giro,
-    label_visibility="collapsed",
-    help="Reduza os meses se quiser uma tela mais leve. Se selecionar todos, o app usa modo rápido quando necessário.",
-)
-if meses_selecionados:
-    MESES = meses_selecionados
-else:
-    st.sidebar.warning("Selecione ao menos um mês. Usando todos os meses do PDF.")
-    MESES = meses_disponiveis_pdf
+MESES = meses_disponiveis_pdf
 
 if cadastro_google is not None and not cadastro_google.empty:
     df_giro = aplicar_cadastro_dataframe(df_giro, cadastro_google)
