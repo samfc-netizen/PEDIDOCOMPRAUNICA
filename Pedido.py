@@ -14,6 +14,13 @@ from email.utils import formataddr
 from io import BytesIO, StringIO
 from datetime import datetime, date
 
+
+# Dependências da multipage de Previsão Financeira
+import io
+import zipfile
+import xml.etree.ElementTree as ET
+from typing import Dict, Iterable, List, Optional, Tuple
+
 import pdfplumber
 
 try:
@@ -6694,6 +6701,1079 @@ token_uri = "https://oauth2.googleapis.com/token"
         st.error(str(e))
 
 
+
+
+# =========================================================
+# MULTIPAGE - PREVISÃO FINANCEIRA DE FORNECEDORES
+# =========================================================
+
+# =========================================================
+# CONFIGURAÇÕES
+# =========================================================
+
+CFOPS_BONIFICACAO = {
+    "1910", "1911", "2910", "2911", "3910", "3911",
+    "5910", "5911", "6910", "6911", "7910", "7911",
+    "6949",  # remessa de marketing/outro enquadramento informado pelo usuário
+}
+
+# CFOPs usuais de devolução de venda/compra, incluindo operações internas,
+# interestaduais e com exterior. A natureza da operação contendo "DEVOLU" também
+# é usada como critério auxiliar.
+CFOPS_DEVOLUCAO = {
+    "1201", "1202", "1203", "1204", "1410", "1411", "1503", "1504",
+    "1553", "1660", "1661", "1662",
+    "2201", "2202", "2203", "2204", "2410", "2411", "2503", "2504",
+    "2553", "2660", "2661", "2662",
+    "3201", "3202", "3203", "3204", "3211", "3503", "3504",
+    "5201", "5202", "5208", "5209", "5210", "5410", "5411", "5412",
+    "5413", "5503", "5553", "5660", "5661", "5662",
+    "6201", "6202", "6208", "6209", "6210", "6410", "6411", "6412",
+    "6413", "6503", "6553", "6660", "6661", "6662",
+    "7201", "7202", "7208", "7209", "7210", "7503", "7553",
+}
+
+COLUNAS_NOTAS = [
+    "CATEGORIA",
+    "NR_CHAVE_ACESSO",
+    "NR_CNPJ_EMITENTE",
+    "NM_EMITENTE",
+    "DT_EMISSAO",
+    "NR_DOCUMENTO",
+    "NR_SERIE",
+    "CFOPS",
+    "NATUREZA_OPERACAO",
+    "VL_NOTA_FISCAL",
+    "QTD_ITENS",
+    "ARQUIVO_ORIGEM",
+]
+
+COLUNAS_PARCELAS = [
+    "CATEGORIA",
+    "NR_CHAVE_ACESSO",
+    "NR_CNPJ_EMITENTE",
+    "NM_EMITENTE",
+    "NR_DOCUMENTO",
+    "NR_SERIE",
+    "NR_PARCELA",
+    "DT_VENCIMENTO",
+    "VL_PARCELA",
+    "ARQUIVO_ORIGEM",
+]
+
+COLUNAS_ITENS = [
+    "CATEGORIA",
+    "NR_CHAVE_ACESSO",
+    "NR_CNPJ_EMITENTE",
+    "NM_EMITENTE",
+    "DT_EMISSAO",
+    "NR_DOCUMENTO",
+    "NR_SERIE",
+    "CFOP",
+    "NATUREZA_OPERACAO",
+    "COD_PRODUTO",
+    "DESCRICAO",
+    "QTD",
+    "VL_UNITARIO",
+    "VL_TOTAL_ITEM",
+    "ARQUIVO_ORIGEM",
+]
+
+
+# =========================================================
+# FUNÇÕES XML
+# =========================================================
+
+def limpar_cnpj(cnpj: str) -> str:
+    return re.sub(r"\D", "", str(cnpj or ""))
+
+
+def formatar_cnpj(cnpj: str) -> str:
+    c = limpar_cnpj(cnpj)
+    if len(c) != 14:
+        return cnpj or ""
+    return f"{c[:2]}.{c[2:5]}.{c[5:8]}/{c[8:12]}-{c[12:]}"
+
+
+def local_name(tag: str) -> str:
+    return tag.split("}", 1)[-1] if "}" in tag else tag
+
+
+def filhos_por_nome(elemento: ET.Element, nome: str) -> List[ET.Element]:
+    return [e for e in elemento.iter() if local_name(e.tag) == nome]
+
+
+def primeiro_texto(elemento: Optional[ET.Element], nomes: Iterable[str], default: str = "") -> str:
+    if elemento is None:
+        return default
+    nomes_set = set(nomes)
+    for e in elemento.iter():
+        if local_name(e.tag) in nomes_set and e.text is not None:
+            txt = str(e.text).strip()
+            if txt:
+                return txt
+    return default
+
+
+def primeiro_filho_direto(elemento: ET.Element, nome: str) -> Optional[ET.Element]:
+    for child in list(elemento):
+        if local_name(child.tag) == nome:
+            return child
+    return None
+
+
+def texto_filho_direto(elemento: Optional[ET.Element], nome: str, default: str = "") -> str:
+    if elemento is None:
+        return default
+    filho = primeiro_filho_direto(elemento, nome)
+    if filho is not None and filho.text:
+        return filho.text.strip()
+    return default
+
+
+def to_float(valor: str | None) -> float:
+    if valor is None:
+        return 0.0
+    s = str(valor).strip()
+    if not s:
+        return 0.0
+    # XML NF-e costuma vir com ponto decimal. Tratamento extra para vírgula.
+    s = s.replace(".", "") if s.count(",") == 1 and s.count(".") > 1 else s
+    s = s.replace(",", ".")
+    try:
+        return float(s)
+    except Exception:
+        return 0.0
+
+
+def formatar_moeda(valor: float) -> str:
+    """Formata número em padrão monetário brasileiro."""
+    try:
+        return f"R$ {float(valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except Exception:
+        return "R$ 0,00"
+
+
+def formatar_df_moeda(df: pd.DataFrame, colunas: Iterable[str]) -> pd.DataFrame:
+    """Retorna cópia do dataframe com colunas monetárias formatadas para exibição."""
+    out = df.copy()
+    for col in colunas:
+        if col in out.columns:
+            out[col] = out[col].apply(formatar_moeda)
+    return out
+
+
+def formatar_data(data: str) -> str:
+    if not data:
+        return ""
+    data = data.strip()
+    try:
+        # dhEmi: 2026-06-01T10:20:30-03:00
+        return datetime.fromisoformat(data.replace("Z", "+00:00")).strftime("%d/%m/%Y")
+    except Exception:
+        pass
+    try:
+        # dEmi: 2026-06-01
+        return datetime.strptime(data[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+    except Exception:
+        return data
+
+
+def obter_inf_nfe(root: ET.Element) -> Optional[ET.Element]:
+    for e in root.iter():
+        if local_name(e.tag) == "infNFe":
+            return e
+    return None
+
+
+def obter_chave(root: ET.Element, inf_nfe: Optional[ET.Element]) -> str:
+    # nfeProc/protNFe/infProt/chNFe é o caminho mais confiável quando existe.
+    for e in root.iter():
+        if local_name(e.tag) == "chNFe" and e.text:
+            return e.text.strip()
+    if inf_nfe is not None:
+        id_attr = inf_nfe.attrib.get("Id", "")
+        if id_attr.startswith("NFe"):
+            return id_attr.replace("NFe", "").strip()
+        return id_attr.strip()
+    return ""
+
+
+def ler_nfe_xml(conteudo: bytes, nome_arquivo: str) -> Tuple[Optional[Dict], pd.DataFrame, pd.DataFrame, Optional[str]]:
+    """Retorna dict da nota, dataframe de itens, dataframe de parcelas e erro."""
+    try:
+        root = ET.fromstring(conteudo)
+    except Exception as e:
+        return None, pd.DataFrame(), pd.DataFrame(), f"XML inválido: {nome_arquivo} - {e}"
+
+    inf_nfe = obter_inf_nfe(root)
+    if inf_nfe is None:
+        # XML de evento não possui itens/valores. Não entra na análise.
+        return None, pd.DataFrame(), pd.DataFrame(), None
+
+    emit = None
+    ide = None
+    total = None
+    for child in list(inf_nfe):
+        ln = local_name(child.tag)
+        if ln == "emit":
+            emit = child
+        elif ln == "ide":
+            ide = child
+        elif ln == "total":
+            total = child
+
+    chave = obter_chave(root, inf_nfe)
+    cnpj_emitente = limpar_cnpj(texto_filho_direto(emit, "CNPJ"))
+    nome_emitente = texto_filho_direto(emit, "xNome") or texto_filho_direto(emit, "xFant")
+    natureza = texto_filho_direto(ide, "natOp")
+    dt_emissao = formatar_data(texto_filho_direto(ide, "dhEmi") or texto_filho_direto(ide, "dEmi"))
+    nr_doc = texto_filho_direto(ide, "nNF")
+    nr_serie = texto_filho_direto(ide, "serie")
+    vnf = 0.0
+    if total is not None:
+        for e in total.iter():
+            if local_name(e.tag) == "vNF":
+                vnf = to_float(e.text)
+                break
+
+    linhas_itens = []
+    cfops = []
+
+    for det in [e for e in list(inf_nfe) if local_name(e.tag) == "det"]:
+        prod = primeiro_filho_direto(det, "prod")
+        if prod is None:
+            continue
+        cfop = texto_filho_direto(prod, "CFOP")
+        cfops.append(cfop)
+        linhas_itens.append({
+            "NR_CHAVE_ACESSO": chave,
+            "NR_CNPJ_EMITENTE": formatar_cnpj(cnpj_emitente),
+            "NM_EMITENTE": nome_emitente,
+            "DT_EMISSAO": dt_emissao,
+            "NR_DOCUMENTO": nr_doc,
+            "NR_SERIE": nr_serie,
+            "CFOP": cfop,
+            "NATUREZA_OPERACAO": natureza,
+            "COD_PRODUTO": texto_filho_direto(prod, "cProd"),
+            "DESCRICAO": texto_filho_direto(prod, "xProd"),
+            "QTD": to_float(texto_filho_direto(prod, "qCom")),
+            "VL_UNITARIO": to_float(texto_filho_direto(prod, "vUnCom")),
+            "VL_TOTAL_ITEM": to_float(texto_filho_direto(prod, "vProd")),
+            "ARQUIVO_ORIGEM": nome_arquivo,
+        })
+
+    cfops_unicos = sorted({c for c in cfops if c})
+
+    # Parcelas de pagamento: cobr/dup, quando informadas pelo emissor no XML.
+    linhas_parcelas = []
+    for dup in [e for e in inf_nfe.iter() if local_name(e.tag) == "dup"]:
+        nr_parcela = texto_filho_direto(dup, "nDup")
+        dt_venc = formatar_data(texto_filho_direto(dup, "dVenc"))
+        vl_parcela = to_float(texto_filho_direto(dup, "vDup"))
+        linhas_parcelas.append({
+            "NR_CHAVE_ACESSO": chave,
+            "NR_CNPJ_EMITENTE": formatar_cnpj(cnpj_emitente),
+            "NM_EMITENTE": nome_emitente,
+            "NR_DOCUMENTO": nr_doc,
+            "NR_SERIE": nr_serie,
+            "NR_PARCELA": nr_parcela,
+            "DT_VENCIMENTO": dt_venc,
+            "VL_PARCELA": vl_parcela,
+            "ARQUIVO_ORIGEM": nome_arquivo,
+        })
+
+    nota = {
+        "NR_CHAVE_ACESSO": chave,
+        "NR_CNPJ_EMITENTE": formatar_cnpj(cnpj_emitente),
+        "NM_EMITENTE": nome_emitente,
+        "DT_EMISSAO": dt_emissao,
+        "NR_DOCUMENTO": nr_doc,
+        "NR_SERIE": nr_serie,
+        "CFOPS": ", ".join(cfops_unicos),
+        "CFOPS_LISTA": cfops_unicos,
+        "NATUREZA_OPERACAO": natureza,
+        "VL_NOTA_FISCAL": vnf,
+        "QTD_ITENS": len(linhas_itens),
+        "ARQUIVO_ORIGEM": nome_arquivo,
+    }
+
+    return nota, pd.DataFrame(linhas_itens), pd.DataFrame(linhas_parcelas), None
+
+
+# =========================================================
+# LEITURA DE UPLOADS
+# =========================================================
+
+def extrair_arquivos(uploaded_files) -> List[Tuple[str, bytes]]:
+    arquivos = []
+    for up in uploaded_files:
+        nome = up.name
+        conteudo = up.read()
+        if nome.lower().endswith(".zip"):
+            try:
+                with zipfile.ZipFile(io.BytesIO(conteudo)) as z:
+                    for info in z.infolist():
+                        if info.is_dir():
+                            continue
+                        if info.filename.lower().endswith(".xml"):
+                            arquivos.append((info.filename, z.read(info)))
+            except Exception as e:
+                st.warning(f"Não foi possível ler o ZIP {nome}: {e}")
+        elif nome.lower().endswith(".xml"):
+            arquivos.append((nome, conteudo))
+    return arquivos
+
+
+def classificar_nota(cfops: List[str], natureza: str = "") -> str:
+    cfops_validos = {str(c).strip() for c in cfops if str(c).strip()}
+    natureza_norm = str(natureza or "").upper()
+
+    # Devolução tem precedência para ficar separada das compras e bonificações.
+    if any(c in CFOPS_DEVOLUCAO for c in cfops_validos) or "DEVOLU" in natureza_norm:
+        return "DEVOLUCOES"
+
+    if not cfops_validos:
+        return "COMPRAS"
+    tem_bonif = any(c in CFOPS_BONIFICACAO for c in cfops_validos)
+    todos_bonif = all(c in CFOPS_BONIFICACAO for c in cfops_validos)
+    if todos_bonif:
+        return "BONIFICACOES"
+    if tem_bonif:
+        return "MISTAS"
+    return "COMPRAS"
+
+
+@st.cache_data(show_spinner=False)
+def processar_uploads_cache(chaves: Tuple[Tuple[str, bytes], ...]):
+    notas = []
+    itens_frames = []
+    parcelas_frames = []
+    erros = []
+    for nome, conteudo in chaves:
+        nota, itens, parcelas, erro = ler_nfe_xml(conteudo, nome)
+        if erro:
+            erros.append(erro)
+        if nota:
+            categoria = classificar_nota(nota.get("CFOPS_LISTA", []), nota.get("NATUREZA_OPERACAO", ""))
+            nota["CLASSIFICACAO_AUTOMATICA"] = categoria
+            notas.append(nota)
+            if not itens.empty:
+                itens["CLASSIFICACAO_AUTOMATICA"] = categoria
+                itens_frames.append(itens)
+            if not parcelas.empty:
+                parcelas["CLASSIFICACAO_AUTOMATICA"] = categoria
+                parcelas_frames.append(parcelas)
+
+    df_notas = pd.DataFrame(notas)
+    df_itens = pd.concat(itens_frames, ignore_index=True) if itens_frames else pd.DataFrame()
+    df_parcelas = pd.concat(parcelas_frames, ignore_index=True) if parcelas_frames else pd.DataFrame()
+    return df_notas, df_itens, df_parcelas, erros
+
+
+def processar_uploads(uploaded_files):
+    arquivos = extrair_arquivos(uploaded_files)
+    # Streamlit cache exige objeto hashável/serializável. Bytes em tupla funciona.
+    return processar_uploads_cache(tuple(arquivos))
+
+
+# =========================================================
+# EXPORTAÇÃO
+# =========================================================
+
+def gerar_excel(df_resumo: pd.DataFrame, df_notas: pd.DataFrame, df_itens: pd.DataFrame, df_parcelas: pd.DataFrame) -> bytes:
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df_resumo.to_excel(writer, index=False, sheet_name="Resumo")
+        df_notas.to_excel(writer, index=False, sheet_name="Notas")
+        df_itens.to_excel(writer, index=False, sheet_name="Itens")
+        df_parcelas.to_excel(writer, index=False, sheet_name="Parcelas")
+    return output.getvalue()
+
+
+
+
+# =========================================================
+# CONTAS A PAGAR / CONCILIAÇÃO CSV x XML
+# =========================================================
+
+def normalizar_texto(valor: object) -> str:
+    s = str(valor or "").upper().strip()
+    s = re.sub(r"[^A-Z0-9]+", "", s)
+    return s
+
+
+def normalizar_numero_nf(valor: object) -> str:
+    s = re.sub(r"\D", "", str(valor or ""))
+    return s.lstrip("0") or ("0" if s else "")
+
+
+def extrair_nf_historico(historico: object) -> str:
+    texto = str(historico or "")
+    padroes = [
+        r"DOCUMENTO\s*(?:N[º°O\.]*|NO)?\s*0*([0-9]+)",
+        r"NOTA\s*(?:FISCAL|NF)?\s*(?:N[º°O\.]*|NO)?\s*0*([0-9]+)",
+        r"\bNF\s*0*([0-9]{2,})\b",
+    ]
+    for padrao in padroes:
+        m = re.search(padrao, texto, flags=re.IGNORECASE)
+        if m:
+            return normalizar_numero_nf(m.group(1))
+    return ""
+
+
+def parse_valor_brasileiro(valor: object) -> float:
+    if valor is None or (isinstance(valor, float) and pd.isna(valor)):
+        return 0.0
+    s = str(valor).strip().replace("R$", "").replace(" ", "")
+    if not s:
+        return 0.0
+    if "," in s:
+        s = s.replace(".", "").replace(",", ".")
+    try:
+        return float(s)
+    except Exception:
+        return 0.0
+
+
+def ler_csv_financeiro(upload) -> pd.DataFrame:
+    """
+    Lê relatórios CSV exportados pelo sistema financeiro, inclusive quando há
+    cabeçalho institucional antes da linha real de colunas.
+
+    O arquivo de referência possui:
+    - codificação ANSI/Latin-1;
+    - separador ponto e vírgula;
+    - várias linhas de relatório antes do cabeçalho;
+    - campos HISTÓRICO eventualmente quebrados em mais de uma linha.
+    """
+    conteudo = upload.getvalue()
+    ultimo_erro = None
+
+    for encoding in ("utf-8-sig", "latin-1", "cp1252"):
+        try:
+            texto = conteudo.decode(encoding)
+        except Exception as e:
+            ultimo_erro = e
+            continue
+
+        linhas = texto.splitlines()
+        indice_cabecalho = None
+
+        for i, linha in enumerate(linhas):
+            linha_norm = linha.upper().replace("HISTORICO", "HISTÓRICO")
+            if (
+                "FAVORECIDO" in linha_norm
+                and "DTA.VEN" in linha_norm
+                and "VAL.DUP" in linha_norm
+                and "HISTÓRICO" in linha_norm
+            ):
+                indice_cabecalho = i
+                break
+
+        if indice_cabecalho is None:
+            continue
+
+        trecho_csv = "\n".join(linhas[indice_cabecalho:])
+
+        try:
+            df = pd.read_csv(
+                io.StringIO(trecho_csv),
+                sep=";",
+                dtype=str,
+                engine="python",
+                quotechar='"',
+                on_bad_lines="skip",
+            )
+
+            df.columns = [
+                str(c).strip().upper().replace("HISTORICO", "HISTÓRICO")
+                for c in df.columns
+            ]
+
+            # Remove linhas residuais criadas por quebras de linha do HISTÓRICO,
+            # totais de relatório ou linhas completamente vazias.
+            if "FAVORECIDO" in df.columns:
+                df["FAVORECIDO"] = df["FAVORECIDO"].fillna("").astype(str).str.strip()
+                df = df[df["FAVORECIDO"] != ""].copy()
+
+            if "DTA.VEN" in df.columns:
+                datas_teste = pd.to_datetime(
+                    df["DTA.VEN"], dayfirst=True, errors="coerce"
+                )
+                df = df[datas_teste.notna()].copy()
+
+            if "DTA.VEN" in df.columns and "FAVORECIDO" in df.columns:
+                return df.reset_index(drop=True)
+
+        except Exception as e:
+            ultimo_erro = e
+
+    raise ValueError(
+        "Não foi possível interpretar o CSV financeiro. "
+        f"Verifique se ele contém as colunas FAVORECIDO, DTA.VEN, VAL.DUP e HISTÓRICO. "
+        f"Detalhe técnico: {ultimo_erro}"
+    )
+
+
+def preparar_contas_csv(df_csv: pd.DataFrame, hoje: pd.Timestamp) -> pd.DataFrame:
+    df = df_csv.copy()
+    for col in ["VAL.DUP", "VAL.PAG", "VAL.JUR", "VAL.DES"]:
+        if col not in df.columns:
+            df[col] = "0"
+        df[col] = df[col].apply(parse_valor_brasileiro)
+    if "DTA.PAG" not in df.columns:
+        df["DTA.PAG"] = ""
+    if "HISTÓRICO" not in df.columns:
+        df["HISTÓRICO"] = ""
+    if "DUPLICATA" not in df.columns:
+        df["DUPLICATA"] = ""
+
+    df["DT_VENCIMENTO"] = pd.to_datetime(df["DTA.VEN"], dayfirst=True, errors="coerce")
+    df["DT_PAGAMENTO"] = pd.to_datetime(df["DTA.PAG"], dayfirst=True, errors="coerce")
+    df["NR_DOCUMENTO_XML"] = df["HISTÓRICO"].apply(extrair_nf_historico)
+    df["FORNECEDOR"] = df["FAVORECIDO"].fillna("").astype(str).str.strip()
+    df["FORNECEDOR_CHAVE"] = df["FORNECEDOR"].apply(normalizar_texto)
+    df["VALOR_A_PAGAR"] = (
+        df["VAL.DUP"] + df["VAL.JUR"] - df["VAL.DES"] - df["VAL.PAG"]
+    ).clip(lower=0)
+
+    # Regra solicitada: vencimentos anteriores a hoje são tratados como pagos.
+    # Também eliminamos títulos que já possuem data de pagamento ou saldo zerado.
+    df = df[
+        df["DT_VENCIMENTO"].notna()
+        & (df["DT_VENCIMENTO"].dt.normalize() >= hoje.normalize())
+        & df["DT_PAGAMENTO"].isna()
+        & (df["VALOR_A_PAGAR"] > 0.005)
+    ].copy()
+
+    df["ORIGEM"] = "CSV"
+    df["NR_PARCELA"] = df["DUPLICATA"].fillna("")
+    return df[[
+        "FORNECEDOR", "FORNECEDOR_CHAVE", "NR_DOCUMENTO_XML", "NR_PARCELA",
+        "DT_VENCIMENTO", "VALOR_A_PAGAR", "ORIGEM", "HISTÓRICO"
+    ]]
+
+
+def preparar_parcelas_xml(df_parcelas: pd.DataFrame, hoje: pd.Timestamp) -> pd.DataFrame:
+    if df_parcelas.empty:
+        return pd.DataFrame(columns=[
+            "FORNECEDOR", "FORNECEDOR_CHAVE", "NR_DOCUMENTO_XML", "NR_PARCELA",
+            "DT_VENCIMENTO", "VALOR_A_PAGAR", "ORIGEM", "HISTÓRICO"
+        ])
+    df = df_parcelas.copy()
+    df["DT_VENCIMENTO"] = pd.to_datetime(df["DT_VENCIMENTO"], dayfirst=True, errors="coerce")
+    df["VALOR_A_PAGAR"] = pd.to_numeric(df["VL_PARCELA"], errors="coerce").fillna(0.0)
+    df["FORNECEDOR"] = df["NM_EMITENTE"].fillna("").astype(str).str.strip()
+    df["FORNECEDOR_CHAVE"] = df["FORNECEDOR"].apply(normalizar_texto)
+    df["NR_DOCUMENTO_XML"] = df["NR_DOCUMENTO"].apply(normalizar_numero_nf)
+    df["ORIGEM"] = "XML - NOTA AUSENTE NO CSV"
+    df["HISTÓRICO"] = "Parcela extraída da NF-e"
+    return df[
+        df["DT_VENCIMENTO"].notna()
+        & (df["DT_VENCIMENTO"].dt.normalize() >= hoje.normalize())
+        & (df["VALOR_A_PAGAR"] > 0.005)
+    ][[
+        "FORNECEDOR", "FORNECEDOR_CHAVE", "NR_DOCUMENTO_XML", "NR_PARCELA",
+        "DT_VENCIMENTO", "VALOR_A_PAGAR", "ORIGEM", "HISTÓRICO"
+    ]].copy()
+
+
+def conciliar_csv_xml(df_csv_aberto: pd.DataFrame, df_xml_aberto: pd.DataFrame) -> pd.DataFrame:
+    if df_csv_aberto.empty:
+        return df_xml_aberto.copy()
+    if df_xml_aberto.empty:
+        return df_csv_aberto.copy()
+
+    # O histórico do CSV é a fonte indicada pelo usuário para identificar a NF.
+    # Compara número da NF e fornecedor normalizado para evitar colisões entre fornecedores.
+    pares_csv = set(
+        zip(df_csv_aberto["FORNECEDOR_CHAVE"], df_csv_aberto["NR_DOCUMENTO_XML"])
+    )
+    numeros_csv = set(df_csv_aberto.loc[df_csv_aberto["NR_DOCUMENTO_XML"] != "", "NR_DOCUMENTO_XML"])
+
+    def ja_existe(row) -> bool:
+        numero = row["NR_DOCUMENTO_XML"]
+        fornecedor = row["FORNECEDOR_CHAVE"]
+        if not numero:
+            return False
+        return (fornecedor, numero) in pares_csv or numero in numeros_csv
+
+    faltantes = df_xml_aberto[~df_xml_aberto.apply(ja_existe, axis=1)].copy()
+    return pd.concat([df_csv_aberto, faltantes], ignore_index=True)
+
+
+def adicionar_periodos(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    data = pd.to_datetime(out["DT_VENCIMENTO"], errors="coerce")
+    out["INICIO_SEMANA"] = data - pd.to_timedelta(data.dt.weekday, unit="D")
+    out["FIM_SEMANA"] = out["INICIO_SEMANA"] + pd.Timedelta(days=6)
+    out["SEMANA"] = out.apply(
+        lambda r: f"{r['INICIO_SEMANA']:%d/%m/%Y} a {r['FIM_SEMANA']:%d/%m/%Y}", axis=1
+    )
+    out["MES_REF"] = data.dt.to_period("M").dt.to_timestamp()
+    out["MÊS"] = out["MES_REF"].dt.strftime("%m/%Y")
+    return out
+
+
+def gerar_excel_contas(df_dia, df_semana, df_mes, df_fornecedor_semana, df_fornecedor_mes) -> bytes:
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df_dia.to_excel(writer, index=False, sheet_name="Contas por dia")
+        df_semana.to_excel(writer, index=False, sheet_name="Consolidado semanal")
+        df_mes.to_excel(writer, index=False, sheet_name="Consolidado mensal")
+        df_fornecedor_semana.to_excel(writer, index=False, sheet_name="Fornecedor semana")
+        df_fornecedor_mes.to_excel(writer, index=False, sheet_name="Fornecedor mês")
+    return output.getvalue()
+
+# =========================================================
+
+# =========================================================
+# PREVISÃO FINANCEIRA - FUNÇÕES COMPLEMENTARES
+# =========================================================
+
+CATEGORIAS_FINAIS = ["COMPRAS", "BONIFICAÇÕES", "DEVOLUÇÕES", "OUTRAS SITUAÇÕES"]
+
+
+def categoria_padrao(row: pd.Series) -> str:
+    auto = str(row.get("CLASSIFICACAO_AUTOMATICA", "COMPRAS"))
+    if auto == "BONIFICACOES":
+        return "BONIFICAÇÕES"
+    if auto == "DEVOLUCOES":
+        return "DEVOLUÇÕES"
+    if auto == "MISTAS":
+        return "OUTRAS SITUAÇÕES"
+    return "COMPRAS"
+
+
+def aplicar_classificacao_manual(df_notas: pd.DataFrame) -> pd.DataFrame:
+    out = df_notas.copy()
+    mapa = st.session_state.get("mapa_classificacao_xml", {})
+    out["CATEGORIA_PADRAO"] = out.apply(categoria_padrao, axis=1)
+    out["CATEGORIA_FINAL"] = out.apply(
+        lambda r: mapa.get(str(r.get("NR_CHAVE_ACESSO", "")), r["CATEGORIA_PADRAO"]),
+        axis=1,
+    )
+    return out
+
+
+def preparar_parcelas_xml_classificadas(
+    df_parcelas: pd.DataFrame,
+    df_notas_classificadas: pd.DataFrame,
+    hoje: pd.Timestamp,
+) -> pd.DataFrame:
+    colunas = [
+        "FORNECEDOR", "FORNECEDOR_CHAVE", "NR_DOCUMENTO_XML", "NR_PARCELA",
+        "DT_VENCIMENTO", "VALOR_A_PAGAR", "ORIGEM", "HISTÓRICO", "NR_CHAVE_ACESSO",
+    ]
+    if df_parcelas.empty or df_notas_classificadas.empty:
+        return pd.DataFrame(columns=colunas)
+
+    compras = df_notas_classificadas[
+        df_notas_classificadas["CATEGORIA_FINAL"] == "COMPRAS"
+    ][["NR_CHAVE_ACESSO", "NR_DOCUMENTO", "NM_EMITENTE", "CATEGORIA_FINAL"]].copy()
+
+    if compras.empty:
+        return pd.DataFrame(columns=colunas)
+
+    df = df_parcelas.merge(
+        compras[["NR_CHAVE_ACESSO", "CATEGORIA_FINAL"]],
+        on="NR_CHAVE_ACESSO",
+        how="inner",
+    )
+    df["DT_VENCIMENTO"] = pd.to_datetime(df["DT_VENCIMENTO"], dayfirst=True, errors="coerce")
+    df["VALOR_A_PAGAR"] = pd.to_numeric(df["VL_PARCELA"], errors="coerce").fillna(0.0)
+    df["FORNECEDOR"] = df["NM_EMITENTE"].fillna("").astype(str).str.strip()
+    df["FORNECEDOR_CHAVE"] = df["FORNECEDOR"].apply(normalizar_texto)
+    df["NR_DOCUMENTO_XML"] = df["NR_DOCUMENTO"].apply(normalizar_numero_nf)
+    df["ORIGEM"] = "XML - NF AINDA NÃO LANÇADA NO AUTCOM"
+    df["HISTÓRICO"] = "Parcela extraída da NF-e ainda não encontrada no CSV"
+
+    df = df[
+        df["DT_VENCIMENTO"].notna()
+        & (df["DT_VENCIMENTO"].dt.normalize() >= hoje.normalize())
+        & (df["VALOR_A_PAGAR"] > 0.005)
+    ].copy()
+    return df[colunas]
+
+
+def conciliar_previsao(df_csv_aberto: pd.DataFrame, df_xml_aberto: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Une CSV + parcelas XML que ainda não aparecem no histórico do CSV."""
+    if df_xml_aberto.empty:
+        return df_csv_aberto.copy(), df_xml_aberto.copy()
+
+    numeros_csv = set(
+        df_csv_aberto.loc[df_csv_aberto["NR_DOCUMENTO_XML"] != "", "NR_DOCUMENTO_XML"].astype(str)
+    ) if not df_csv_aberto.empty else set()
+
+    pares_csv = set(
+        zip(
+            df_csv_aberto["FORNECEDOR_CHAVE"].astype(str),
+            df_csv_aberto["NR_DOCUMENTO_XML"].astype(str),
+        )
+    ) if not df_csv_aberto.empty else set()
+
+    def existe_no_csv(row: pd.Series) -> bool:
+        nf = str(row.get("NR_DOCUMENTO_XML", ""))
+        forn = str(row.get("FORNECEDOR_CHAVE", ""))
+        if not nf:
+            return False
+        # Primeiro tenta fornecedor + NF; depois NF global, conforme o histórico do relatório.
+        return (forn, nf) in pares_csv or nf in numeros_csv
+
+    xml_faltantes = df_xml_aberto[~df_xml_aberto.apply(existe_no_csv, axis=1)].copy()
+    combinado = pd.concat([df_csv_aberto, xml_faltantes], ignore_index=True, sort=False)
+    return combinado, xml_faltantes
+
+
+def preparar_periodos_previsao(df: pd.DataFrame) -> pd.DataFrame:
+    out = adicionar_periodos(df)
+    out["DATA"] = pd.to_datetime(out["DT_VENCIMENTO"]).dt.strftime("%d/%m/%Y")
+    out["DIA_SEMANA"] = pd.to_datetime(out["DT_VENCIMENTO"]).dt.day_name(locale=None)
+    return out
+
+
+def tabela_periodo(df: pd.DataFrame, modo: str) -> pd.DataFrame:
+    if modo == "Dia":
+        agrup = (
+            df.groupby(["DT_VENCIMENTO", "DATA"], as_index=False)
+            .agg(QTD_TITULOS=("VALOR_A_PAGAR", "size"), VALOR_A_PAGAR=("VALOR_A_PAGAR", "sum"))
+            .sort_values("DT_VENCIMENTO")
+        )
+        return agrup[["DATA", "QTD_TITULOS", "VALOR_A_PAGAR"]]
+    if modo == "Semana":
+        agrup = (
+            df.groupby(["INICIO_SEMANA", "SEMANA"], as_index=False)
+            .agg(QTD_TITULOS=("VALOR_A_PAGAR", "size"), VALOR_A_PAGAR=("VALOR_A_PAGAR", "sum"))
+            .sort_values("INICIO_SEMANA")
+        )
+        return agrup[["SEMANA", "QTD_TITULOS", "VALOR_A_PAGAR"]]
+    agrup = (
+        df.groupby(["MES_REF", "MÊS"], as_index=False)
+        .agg(QTD_TITULOS=("VALOR_A_PAGAR", "size"), VALOR_A_PAGAR=("VALOR_A_PAGAR", "sum"))
+        .sort_values("MES_REF")
+    )
+    return agrup[["MÊS", "QTD_TITULOS", "VALOR_A_PAGAR"]]
+
+
+def filtrar_periodo(df: pd.DataFrame, modo: str, periodo: str) -> pd.DataFrame:
+    coluna = {"Dia": "DATA", "Semana": "SEMANA", "Mês": "MÊS"}[modo]
+    return df[df[coluna] == periodo].copy()
+
+
+def gerar_excel_previsao(df_base: pd.DataFrame, df_xml_faltantes: pd.DataFrame) -> bytes:
+    output = io.BytesIO()
+    diario = tabela_periodo(df_base, "Dia")
+    semanal = tabela_periodo(df_base, "Semana")
+    mensal = tabela_periodo(df_base, "Mês")
+    por_fornecedor = (
+        df_base.groupby("FORNECEDOR", as_index=False)
+        .agg(QTD_TITULOS=("VALOR_A_PAGAR", "size"), VALOR_A_PAGAR=("VALOR_A_PAGAR", "sum"))
+        .sort_values("VALOR_A_PAGAR", ascending=False)
+    )
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df_base.to_excel(writer, index=False, sheet_name="Previsão completa")
+        diario.to_excel(writer, index=False, sheet_name="Por dia")
+        semanal.to_excel(writer, index=False, sheet_name="Por semana")
+        mensal.to_excel(writer, index=False, sheet_name="Por mês")
+        por_fornecedor.to_excel(writer, index=False, sheet_name="Por fornecedor")
+        df_xml_faltantes.to_excel(writer, index=False, sheet_name="XML não lançado")
+    return output.getvalue()
+
+
+
+
+def render_pagina_previsao_financeira():
+    st.markdown("""
+    <style>
+    [data-testid="stMetric"] {background: #ffffff; border: 1px solid #e5e7eb; padding: 14px; border-radius: 12px;}
+    </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown('<div class="section-title">Previsão Financeira de Fornecedores</div>', unsafe_allow_html=True)
+    st.caption("Consolidação do CSV do Autcom com parcelas de NF-e ainda não lançadas no sistema.")
+
+    pagina = st.radio(
+        "Etapa da previsão",
+        ["Classificação dos XMLs", "Previsão de pagamentos", "Conciliação CSV x XML"],
+        horizontal=True,
+        key="pagina_interna_previsao_financeira",
+    )
+    with st.expander("CFOPs de bonificação e remessa de marketing considerados"):
+        st.code(", ".join(sorted(CFOPS_BONIFICACAO)))
+
+    st.title("Previsão de fornecedores a pagar")
+    st.caption("CSV do Autcom + parcelas de NF-e ainda não lançadas no sistema.")
+
+    st.markdown(
+        """
+        <div style="background:#f8fafc;border:1px solid #dbe3ec;border-left:5px solid #2563eb;
+                    border-radius:12px;padding:18px 20px;margin:12px 0 20px 0;">
+            <div style="font-size:18px;font-weight:700;color:#0f172a;margin-bottom:10px;">
+                Como preparar os arquivos para análise
+            </div>
+            <div style="color:#334155;line-height:1.65;font-size:15px;">
+                <b>1.</b> No <b>Painel da Citel</b>, acesse <b>Operações</b> e gere os XMLs de entrada de fornecedores do período desejado.<br>
+                <b>2.</b> No <b>Jabu, dentro do Autcom</b>, gere o CSV de fornecedores a pagar com os vencimentos do mesmo período.<br>
+                <b>3.</b> Faça o upload dos dois arquivos nos campos abaixo e aguarde o processamento da análise.
+            </div>
+            <div style="margin-top:10px;color:#64748b;font-size:13px;">
+                Para uma conciliação correta, use o mesmo período na geração do XML e do CSV.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    col_up1, col_up2 = st.columns(2)
+    with col_up1:
+        uploads_xml = st.file_uploader(
+            "XMLs ou ZIPs de NF-e",
+            type=["xml", "zip"],
+            accept_multiple_files=True,
+            key="uploads_xml_previsao",
+        )
+    with col_up2:
+        upload_csv = st.file_uploader(
+            "CSV de contas a pagar do Autcom",
+            type=["csv", "txt"],
+            key="upload_csv_previsao",
+        )
+
+    # Leitura dos XMLs é opcional; o CSV sozinho já gera previsão.
+    if uploads_xml:
+        with st.spinner("Lendo XMLs..."):
+            df_notas_raw, df_itens_raw, df_parcelas_raw, erros_xml = processar_uploads(uploads_xml)
+        if not df_notas_raw.empty:
+            df_notas_raw = df_notas_raw.copy()
+            df_notas_raw["CLASSIFICACAO_AUTOMATICA"] = df_notas_raw.apply(
+                lambda r: classificar_nota(r.get("CFOPS_LISTA", []), r.get("NATUREZA_OPERACAO", "")), axis=1
+            )
+            df_notas_classificadas = aplicar_classificacao_manual(df_notas_raw)
+        else:
+            df_notas_classificadas = pd.DataFrame()
+            df_parcelas_raw = pd.DataFrame()
+    else:
+        df_notas_raw = pd.DataFrame()
+        df_notas_classificadas = pd.DataFrame()
+        df_itens_raw = pd.DataFrame()
+        df_parcelas_raw = pd.DataFrame()
+        erros_xml = []
+
+    hoje = pd.Timestamp.today().normalize()
+
+    if pagina == "Classificação dos XMLs":
+        st.subheader("Classificação das NF-e importadas")
+        st.caption(
+            "Bonificações/remessas de marketing e devoluções são desconsideradas da previsão. "
+            "Você pode alterar manualmente qualquer nota para Compras, Bonificações, Devoluções ou Outras Situações."
+        )
+
+        if df_notas_classificadas.empty:
+            st.info("Envie XMLs ou um ZIP para classificar as notas.")
+            st.stop()
+
+        cards = st.columns(4)
+        for col, categoria in zip(cards, CATEGORIAS_FINAIS):
+            base_cat = df_notas_classificadas[df_notas_classificadas["CATEGORIA_FINAL"] == categoria]
+            col.metric(categoria, formatar_moeda(base_cat["VL_NOTA_FISCAL"].sum()), f"{len(base_cat)} notas")
+
+        tabela_edicao = df_notas_classificadas[[
+            "NR_CHAVE_ACESSO", "NM_EMITENTE", "NR_DOCUMENTO", "DT_EMISSAO",
+            "CFOPS", "NATUREZA_OPERACAO", "VL_NOTA_FISCAL",
+            "CATEGORIA_PADRAO", "CATEGORIA_FINAL",
+        ]].copy()
+        tabela_edicao = tabela_edicao.sort_values(["CATEGORIA_FINAL", "NM_EMITENTE", "NR_DOCUMENTO"])
+
+        editado = st.data_editor(
+            tabela_edicao,
+            use_container_width=True,
+            hide_index=True,
+            disabled=[
+                "NR_CHAVE_ACESSO", "NM_EMITENTE", "NR_DOCUMENTO", "DT_EMISSAO",
+                "CFOPS", "NATUREZA_OPERACAO", "VL_NOTA_FISCAL", "CATEGORIA_PADRAO",
+            ],
+            column_config={
+                "CATEGORIA_FINAL": st.column_config.SelectboxColumn(
+                    "Categoria final",
+                    options=CATEGORIAS_FINAIS,
+                    required=True,
+                ),
+                "VL_NOTA_FISCAL": st.column_config.NumberColumn("Valor da NF", format="R$ %.2f"),
+            },
+            key="editor_classificacao_xml",
+        )
+
+        if st.button("Salvar classificação dos XMLs", type="primary"):
+            st.session_state["mapa_classificacao_xml"] = dict(
+                zip(editado["NR_CHAVE_ACESSO"].astype(str), editado["CATEGORIA_FINAL"].astype(str))
+            )
+            st.success("Classificação salva. A previsão financeira já usará essas decisões.")
+            st.rerun()
+
+        mistas = df_notas_classificadas[
+            df_notas_classificadas["CLASSIFICACAO_AUTOMATICA"] == "MISTAS"
+        ]
+        if not mistas.empty:
+            st.warning(
+                f"Existem {len(mistas)} notas mistas. Elas ficam em Outras Situações por padrão até você decidir a categoria final."
+            )
+
+        if erros_xml:
+            with st.expander("Arquivos XML ignorados ou com erro"):
+                for erro in erros_xml:
+                    st.write(erro)
+
+    else:
+        if upload_csv is None:
+            st.info("Envie o CSV de contas a pagar para montar a previsão financeira.")
+            st.stop()
+
+        try:
+            df_csv_original = ler_csv_financeiro(upload_csv)
+            df_csv_aberto = preparar_contas_csv(df_csv_original, hoje)
+        except Exception as exc:
+            st.error(str(exc))
+            st.stop()
+
+        # Reaplica decisões salvas antes de formar a previsão.
+        if not df_notas_raw.empty:
+            df_notas_classificadas = aplicar_classificacao_manual(df_notas_raw)
+        df_xml_aberto = preparar_parcelas_xml_classificadas(df_parcelas_raw, df_notas_classificadas, hoje)
+        df_previsao, df_xml_faltantes = conciliar_previsao(df_csv_aberto, df_xml_aberto)
+        df_previsao = preparar_periodos_previsao(df_previsao)
+
+        if df_previsao.empty:
+            st.warning("Não há títulos futuros a pagar nos arquivos enviados.")
+            st.stop()
+
+        if pagina == "Previsão de pagamentos":
+            st.subheader("Previsão consolidada")
+            st.info(
+                f"Data de referência: {hoje.strftime('%d/%m/%Y')}. Vencimentos anteriores são tratados como pagos e não aparecem."
+            )
+
+            fornecedores = sorted(df_previsao["FORNECEDOR"].dropna().unique())
+            filtro_fornecedores = st.multiselect(
+                "Fornecedores",
+                options=fornecedores,
+                default=fornecedores,
+            )
+            origem_opcoes = sorted(df_previsao["ORIGEM"].dropna().unique())
+            filtro_origem = st.multiselect("Origem", options=origem_opcoes, default=origem_opcoes)
+            df_view = df_previsao[
+                df_previsao["FORNECEDOR"].isin(filtro_fornecedores)
+                & df_previsao["ORIGEM"].isin(filtro_origem)
+            ].copy()
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Total previsto", formatar_moeda(df_view["VALOR_A_PAGAR"].sum()))
+            c2.metric("Fornecedores", df_view["FORNECEDOR"].nunique())
+            c3.metric("Títulos/parcelas", len(df_view))
+            c4.metric("Incluídos pelo XML", len(df_view[df_view["ORIGEM"].str.startswith("XML", na=False)]))
+
+            st.markdown("### Visão do fluxo")
+            modo = st.radio("Agrupar por", ["Dia", "Semana", "Mês"], horizontal=True)
+            resumo_periodo = tabela_periodo(df_view, modo)
+            st.dataframe(
+                formatar_df_moeda(resumo_periodo, ["VALOR_A_PAGAR"]),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            coluna_periodo = {"Dia": "DATA", "Semana": "SEMANA", "Mês": "MÊS"}[modo]
+            periodos = resumo_periodo[coluna_periodo].astype(str).tolist()
+            periodo_escolhido = st.selectbox(f"Clique/escolha o {modo.lower()} para abrir o drill", periodos)
+            drill_periodo = filtrar_periodo(df_view, modo, periodo_escolhido)
+
+            st.markdown(f"### Drill do período: {periodo_escolhido}")
+            resumo_fornecedor = (
+                drill_periodo.groupby("FORNECEDOR", as_index=False)
+                .agg(QTD_TITULOS=("VALOR_A_PAGAR", "size"), VALOR_A_PAGAR=("VALOR_A_PAGAR", "sum"))
+                .sort_values("VALOR_A_PAGAR", ascending=False)
+            )
+            d1, d2, d3 = st.columns(3)
+            d1.metric("Valor do período", formatar_moeda(drill_periodo["VALOR_A_PAGAR"].sum()))
+            d2.metric("Fornecedores", drill_periodo["FORNECEDOR"].nunique())
+            d3.metric("Títulos", len(drill_periodo))
+
+            col_tab, col_graf = st.columns([1.2, 1])
+            with col_tab:
+                st.dataframe(
+                    formatar_df_moeda(resumo_fornecedor, ["VALOR_A_PAGAR"]),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            with col_graf:
+                st.bar_chart(resumo_fornecedor.set_index("FORNECEDOR")[["VALOR_A_PAGAR"]])
+
+            fornecedor_drill = st.selectbox(
+                "Fornecedor para ver os títulos do período",
+                resumo_fornecedor["FORNECEDOR"].tolist(),
+            )
+            titulos = drill_periodo[drill_periodo["FORNECEDOR"] == fornecedor_drill].copy()
+            titulos = titulos.sort_values("DT_VENCIMENTO")
+            titulos_exib = titulos[[
+                "DATA", "NR_DOCUMENTO_XML", "NR_PARCELA", "VALOR_A_PAGAR", "ORIGEM", "HISTÓRICO"
+            ]].copy()
+            st.metric("Total do fornecedor no período", formatar_moeda(titulos["VALOR_A_PAGAR"].sum()))
+            st.dataframe(formatar_df_moeda(titulos_exib, ["VALOR_A_PAGAR"]), use_container_width=True, hide_index=True)
+
+            st.markdown("### Ranking geral por fornecedor")
+            geral_fornecedor = (
+                df_view.groupby("FORNECEDOR", as_index=False)
+                .agg(QTD_TITULOS=("VALOR_A_PAGAR", "size"), VALOR_A_PAGAR=("VALOR_A_PAGAR", "sum"))
+                .sort_values("VALOR_A_PAGAR", ascending=False)
+            )
+            st.dataframe(formatar_df_moeda(geral_fornecedor, ["VALOR_A_PAGAR"]), use_container_width=True, hide_index=True)
+
+            excel = gerar_excel_previsao(df_view, df_xml_faltantes)
+            st.download_button(
+                "Baixar previsão financeira em Excel",
+                data=excel,
+                file_name="previsao_fornecedores_a_pagar.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+        else:
+            st.subheader("Conciliação CSV x XML")
+            st.caption(
+                "O CSV é a base do Autcom. Uma NF do XML só é acrescentada quando seu número não aparece na coluna HISTÓRICO do CSV."
+            )
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Títulos futuros do CSV", len(df_csv_aberto))
+            c2.metric("Parcelas XML elegíveis", len(df_xml_aberto))
+            c3.metric("Parcelas XML acrescentadas", len(df_xml_faltantes))
+
+            st.markdown("### Notas/parcelas acrescentadas pelo XML")
+            if df_xml_faltantes.empty:
+                st.success("Nenhuma parcela XML precisou ser acrescentada: todas as NFs elegíveis já aparecem no CSV.")
+            else:
+                xml_exib = df_xml_faltantes.copy()
+                xml_exib["DT_VENCIMENTO"] = pd.to_datetime(xml_exib["DT_VENCIMENTO"]).dt.strftime("%d/%m/%Y")
+                st.dataframe(formatar_df_moeda(xml_exib, ["VALOR_A_PAGAR"]), use_container_width=True, hide_index=True)
+
+            st.markdown("### Títulos considerados a partir do CSV")
+            csv_exib = df_csv_aberto.copy()
+            csv_exib["DT_VENCIMENTO"] = pd.to_datetime(csv_exib["DT_VENCIMENTO"]).dt.strftime("%d/%m/%Y")
+            st.dataframe(formatar_df_moeda(csv_exib, ["VALOR_A_PAGAR"]), use_container_width=True, hide_index=True)
+
+            st.markdown("### XMLs desconsiderados da previsão")
+            if df_notas_classificadas.empty:
+                st.info("Nenhum XML enviado.")
+            else:
+                fora = df_notas_classificadas[df_notas_classificadas["CATEGORIA_FINAL"] != "COMPRAS"].copy()
+                st.dataframe(
+                    formatar_df_moeda(
+                        fora[["NM_EMITENTE", "NR_DOCUMENTO", "CFOPS", "NATUREZA_OPERACAO", "VL_NOTA_FISCAL", "CATEGORIA_FINAL"]],
+                        ["VL_NOTA_FISCAL"],
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+
 # =========================================================
 # APP STREAMLIT
 # =========================================================
@@ -6719,7 +7799,7 @@ st.sidebar.markdown(
 )
 pagina = st.sidebar.radio(
     "Navegação",
-    ["Giro Consolidado", "Pedido de Compra", "Exportações", "Ruptura por Marca", "Comparativo de Pedidos", "Tratamento Final"],
+    ["Giro Consolidado", "Pedido de Compra", "Exportações", "Ruptura por Marca", "Comparativo de Pedidos", "Previsão Financeira", "Tratamento Final"],
     label_visibility="collapsed",
 )
 
@@ -6738,6 +7818,10 @@ st.sidebar.markdown(
     '<div class="param-note">Alerta sem compra fixo em <strong>03 meses</strong>.<br>Estoque Final = Estoque Atual Geral + Saldo em Trânsito/ABERTO.</div></div>',
     unsafe_allow_html=True,
 )
+
+if pagina == "Previsão Financeira":
+    render_pagina_previsao_financeira()
+    st.stop()
 
 if pagina == "Ruptura por Marca":
     render_pagina_ruptura_por_marca()
