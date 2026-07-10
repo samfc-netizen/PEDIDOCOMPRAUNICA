@@ -1,9 +1,10 @@
-import re
+﻿import re
 import math
 import difflib
 import csv
 import json
 import base64
+import hashlib
 import unicodedata
 import urllib.request
 import urllib.error
@@ -16,7 +17,7 @@ from datetime import datetime, date
 import pdfplumber
 
 try:
-    import fitz  # PyMuPDF - leitura de PDF muito mais rápida quando instalado
+    import fitz  # PyMuPDF - leitura de PDF muito mais rÃ¡pida quando instalado
 except Exception:
     fitz = None
 
@@ -49,23 +50,23 @@ except Exception:
     build = None
     MediaIoBaseUpload = None
 
-st.set_page_config(page_title="Análise de Giro e Pedido de Compra", layout="wide", page_icon="📊")
+st.set_page_config(page_title="AnÃ¡lise de Giro e Pedido de Compra", layout="wide", page_icon="ðŸ“Š")
 
 # =========================================================
-# CONFIGURAÇÕES DO NEGÓCIO
+# CONFIGURAÃ‡Ã•ES DO NEGÃ“CIO
 # =========================================================
 
 LOJAS_MAP = {
     "004": "ADE",
     "006": "GAMA",
-    "009": "ÚNICA",
+    "009": "ÃšNICA",
     "012": "SOFNORTE",
-    "013": "CEILÂNDIA",
+    "013": "CEILÃ‚NDIA",
     "014": "SIA",
-    "015": "UNAÍ",
+    "015": "UNAÃ",
     "016": "AG LINDAS",
-    "022": "GUARÁ",
-    "024": "LUZIÂNIA",
+    "022": "GUARÃ",
+    "024": "LUZIÃ‚NIA",
 }
 
 CODIGOS_LOJAS = ["004", "006", "012", "013", "014", "015", "016", "022", "024"]
@@ -99,7 +100,7 @@ GOOGLE_ACOMPANHAMENTO_COLUNAS = [
 ]
 
 # =========================================================
-# FUNÇÕES AUXILIARES
+# FUNÃ‡Ã•ES AUXILIARES
 # =========================================================
 
 def br_to_float(value):
@@ -118,13 +119,13 @@ def br_to_float(value):
 
 def numero_planilha_para_float(value):
     """
-    Converte números vindos de Excel/Google Sheets sem perder milhares.
+    Converte nÃºmeros vindos de Excel/Google Sheets sem perder milhares.
 
-    Correções principais:
-    - 1,000  -> 1000   quando a vírgula vier como separador de milhar do Sheets
+    CorreÃ§Ãµes principais:
+    - 1,000  -> 1000   quando a vÃ­rgula vier como separador de milhar do Sheets
     - 12,000 -> 12000
     - 1.000  -> 1000   quando o ponto vier como separador de milhar
-    - 28,12  -> 28.12  quando a vírgula vier como decimal brasileiro
+    - 28,12  -> 28.12  quando a vÃ­rgula vier como decimal brasileiro
     - 28.12  -> 28.12  quando o ponto vier como decimal
     - 1.234,56 -> 1234.56
     - 1,234.56 -> 1234.56
@@ -144,12 +145,12 @@ def numero_planilha_para_float(value):
     if txt == "" or txt.lower() in ["nan", "none", "-"]:
         return 0.0
 
-    txt = txt.replace("R$", "").replace(" ", "").replace(" ", "")
+    txt = txt.replace("R$", "").replace(" ", "").replace("Â ", "")
 
-    # Remove sinais/artefatos comuns sem afetar números válidos.
+    # Remove sinais/artefatos comuns sem afetar nÃºmeros vÃ¡lidos.
     txt = txt.replace("+", "")
 
-    # Quando tem vírgula e ponto, o último separador define o decimal.
+    # Quando tem vÃ­rgula e ponto, o Ãºltimo separador define o decimal.
     # BR: 1.234,56 | US/Sheets: 1,234.56
     if "," in txt and "." in txt:
         if txt.rfind(",") > txt.rfind("."):
@@ -158,8 +159,8 @@ def numero_planilha_para_float(value):
             txt = txt.replace(",", "")
 
     elif "," in txt:
-        # Google Sheets/CSV em padrão americano: 1,000 / 12,000 / 123,456
-        # Aqui a vírgula é milhar, não decimal.
+        # Google Sheets/CSV em padrÃ£o americano: 1,000 / 12,000 / 123,456
+        # Aqui a vÃ­rgula Ã© milhar, nÃ£o decimal.
         if re.fullmatch(r"-?\d{1,3}(?:,\d{3})+", txt):
             txt = txt.replace(",", "")
         else:
@@ -171,7 +172,7 @@ def numero_planilha_para_float(value):
         if re.fullmatch(r"-?\d{1,3}(?:\.\d{3})+", txt):
             txt = txt.replace(".", "")
         else:
-            # Mantém ponto como decimal: 28.12 / 25.940000000000001
+            # MantÃ©m ponto como decimal: 28.12 / 25.940000000000001
             pass
 
     try:
@@ -255,7 +256,7 @@ PDF_MAX_PAGINAS_PADRAO = 1000
 
 
 def _pdf_bytes(uploaded_file):
-    """Transforma UploadedFile/bytes em bytes e reposiciona o arquivo quando possível."""
+    """Transforma UploadedFile/bytes em bytes e reposiciona o arquivo quando possÃ­vel."""
     if uploaded_file is None:
         return b""
     if isinstance(uploaded_file, (bytes, bytearray)):
@@ -274,8 +275,8 @@ def _pdf_bytes(uploaded_file):
 def extract_text_from_pdf_cached(pdf_bytes, max_pages=PDF_MAX_PAGINAS_PADRAO):
     """
     Extrai texto de PDF com cache para evitar que o Streamlit releia o mesmo arquivo
-    a cada interação. Prioriza PyMuPDF quando disponível, que costuma ser muito mais
-    rápido que pdfplumber para PDFs grandes.
+    a cada interaÃ§Ã£o. Prioriza PyMuPDF quando disponÃ­vel, que costuma ser muito mais
+    rÃ¡pido que pdfplumber para PDFs grandes.
     """
     pdf_bytes = bytes(pdf_bytes or b"")
     if not pdf_bytes:
@@ -283,7 +284,7 @@ def extract_text_from_pdf_cached(pdf_bytes, max_pages=PDF_MAX_PAGINAS_PADRAO):
 
     textos = []
 
-    # Caminho rápido: PyMuPDF. Se não estiver instalado, cai para pdfplumber.
+    # Caminho rÃ¡pido: PyMuPDF. Se nÃ£o estiver instalado, cai para pdfplumber.
     if fitz is not None:
         try:
             with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
@@ -296,7 +297,7 @@ def extract_text_from_pdf_cached(pdf_bytes, max_pages=PDF_MAX_PAGINAS_PADRAO):
         except Exception:
             textos = []
 
-    # Fallback: pdfplumber, página a página.
+    # Fallback: pdfplumber, pÃ¡gina a pÃ¡gina.
     with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
         total = min(len(pdf.pages), int(max_pages or len(pdf.pages)))
         for i in range(total):
@@ -314,7 +315,7 @@ def extract_text_from_pdf(uploaded_file, max_pages=PDF_MAX_PAGINAS_PADRAO):
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=8)
 def extract_text_from_pdf_pdfplumber_cached(pdf_bytes, max_pages=PDF_MAX_PAGINAS_PADRAO):
     """
-    Extrai texto preservando melhor a ordem visual do relatório.
+    Extrai texto preservando melhor a ordem visual do relatÃ³rio.
     Uso recomendado para o PDF de Giro de Estoque, porque o PyMuPDF pode
     reorganizar as linhas e quebrar o parser por empresa/produto.
     """
@@ -352,27 +353,27 @@ def aviso_pymupdf_ausente_para_giro(uploaded_file):
 
 
 def diagnosticar_pdf_giro(texto):
-    """Retorna uma mensagem amigável quando o arquivo no campo Giro não é o relatório esperado."""
+    """Retorna uma mensagem amigÃ¡vel quando o arquivo no campo Giro nÃ£o Ã© o relatÃ³rio esperado."""
     txt = str(texto or "")
     up = txt.upper()
     if not txt.strip():
         return (
-            "O PDF enviado no campo Giro de Estoque não retornou texto. "
-            "Provavelmente ele é escaneado/imagem ou está protegido. Gere/exporte o relatório em PDF textual pelo sistema."
+            "O PDF enviado no campo Giro de Estoque nÃ£o retornou texto. "
+            "Provavelmente ele Ã© escaneado/imagem ou estÃ¡ protegido. Gere/exporte o relatÃ³rio em PDF textual pelo sistema."
         )
     if "ABERTO" in up and ("PEDIDO" in up or "PEDIDOS" in up or "QTDE" in up):
         return (
-            "O arquivo enviado no campo Giro de Estoque parece ser o relatório de Pedidos em Aberto. "
+            "O arquivo enviado no campo Giro de Estoque parece ser o relatÃ³rio de Pedidos em Aberto. "
             "Na primeira caixa envie o PDF de Giro de Estoque; na segunda caixa envie o PDF de Pedidos em Aberto."
         )
     if "GIRO" not in up and "EMPRESA" not in up:
         return (
-            "O arquivo enviado no campo Giro de Estoque não parece ter o layout do relatório de Giro. "
-            "Confira se você selecionou o PDF correto."
+            "O arquivo enviado no campo Giro de Estoque nÃ£o parece ter o layout do relatÃ³rio de Giro. "
+            "Confira se vocÃª selecionou o PDF correto."
         )
     return (
-        "Não consegui extrair os dados do Giro de Estoque. "
-        "Confira se o PDF é o relatório de Giro de Estoque no layout padrão, com EMPRESA, código do item, meses, estoque e preço."
+        "NÃ£o consegui extrair os dados do Giro de Estoque. "
+        "Confira se o PDF Ã© o relatÃ³rio de Giro de Estoque no layout padrÃ£o, com EMPRESA, cÃ³digo do item, meses, estoque e preÃ§o."
     )
 
 
@@ -430,9 +431,9 @@ MESES_ABREV_PT = {
 def extrair_meses_giro_pdf(text):
     """
     Puxa os meses diretamente do PDF de Giro.
-    Prioriza a ordem real das colunas da tabela, porque alguns relatórios exibem
+    Prioriza a ordem real das colunas da tabela, porque alguns relatÃ³rios exibem
     "REFERENTE AOS MESES" em ordem decrescente, mas as colunas de giro aparecem em
-    ordem crescente no cabeçalho.
+    ordem crescente no cabeÃ§alho.
     """
     text = str(text or "")
 
@@ -452,7 +453,7 @@ def extrair_meses_giro_pdf(text):
     for raw_line in text.splitlines():
         line = raw_line.strip()
         meses_linha = re.findall(r"\b\d{2}/\d{4}\b", line)
-        if len(meses_linha) >= 2 and ("ESTOQUE" in line.upper() or "MEDIA" in line.upper() or "MÉDIA" in line.upper()):
+        if len(meses_linha) >= 2 and ("ESTOQUE" in line.upper() or "MEDIA" in line.upper() or "MÃ‰DIA" in line.upper()):
             return meses_linha
 
     padrao_ref = re.search(r"REFERENTE\s+AOS\s+MESES\s*:\s*([^\n]+)", text, flags=re.IGNORECASE)
@@ -487,30 +488,30 @@ def mes_atual_referencia():
 
 def colunas_pedido_compras(meses_ref=None):
     """
-    Ordem oficial da tela Pedido de Compra e do download Pedido Editável.
-    Mantém Código Fábrica e Embalagem no final, conforme solicitado.
+    Ordem oficial da tela Pedido de Compra e do download Pedido EditÃ¡vel.
+    MantÃ©m CÃ³digo FÃ¡brica e Embalagem no final, conforme solicitado.
     """
     meses_ref = meses_ref or MESES
     return [
         "codigo",
         "descricao",
         *[col_giro("Giro Geral", mes) for mes in meses_ref],
-        "Média Giro Geral",
+        "MÃ©dia Giro Geral",
         "Estoque Lojas",
-        "Estoque Única",
+        "Estoque Ãšnica",
         "Estoque Geral",
-        "Saldo em Trânsito/ABERTO",
+        "Saldo em TrÃ¢nsito/ABERTO",
         "Estoque Final",
         "Estoque Alvo",
-        "Sugestão Sistema",
-        "Sugestão arredondada",
-        "Preço Última Compra",
-        "Data Última Compra",
+        "SugestÃ£o Sistema",
+        "SugestÃ£o arredondada",
+        "PreÃ§o Ãšltima Compra",
+        "Data Ãšltima Compra",
         "PEDIDO Final",
-        "Origem Sugestão",
+        "Origem SugestÃ£o",
         "Valor Final do Pedido",
         "Embalagem",
-        "Código Fábrica",
+        "CÃ³digo FÃ¡brica",
     ]
 
 # =========================================================
@@ -519,8 +520,8 @@ def colunas_pedido_compras(meses_ref=None):
 
 def _token_numero_giro(valor):
     """
-    Identifica números válidos nas colunas numéricas do relatório de giro.
-    Evita tratar pedaços da descrição/código de fábrica como giro.
+    Identifica nÃºmeros vÃ¡lidos nas colunas numÃ©ricas do relatÃ³rio de giro.
+    Evita tratar pedaÃ§os da descriÃ§Ã£o/cÃ³digo de fÃ¡brica como giro.
     """
     txt = str(valor or "").strip()
     if txt == "":
@@ -530,13 +531,13 @@ def _token_numero_giro(valor):
 
 def _encontrar_unidade_giro(partes, qtd_meses):
     """
-    No PDF de giro, algumas descrições contêm a palavra/tipo 'UN' antes da unidade real.
+    No PDF de giro, algumas descriÃ§Ãµes contÃªm a palavra/tipo 'UN' antes da unidade real.
     Exemplo real:
     85582 ... 0.5L UN 1263 T UN 0,00 0,00 0,00 ...
-    A unidade correta é o último UN antes da sequência dos meses.
+    A unidade correta Ã© o Ãºltimo UN antes da sequÃªncia dos meses.
 
-    Esta função procura a unidade que vem imediatamente antes de uma sequência numérica
-    com a quantidade de meses do cabeçalho. Assim o sistema não puxa '1263' da descrição
+    Esta funÃ§Ã£o procura a unidade que vem imediatamente antes de uma sequÃªncia numÃ©rica
+    com a quantidade de meses do cabeÃ§alho. Assim o sistema nÃ£o puxa '1263' da descriÃ§Ã£o
     como se fosse giro de abril.
     """
     candidatos = []
@@ -566,7 +567,7 @@ def _encontrar_unidade_giro(partes, qtd_meses):
     if not candidatos:
         return None, False
 
-    # Usa o último candidato válido, porque a descrição pode conter "UN" antes da unidade real.
+    # Usa o Ãºltimo candidato vÃ¡lido, porque a descriÃ§Ã£o pode conter "UN" antes da unidade real.
     return candidatos[-1]
 
 
@@ -576,10 +577,10 @@ def parse_linha_giro(line, meses_ref=None):
     COD DESCRICAO DO ITEM UN 04/2026 05/2026 06/2026 MEDIA PREVI.30 ESTOQUE
     SUGESTAO PR.ULT.COMP DT.ULT.COMP PR.VENDA % LUCRO
 
-    Correção importante:
-    - Não usa mais o primeiro token "UN" encontrado.
-    - Localiza a unidade pela sequência numérica dos meses logo depois dela.
-    - Isso evita erro em itens cuja descrição contém "UN" ou códigos numéricos antes
+    CorreÃ§Ã£o importante:
+    - NÃ£o usa mais o primeiro token "UN" encontrado.
+    - Localiza a unidade pela sequÃªncia numÃ©rica dos meses logo depois dela.
+    - Isso evita erro em itens cuja descriÃ§Ã£o contÃ©m "UN" ou cÃ³digos numÃ©ricos antes
       da unidade real, como o item 85582.
     """
     if not re.match(r"^\d{5}\s+", str(line).strip()):
@@ -598,7 +599,7 @@ def parse_linha_giro(line, meses_ref=None):
     antes_un = partes[1:un_index]
     depois_un = partes[un_index + 1:]
 
-    # Se a unidade veio colada no final do último token da descrição, remove só o "UN".
+    # Se a unidade veio colada no final do Ãºltimo token da descriÃ§Ã£o, remove sÃ³ o "UN".
     if unidade_colada:
         token_sem_un = str(partes[un_index])[:-2].strip()
         if token_sem_un:
@@ -607,7 +608,7 @@ def parse_linha_giro(line, meses_ref=None):
     if len(depois_un) < qtd_meses + 4:
         return None
 
-    # Garantia adicional: os meses precisam ser exatamente a primeira sequência após a unidade.
+    # Garantia adicional: os meses precisam ser exatamente a primeira sequÃªncia apÃ³s a unidade.
     if not all(_token_numero_giro(v) for v in depois_un[:qtd_meses]):
         return None
 
@@ -642,7 +643,7 @@ def parse_linha_giro(line, meses_ref=None):
         if data_idx - 1 >= 0:
             pr_ult_compra = br_to_float(depois_un[data_idx - 1])
     else:
-        # Após os meses: MEDIA, PREVI.30, ESTOQUE, SUGESTAO, PR.ULT.COMP...
+        # ApÃ³s os meses: MEDIA, PREVI.30, ESTOQUE, SUGESTAO, PR.ULT.COMP...
         idx_preco = qtd_meses + 4
         pr_ult_compra = br_to_float(depois_un[idx_preco]) if len(depois_un) > idx_preco else 0.0
 
@@ -735,7 +736,7 @@ def parse_giro_estoque_pdf(uploaded_file, max_pages=PDF_MAX_PAGINAS_PADRAO):
     return parse_giro_estoque_pdf_cached(_pdf_bytes(uploaded_file), max_pages=max_pages)
 
 # =========================================================
-# LEITURA DO PDF DE PEDIDOS EM ABERTO / SALDO EM TRÂNSITO
+# LEITURA DO PDF DE PEDIDOS EM ABERTO / SALDO EM TRÃ‚NSITO
 # =========================================================
 
 _NUMERO_BR_RE = re.compile(r"^-?\d{1,3}(?:\.\d{3})*,\d+$|^-?\d+,\d+$|^-?\d+$")
@@ -761,10 +762,10 @@ def extrair_descricao_pedido_aberto_tokens(tokens, un_index):
 
 def encontrar_indice_aberto_no_cabecalho(text):
     """
-    No relatório de Pedidos de Compra, após a unidade UN, a sequência numérica é:
+    No relatÃ³rio de Pedidos de Compra, apÃ³s a unidade UN, a sequÃªncia numÃ©rica Ã©:
     QTDE, TOT.LIT, TOT.KIL, PES.ITE, BAIXADO, ABERTO, VR.UNIT, TOT.IPI, ALQ.IPI, TOT.SUB, TOTAL.
 
-    Portanto, ABERTO é sempre o 6º número depois do UN, índice 5.
+    Portanto, ABERTO Ã© sempre o 6Âº nÃºmero depois do UN, Ã­ndice 5.
     """
     for raw_line in str(text or "").splitlines():
         line = str(raw_line or "").strip().upper()
@@ -796,13 +797,13 @@ def encontrar_indice_aberto_no_cabecalho(text):
 
 def parse_linha_pedido_aberto(line, indice_aberto=None):
     """
-    Lê uma linha do PDF de pedidos em aberto.
+    LÃª uma linha do PDF de pedidos em aberto.
 
     Regra corrigida:
-    - Não usa a posição do cabeçalho inteiro, porque a descrição varia.
+    - NÃ£o usa a posiÃ§Ã£o do cabeÃ§alho inteiro, porque a descriÃ§Ã£o varia.
     - Localiza a unidade UN.
-    - Depois da UN, considera apenas números.
-    - Puxa a coluna ABERTO pelo índice fixo 5:
+    - Depois da UN, considera apenas nÃºmeros.
+    - Puxa a coluna ABERTO pelo Ã­ndice fixo 5:
       QTDE=0, TOT.LIT=1, TOT.KIL=2, PES.ITE=3, BAIXADO=4, ABERTO=5, VR.UNIT=6.
     """
     line = line.strip()
@@ -827,9 +828,9 @@ def parse_linha_pedido_aberto(line, indice_aberto=None):
     idx_aberto = 5 if indice_aberto is None else int(indice_aberto)
 
     if len(valores_numericos) > idx_aberto:
-        return {"codigo": codigo, "descricao": descricao, "Saldo em Trânsito/ABERTO": br_to_float(valores_numericos[idx_aberto])}
+        return {"codigo": codigo, "descricao": descricao, "Saldo em TrÃ¢nsito/ABERTO": br_to_float(valores_numericos[idx_aberto])}
 
-    return {"codigo": codigo, "descricao": descricao, "Saldo em Trânsito/ABERTO": 0.0}
+    return {"codigo": codigo, "descricao": descricao, "Saldo em TrÃ¢nsito/ABERTO": 0.0}
 
 
 def parse_pedidos_compra_aberto(text):
@@ -842,28 +843,28 @@ def parse_pedidos_compra_aberto(text):
             registros.append(produto)
 
     if not registros:
-        return pd.DataFrame(columns=["codigo", "descricao", "Saldo em Trânsito/ABERTO"])
+        return pd.DataFrame(columns=["codigo", "descricao", "Saldo em TrÃ¢nsito/ABERTO"])
 
     return pd.DataFrame(registros).groupby("codigo", as_index=False).agg({
         "descricao": "first",
-        "Saldo em Trânsito/ABERTO": "sum",
+        "Saldo em TrÃ¢nsito/ABERTO": "sum",
     })
 
 
 def _parse_pedidos_compra_aberto_pdf_stream(uploaded_file):
     """
-    Lê o PDF de Pedidos em Aberto / Saldo em Trânsito.
+    LÃª o PDF de Pedidos em Aberto / Saldo em TrÃ¢nsito.
 
-    Correção principal:
-    - Para este relatório, a coluna ABERTO é sempre o 6º número após a unidade UN.
-      Sequência depois do UN:
+    CorreÃ§Ã£o principal:
+    - Para este relatÃ³rio, a coluna ABERTO Ã© sempre o 6Âº nÃºmero apÃ³s a unidade UN.
+      SequÃªncia depois do UN:
       QTDE=0, TOT.LIT=1, TOT.KIL=2, PES.ITE=3, BAIXADO=4, ABERTO=5, VR.UNIT=6.
-    - Por isso, a leitura por texto é usada primeiro. Ela é mais segura do que coordenadas,
-      porque algumas linhas do PDF vêm com campos colados, ex.: ST000001-WANDA.
+    - Por isso, a leitura por texto Ã© usada primeiro. Ela Ã© mais segura do que coordenadas,
+      porque algumas linhas do PDF vÃªm com campos colados, ex.: ST000001-WANDA.
     - A leitura por coordenadas fica apenas como fallback.
     """
 
-    # 1) Caminho principal: texto linha a linha, usando a posição fixa do ABERTO após UN.
+    # 1) Caminho principal: texto linha a linha, usando a posiÃ§Ã£o fixa do ABERTO apÃ³s UN.
     try:
         uploaded_file.seek(0)
     except Exception:
@@ -874,17 +875,17 @@ def _parse_pedidos_compra_aberto_pdf_stream(uploaded_file):
         df_texto = parse_pedidos_compra_aberto(texto)
         if df_texto is not None and not df_texto.empty:
             df_texto["codigo"] = df_texto["codigo"].astype(str).str.extract(r"(\d+)", expand=False).fillna("").str.zfill(5)
-            df_texto["Saldo em Trânsito/ABERTO"] = pd.to_numeric(df_texto["Saldo em Trânsito/ABERTO"], errors="coerce").fillna(0)
+            df_texto["Saldo em TrÃ¢nsito/ABERTO"] = pd.to_numeric(df_texto["Saldo em TrÃ¢nsito/ABERTO"], errors="coerce").fillna(0)
             df_texto = df_texto.groupby("codigo", as_index=False).agg({
                 "descricao": "first",
-                "Saldo em Trânsito/ABERTO": "sum",
+                "Saldo em TrÃ¢nsito/ABERTO": "sum",
             })
-            if float(df_texto["Saldo em Trânsito/ABERTO"].sum()) > 0:
+            if float(df_texto["Saldo em TrÃ¢nsito/ABERTO"].sum()) > 0:
                 return df_texto
     except Exception:
         pass
 
-    # 2) Fallback: tenta por coordenadas caso o texto não tenha retornado itens.
+    # 2) Fallback: tenta por coordenadas caso o texto nÃ£o tenha retornado itens.
     registros = []
 
     try:
@@ -939,14 +940,14 @@ def _parse_pedidos_compra_aberto_pdf_stream(uploaded_file):
 
                     descricao = extrair_descricao_pedido_aberto_tokens(textos, un_index)
 
-                    # Mesmo no fallback por coordenadas, se houver UN, prioriza a sequência numérica.
+                    # Mesmo no fallback por coordenadas, se houver UN, prioriza a sequÃªncia numÃ©rica.
                     if un_index is not None:
                         valores_numericos = [p for p in textos[un_index + 1:] if _eh_numero_br(p)]
                         if len(valores_numericos) > 5:
                             registros.append({
                                 "codigo": codigo,
                                 "descricao": descricao,
-                                "Saldo em Trânsito/ABERTO": br_to_float(valores_numericos[5]),
+                                "Saldo em TrÃ¢nsito/ABERTO": br_to_float(valores_numericos[5]),
                             })
                             continue
 
@@ -965,7 +966,7 @@ def _parse_pedidos_compra_aberto_pdf_stream(uploaded_file):
                         registros.append({
                             "codigo": codigo,
                             "descricao": descricao,
-                            "Saldo em Trânsito/ABERTO": br_to_float(candidatos[0][1]),
+                            "Saldo em TrÃ¢nsito/ABERTO": br_to_float(candidatos[0][1]),
                         })
 
     except Exception:
@@ -974,17 +975,17 @@ def _parse_pedidos_compra_aberto_pdf_stream(uploaded_file):
     if registros:
         return pd.DataFrame(registros).groupby("codigo", as_index=False).agg({
             "descricao": "first",
-            "Saldo em Trânsito/ABERTO": "sum",
+            "Saldo em TrÃ¢nsito/ABERTO": "sum",
         })
 
-    return pd.DataFrame(columns=["codigo", "descricao", "Saldo em Trânsito/ABERTO"])
+    return pd.DataFrame(columns=["codigo", "descricao", "Saldo em TrÃ¢nsito/ABERTO"])
 
 
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=8)
 def parse_pedidos_compra_aberto_pdf_cached(pdf_bytes):
     pdf_bytes = bytes(pdf_bytes or b"")
     if not pdf_bytes:
-        return pd.DataFrame(columns=["codigo", "descricao", "Saldo em Trânsito/ABERTO"])
+        return pd.DataFrame(columns=["codigo", "descricao", "Saldo em TrÃ¢nsito/ABERTO"])
     return _parse_pedidos_compra_aberto_pdf_stream(BytesIO(pdf_bytes))
 
 
@@ -1005,18 +1006,18 @@ def ler_cadastro_produtos_csv(uploaded_file):
         colunas_norm = {normalizar_coluna(c): c for c in colunas}
 
         candidatos_codigo = [
-            "CÓDIGO", "CODIGO", "CÓD.ITEM", "COD.ITEM", "CÓD ITEM", "COD ITEM",
-            "CÓDIGO ITEM", "CODIGO ITEM",
+            "CÃ“DIGO", "CODIGO", "CÃ“D.ITEM", "COD.ITEM", "CÃ“D ITEM", "COD ITEM",
+            "CÃ“DIGO ITEM", "CODIGO ITEM",
         ]
         candidatos_descricao = [
-            "DESCRIÇÃO DO ITEM", "DESCRICAO DO ITEM", "DESCRIÇÃO", "DESCRICAO",
-            "DESC ITEM", "DESCRIÇÃO ITEM", "DESCRICAO ITEM",
+            "DESCRIÃ‡ÃƒO DO ITEM", "DESCRICAO DO ITEM", "DESCRIÃ‡ÃƒO", "DESCRICAO",
+            "DESC ITEM", "DESCRIÃ‡ÃƒO ITEM", "DESCRICAO ITEM",
         ]
         candidatos_fabrica = [
-            "CÓD. FABRICA", "COD. FABRICA", "CÓD. FÁBRICA", "COD. FÁBRICA",
-            "CÓDIGO DE FÁBRICA", "CODIGO DE FABRICA", "NOVO CÓDIGO DE FÁBRICA",
-            "NOVO CODIGO DE FABRICA", "COD FABRICA", "CÓD FABRICA",
-            "CÓDIGO FÁBRICA", "CODIGO FABRICA",
+            "CÃ“D. FABRICA", "COD. FABRICA", "CÃ“D. FÃBRICA", "COD. FÃBRICA",
+            "CÃ“DIGO DE FÃBRICA", "CODIGO DE FABRICA", "NOVO CÃ“DIGO DE FÃBRICA",
+            "NOVO CODIGO DE FABRICA", "COD FABRICA", "CÃ“D FABRICA",
+            "CÃ“DIGO FÃBRICA", "CODIGO FABRICA",
         ]
 
         def encontrar(candidatos):
@@ -1028,7 +1029,7 @@ def ler_cadastro_produtos_csv(uploaded_file):
 
         candidatos_embalagem = [
             "EMBALAGEM", "EMB", "QTD EMBALAGEM", "QUANTIDADE EMBALAGEM",
-            "QTDE EMBALAGEM", "QTD. EMBALAGEM", "MULTIPLO", "MÚLTIPLO",
+            "QTDE EMBALAGEM", "QTD. EMBALAGEM", "MULTIPLO", "MÃšLTIPLO",
         ]
 
         return {
@@ -1077,13 +1078,13 @@ def ler_cadastro_produtos_csv(uploaded_file):
             continue
 
     if df is None or colunas_mapeadas is None:
-        st.error("Não consegui ler o CSV de cadastro.")
+        st.error("NÃ£o consegui ler o CSV de cadastro.")
         st.caption(
-            "O CSV pode ter um destes padrões de colunas: CÓDIGO, DESCRIÇÃO DO ITEM, CÓD. FABRICA "
-            "ou Cód.Item, Descrição, Novo Código de fábrica."
+            "O CSV pode ter um destes padrÃµes de colunas: CÃ“DIGO, DESCRIÃ‡ÃƒO DO ITEM, CÃ“D. FABRICA "
+            "ou CÃ³d.Item, DescriÃ§Ã£o, Novo CÃ³digo de fÃ¡brica."
         )
         if ultimo_erro:
-            st.caption(f"Último erro identificado: {ultimo_erro}")
+            st.caption(f"Ãšltimo erro identificado: {ultimo_erro}")
         return pd.DataFrame()
 
     colunas_selecionadas = [
@@ -1132,22 +1133,22 @@ def normalizar_cadastro_produtos_df(df):
         return None
 
     col_codigo = encontrar([
-        "CODIGO", "CÓDIGO", "COD.ITEM", "CÓD.ITEM", "COD ITEM", "CÓD ITEM",
-        "CODIGO ITEM", "CÓDIGO ITEM", "codigo",
+        "CODIGO", "CÃ“DIGO", "COD.ITEM", "CÃ“D.ITEM", "COD ITEM", "CÃ“D ITEM",
+        "CODIGO ITEM", "CÃ“DIGO ITEM", "codigo",
     ])
     col_descricao = encontrar([
-        "DESCRICAO DO ITEM", "DESCRIÇÃO DO ITEM", "DESCRICAO", "DESCRIÇÃO",
-        "DESC ITEM", "DESCRICAO ITEM", "DESCRIÇÃO ITEM", "descricao",
+        "DESCRICAO DO ITEM", "DESCRIÃ‡ÃƒO DO ITEM", "DESCRICAO", "DESCRIÃ‡ÃƒO",
+        "DESC ITEM", "DESCRICAO ITEM", "DESCRIÃ‡ÃƒO ITEM", "descricao",
     ])
     col_fabrica = encontrar([
-        "COD. FABRICA", "CÓD. FABRICA", "COD. FÁBRICA", "CÓD. FÁBRICA",
-        "CODIGO DE FABRICA", "CÓDIGO DE FÁBRICA", "NOVO CODIGO DE FABRICA",
-        "NOVO CÓDIGO DE FÁBRICA", "COD FABRICA", "CÓD FABRICA",
-        "CODIGO FABRICA", "CÓDIGO FÁBRICA", "codigo_fabrica",
+        "COD. FABRICA", "CÃ“D. FABRICA", "COD. FÃBRICA", "CÃ“D. FÃBRICA",
+        "CODIGO DE FABRICA", "CÃ“DIGO DE FÃBRICA", "NOVO CODIGO DE FABRICA",
+        "NOVO CÃ“DIGO DE FÃBRICA", "COD FABRICA", "CÃ“D FABRICA",
+        "CODIGO FABRICA", "CÃ“DIGO FÃBRICA", "codigo_fabrica",
     ])
     col_embalagem = encontrar([
         "EMBALAGEM", "EMB", "QTD EMBALAGEM", "QUANTIDADE EMBALAGEM",
-        "QTDE EMBALAGEM", "QTD. EMBALAGEM", "MULTIPLO", "MÚLTIPLO", "embalagem",
+        "QTDE EMBALAGEM", "QTD. EMBALAGEM", "MULTIPLO", "MÃšLTIPLO", "embalagem",
     ])
 
     if not col_codigo or not col_descricao or not col_fabrica:
@@ -1185,8 +1186,8 @@ def ler_cadastro_produtos_google_public_cached(spreadsheet_id, sheet_name="Cadas
     Para funcionar, a planilha precisa estar compartilhada como:
     Qualquer pessoa com o link -> Leitor.
 
-    Essa leitura é usada apenas para buscar o cadastro. Ela não cria, não edita
-    e não depende de client_id, client_secret nem refresh_token.
+    Essa leitura Ã© usada apenas para buscar o cadastro. Ela nÃ£o cria, nÃ£o edita
+    e nÃ£o depende de client_id, client_secret nem refresh_token.
     """
     url = (
         f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/gviz/tq"
@@ -1198,8 +1199,8 @@ def ler_cadastro_produtos_google_public_cached(spreadsheet_id, sheet_name="Cadas
 
 def ler_cadastro_produtos_google():
     """
-    Busca o cadastro diretamente do Google Sheets por URL pública.
-    Não usa OAuth para evitar erro invalid_client no cadastro.
+    Busca o cadastro diretamente do Google Sheets por URL pÃºblica.
+    NÃ£o usa OAuth para evitar erro invalid_client no cadastro.
     """
     return ler_cadastro_produtos_google_public_cached(GOOGLE_PLANILHA_CADASTRO_ID, "Cadastro")
 
@@ -1234,7 +1235,7 @@ def aplicar_cadastro(df_giro, cadastro_csv):
     return aplicar_cadastro_dataframe(df_giro, cadastro)
 
 # =========================================================
-# ÚLTIMA COMPRA / PREÇO
+# ÃšLTIMA COMPRA / PREÃ‡O
 # =========================================================
 
 def data_alerta_icon(data_ultima_compra, meses_alerta):
@@ -1242,16 +1243,16 @@ def data_alerta_icon(data_ultima_compra, meses_alerta):
         return ""
     hoje = pd.Timestamp.today().normalize()
     limite = hoje - pd.DateOffset(months=int(meses_alerta))
-    return "⚠️" if pd.Timestamp(data_ultima_compra) < limite else ""
+    return "âš ï¸" if pd.Timestamp(data_ultima_compra) < limite else ""
 
 
 def montar_info_compra(df_giro, meses_alerta_sem_compra=3):
     """
-    Data de última compra: somente loja 009.
-    Preço de última compra: prioriza loja 009; se não houver preço na 009, usa outra unidade com preço.
+    Data de Ãºltima compra: somente loja 009.
+    PreÃ§o de Ãºltima compra: prioriza loja 009; se nÃ£o houver preÃ§o na 009, usa outra unidade com preÃ§o.
     """
     if df_giro.empty:
-        return pd.DataFrame(columns=["codigo", "Data Última Compra", "Preço Última Compra"])
+        return pd.DataFrame(columns=["codigo", "Data Ãšltima Compra", "PreÃ§o Ãšltima Compra"])
 
     df = df_giro.copy()
     df["dt_ult_compra"] = pd.to_datetime(df["dt_ult_compra"], errors="coerce", dayfirst=True)
@@ -1283,8 +1284,8 @@ def montar_info_compra(df_giro, meses_alerta_sem_compra=3):
 
         resultados.append({
             "codigo": codigo,
-            "Data Última Compra": data_exibicao,
-            "Preço Última Compra": preco,
+            "Data Ãšltima Compra": data_exibicao,
+            "PreÃ§o Ãšltima Compra": preco,
         })
 
     return pd.DataFrame(resultados)
@@ -1295,8 +1296,8 @@ def montar_info_compra(df_giro, meses_alerta_sem_compra=3):
 
 def arredondar_para_embalagem(sugestao, embalagem):
     """
-    Arredonda a sugestão para cima, respeitando o múltiplo da embalagem.
-    Ex.: sugestão 8 e embalagem 12 => 12; sugestão 20 e embalagem 12 => 24.
+    Arredonda a sugestÃ£o para cima, respeitando o mÃºltiplo da embalagem.
+    Ex.: sugestÃ£o 8 e embalagem 12 => 12; sugestÃ£o 20 e embalagem 12 => 24.
     """
     try:
         sugestao = int(math.ceil(float(sugestao or 0)))
@@ -1315,16 +1316,19 @@ def arredondar_para_embalagem(sugestao, embalagem):
             return 0
 
 
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=6)
 def montar_tabela_consolidada(
     df_giro,
     df_transito=None,
     dias_estoque_alvo=60,
     meses_alerta_sem_compra=3,
     considerar_mes_atual_media=True,
+    meses_ref=None,
 ):
     df_giro = df_giro.copy()
+    meses_ref = list(meses_ref or MESES)
 
-    # Garantias para evitar KeyError quando algum upload não trouxer cadastro/embalagem.
+    # Garantias para evitar KeyError quando algum upload nÃ£o trouxer cadastro/embalagem.
     # A tabela consolidada sempre precisa dessas colunas para o groupby/agg.
     colunas_padrao = {
         "codigo_fabrica": "",
@@ -1341,7 +1345,7 @@ def montar_tabela_consolidada(
     df_lojas = df_giro[df_giro["codigo_empresa"].isin(CODIGOS_LOJAS)].copy()
     df_unica = df_giro[df_giro["codigo_empresa"] == CODIGO_UNICA].copy()
 
-    meses_ref = [m for m in MESES if m in df_giro.columns]
+    meses_ref = [m for m in meses_ref if m in df_giro.columns]
     if not meses_ref:
         meses_ref = [m for m in MESES_PADRAO if m in df_giro.columns]
 
@@ -1355,52 +1359,52 @@ def montar_tabela_consolidada(
     lojas = df_lojas.groupby(["codigo", "descricao"], as_index=False).agg(agg) if not df_lojas.empty else pd.DataFrame(columns=["codigo", "descricao", *agg.keys()])
     unica = df_unica.groupby(["codigo", "descricao"], as_index=False).agg(agg) if not df_unica.empty else pd.DataFrame(columns=["codigo", "descricao", *agg.keys()])
 
-    lojas["Média Giro Lojas"] = lojas[meses_ref].mean(axis=1).round(1) if not lojas.empty and meses_ref else []
-    unica["Média Giro Única"] = unica[meses_ref].mean(axis=1).round(1) if not unica.empty and meses_ref else []
+    lojas["MÃ©dia Giro Lojas"] = lojas[meses_ref].mean(axis=1).round(1) if not lojas.empty and meses_ref else []
+    unica["MÃ©dia Giro Ãšnica"] = unica[meses_ref].mean(axis=1).round(1) if not unica.empty and meses_ref else []
 
     lojas = lojas.rename(columns={
-        "codigo_fabrica": "Código Fábrica",
+        "codigo_fabrica": "CÃ³digo FÃ¡brica",
         "embalagem": "Embalagem",
         **{mes: col_giro("Giro Lojas", mes) for mes in meses_ref},
         "estoque": "Estoque Lojas",
     })
     unica = unica.rename(columns={
-        "codigo_fabrica": "Código Fábrica Única",
-        "embalagem": "Embalagem Única",
-        **{mes: col_giro("Giro Única", mes) for mes in meses_ref},
-        "estoque": "Estoque Única",
+        "codigo_fabrica": "CÃ³digo FÃ¡brica Ãšnica",
+        "embalagem": "Embalagem Ãšnica",
+        **{mes: col_giro("Giro Ãšnica", mes) for mes in meses_ref},
+        "estoque": "Estoque Ãšnica",
     })
 
     resumo = pd.merge(lojas, unica, on=["codigo", "descricao"], how="outer").fillna(0)
 
-    for col in ["Código Fábrica", "Código Fábrica Única"]:
+    for col in ["CÃ³digo FÃ¡brica", "CÃ³digo FÃ¡brica Ãšnica"]:
         if col not in resumo.columns:
             resumo[col] = ""
         resumo[col] = resumo[col].replace(0, "")
 
-    resumo["Código Fábrica"] = resumo.apply(
-        lambda x: x["Código Fábrica"] if x["Código Fábrica"] else x["Código Fábrica Única"], axis=1
+    resumo["CÃ³digo FÃ¡brica"] = resumo.apply(
+        lambda x: x["CÃ³digo FÃ¡brica"] if x["CÃ³digo FÃ¡brica"] else x["CÃ³digo FÃ¡brica Ãšnica"], axis=1
     )
 
-    for col in ["Embalagem", "Embalagem Única"]:
+    for col in ["Embalagem", "Embalagem Ãšnica"]:
         if col not in resumo.columns:
             resumo[col] = 0
         resumo[col] = pd.to_numeric(resumo[col], errors="coerce").fillna(0).round(0).astype(int)
 
     resumo["Embalagem"] = resumo.apply(
-        lambda x: int(x["Embalagem"]) if int(x["Embalagem"]) > 0 else int(x["Embalagem Única"]),
+        lambda x: int(x["Embalagem"]) if int(x["Embalagem"]) > 0 else int(x["Embalagem Ãšnica"]),
         axis=1,
     )
 
     colunas_giro_geral = []
     for mes in meses_ref:
         label = label_mes_giro(mes)
-        for prefixo in ["Giro Lojas", "Giro Única"]:
+        for prefixo in ["Giro Lojas", "Giro Ãšnica"]:
             col = f"{prefixo} {label}"
             if col not in resumo.columns:
                 resumo[col] = 0
         col_geral = f"Giro Geral {label}"
-        resumo[col_geral] = resumo[f"Giro Lojas {label}"] + resumo[f"Giro Única {label}"]
+        resumo[col_geral] = resumo[f"Giro Lojas {label}"] + resumo[f"Giro Ãšnica {label}"]
         colunas_giro_geral.append(col_geral)
 
     meses_media_geral = list(meses_ref)
@@ -1409,39 +1413,39 @@ def montar_tabela_consolidada(
         meses_media_geral = [m for m in meses_media_geral if m != mes_atual]
 
     colunas_media_giro_geral = [col_giro("Giro Geral", mes) for mes in meses_media_geral if col_giro("Giro Geral", mes) in resumo.columns]
-    resumo["Média Giro Geral"] = resumo[colunas_media_giro_geral].mean(axis=1).round(1) if colunas_media_giro_geral else 0
+    resumo["MÃ©dia Giro Geral"] = resumo[colunas_media_giro_geral].mean(axis=1).round(1) if colunas_media_giro_geral else 0
 
-    for col in ["Estoque Lojas", "Estoque Única", "Média Giro Lojas", "Média Giro Única"]:
+    for col in ["Estoque Lojas", "Estoque Ãšnica", "MÃ©dia Giro Lojas", "MÃ©dia Giro Ãšnica"]:
         if col not in resumo.columns:
             resumo[col] = 0
 
-    resumo["Estoque Atual Geral"] = resumo["Estoque Lojas"] + resumo["Estoque Única"]
+    resumo["Estoque Atual Geral"] = resumo["Estoque Lojas"] + resumo["Estoque Ãšnica"]
     resumo["Estoque Geral"] = resumo["Estoque Atual Geral"]
 
     if df_transito is not None and not df_transito.empty:
         df_transito = df_transito.copy()
         df_transito["codigo"] = df_transito["codigo"].astype(str).str.extract(r"(\d+)", expand=False).fillna("").str.zfill(5)
-        df_transito["Saldo em Trânsito/ABERTO"] = pd.to_numeric(df_transito.get("Saldo em Trânsito/ABERTO", 0), errors="coerce").fillna(0)
+        df_transito["Saldo em TrÃ¢nsito/ABERTO"] = pd.to_numeric(df_transito.get("Saldo em TrÃ¢nsito/ABERTO", 0), errors="coerce").fillna(0)
         df_transito = df_transito[df_transito["codigo"].str.strip().ne("")]
-        df_transito = df_transito.groupby("codigo", as_index=False)["Saldo em Trânsito/ABERTO"].sum()
+        df_transito = df_transito.groupby("codigo", as_index=False)["Saldo em TrÃ¢nsito/ABERTO"].sum()
         resumo = pd.merge(resumo, df_transito.drop(columns=["descricao"], errors="ignore"), on="codigo", how="left")
     else:
-        resumo["Saldo em Trânsito/ABERTO"] = 0
+        resumo["Saldo em TrÃ¢nsito/ABERTO"] = 0
 
-    resumo["Saldo em Trânsito/ABERTO"] = pd.to_numeric(resumo["Saldo em Trânsito/ABERTO"], errors="coerce").fillna(0)
-    resumo["Estoque Final"] = resumo["Estoque Atual Geral"] + resumo["Saldo em Trânsito/ABERTO"]
-    resumo["Estoque Alvo"] = resumo["Média Giro Geral"] * (dias_estoque_alvo / 30)
-    resumo["Sugestão Sistema"] = (resumo["Estoque Alvo"] - resumo["Estoque Final"]).apply(lambda x: max(math.ceil(x), 0)).astype(int)
-    resumo["Sugestão arredondada"] = resumo.apply(
-        lambda row: arredondar_para_embalagem(row["Sugestão Sistema"], row.get("Embalagem", 0)),
+    resumo["Saldo em TrÃ¢nsito/ABERTO"] = pd.to_numeric(resumo["Saldo em TrÃ¢nsito/ABERTO"], errors="coerce").fillna(0)
+    resumo["Estoque Final"] = resumo["Estoque Atual Geral"] + resumo["Saldo em TrÃ¢nsito/ABERTO"]
+    resumo["Estoque Alvo"] = resumo["MÃ©dia Giro Geral"] * (dias_estoque_alvo / 30)
+    resumo["SugestÃ£o Sistema"] = (resumo["Estoque Alvo"] - resumo["Estoque Final"]).apply(lambda x: max(math.ceil(x), 0)).astype(int)
+    resumo["SugestÃ£o arredondada"] = resumo.apply(
+        lambda row: arredondar_para_embalagem(row["SugestÃ£o Sistema"], row.get("Embalagem", 0)),
         axis=1,
     ).astype(int)
 
     info_compra = montar_info_compra(df_giro, meses_alerta_sem_compra)
     resumo = pd.merge(resumo, info_compra, on="codigo", how="left")
-    resumo["Preço Última Compra"] = pd.to_numeric(resumo["Preço Última Compra"], errors="coerce").fillna(0)
+    resumo["PreÃ§o Ãšltima Compra"] = pd.to_numeric(resumo["PreÃ§o Ãšltima Compra"], errors="coerce").fillna(0)
 
-    resumo = resumo.drop(columns=["Código Fábrica Única", "Embalagem Única"], errors="ignore")
+    resumo = resumo.drop(columns=["CÃ³digo FÃ¡brica Ãšnica", "Embalagem Ãšnica"], errors="ignore")
     return resumo.sort_values("descricao").reset_index(drop=True)
 
 
@@ -1451,20 +1455,20 @@ def montar_detalhe_produto(df_giro, codigo_produto):
         return pd.DataFrame()
 
     meses_ref = [m for m in MESES if m in detalhe.columns]
-    detalhe["Média Giro"] = detalhe[meses_ref].mean(axis=1).round(1) if meses_ref else 0
+    detalhe["MÃ©dia Giro"] = detalhe[meses_ref].mean(axis=1).round(1) if meses_ref else 0
     rename_meses = {mes: label_mes_giro(mes) for mes in meses_ref}
     detalhe = detalhe.rename(columns={
         "loja": "Unidade",
-        "codigo_empresa": "Cód. Empresa",
+        "codigo_empresa": "CÃ³d. Empresa",
         **rename_meses,
         "estoque": "Saldo em Estoque",
     })
 
-    colunas = ["Cód. Empresa", "Unidade"] + [label_mes_giro(m) for m in meses_ref] + ["Média Giro", "Saldo em Estoque"]
-    return detalhe[colunas].sort_values(["Cód. Empresa", "Unidade"])
+    colunas = ["CÃ³d. Empresa", "Unidade"] + [label_mes_giro(m) for m in meses_ref] + ["MÃ©dia Giro", "Saldo em Estoque"]
+    return detalhe[colunas].sort_values(["CÃ³d. Empresa", "Unidade"])
 
 # =========================================================
-# FORMATAÇÃO / EXPORTAÇÃO
+# FORMATAÃ‡ÃƒO / EXPORTAÃ‡ÃƒO
 # =========================================================
 
 def filtrar_tabela(df, campos, key):
@@ -1482,7 +1486,7 @@ def filtrar_tabela(df, campos, key):
 def colorir_colunas_consolidada(col):
     if "Lojas" in col.name:
         return ["background-color: #e8f1ff"] * len(col)
-    if "Única" in col.name:
+    if "Ãšnica" in col.name:
         return ["background-color: #fff1df"] * len(col)
     if "Geral" in col.name:
         return ["background-color: #eaf7ea"] * len(col)
@@ -1494,15 +1498,15 @@ def colorir_colunas_consolidada(col):
 
 
 def colorir_colunas_pedido(col):
-    if col.name in ["Média Giro Lojas", "Estoque Lojas"]:
+    if col.name in ["MÃ©dia Giro Lojas", "Estoque Lojas"]:
         return ["background-color: #e8f1ff"] * len(col)
-    if col.name in ["Média Giro Única", "Estoque Única"]:
+    if col.name in ["MÃ©dia Giro Ãšnica", "Estoque Ãšnica"]:
         return ["background-color: #fff1df"] * len(col)
-    if col.name in ["Média Giro Geral", "Estoque Geral"]:
+    if col.name in ["MÃ©dia Giro Geral", "Estoque Geral"]:
         return ["background-color: #eaf7ea"] * len(col)
-    if col.name in ["Saldo em Trânsito/ABERTO", "Estoque Final"]:
+    if col.name in ["Saldo em TrÃ¢nsito/ABERTO", "Estoque Final"]:
         return ["background-color: #f3e8ff; font-weight: 600"] * len(col)
-    if col.name in ["Estoque Alvo", "Sugestão Sistema", "Sugestão arredondada", "PEDIDO Final", "Valor Final do Pedido"]:
+    if col.name in ["Estoque Alvo", "SugestÃ£o Sistema", "SugestÃ£o arredondada", "PEDIDO Final", "Valor Final do Pedido"]:
         return ["background-color: #ffe8e8"] * len(col)
     return [""] * len(col)
 
@@ -1538,8 +1542,8 @@ def estilos_alerta_giro_fora_curva(row):
 
 def formatadores_para_tabela(df):
     fmt = {}
-    dinheiro = [c for c in df.columns if "Preço" in c or "Valor" in c]
-    inteiros = [c for c in df.columns if c in ["Sugestão Sistema", "Sugestão arredondada", "PEDIDO Final", "Embalagem"]]
+    dinheiro = [c for c in df.columns if "PreÃ§o" in c or "Valor" in c]
+    inteiros = [c for c in df.columns if c in ["SugestÃ£o Sistema", "SugestÃ£o arredondada", "PEDIDO Final", "Embalagem"]]
     for col in df.columns:
         if col in dinheiro:
             fmt[col] = format_moeda_br
@@ -1550,7 +1554,90 @@ def formatadores_para_tabela(df):
     return fmt
 
 
+LIMITE_CELULAS_STYLER = 18000
+LIMITE_CELULAS_EDITOR = 12000
+
+
+def usar_renderizacao_leve(df, limite_celulas=LIMITE_CELULAS_STYLER):
+    linhas = len(df) if df is not None else 0
+    colunas = len(df.columns) if df is not None else 0
+    return linhas * colunas > limite_celulas
+
+
+def assinatura_dataframe_colunas(df, colunas):
+    if df is None or df.empty:
+        return 'vazio'
+    colunas_existentes = [col for col in colunas if col in df.columns]
+    if not colunas_existentes:
+        return f'linhas={len(df)}'
+    base = df[colunas_existentes].copy()
+    base = base.astype(str).fillna('')
+    digest = hashlib.md5(pd.util.hash_pandas_object(base, index=False).values.tobytes()).hexdigest()
+    return f'linhas={len(df)}|cols={len(colunas_existentes)}|hash={digest}'
+
+
+def column_config_tabela(df, fixar_colunas=True):
+    config = {}
+    if fixar_colunas:
+        if "codigo" in df.columns:
+            config["codigo"] = st.column_config.TextColumn("CÃƒÂ³digo", width="small", pinned=True)
+        if "descricao" in df.columns:
+            config["descricao"] = st.column_config.TextColumn("DescriÃƒÂ§ÃƒÂ£o", width="large", pinned=True)
+    if "CÃƒÂ³digo FÃƒÂ¡brica" in df.columns:
+        config["CÃƒÂ³digo FÃƒÂ¡brica"] = st.column_config.TextColumn("CÃƒÂ³digo FÃƒÂ¡brica", width="medium")
+
+    for col in df.columns:
+        if col in config:
+            continue
+        if "PreÃƒÂ§o" in col or "Valor" in col:
+            config[col] = st.column_config.NumberColumn(col, format="R$ %.2f")
+        elif col in ["SugestÃƒÂ£o Sistema", "SugestÃƒÂ£o arredondada", "PEDIDO Final", "Embalagem"]:
+            config[col] = st.column_config.NumberColumn(col, format="%d")
+        elif pd.api.types.is_numeric_dtype(df[col]):
+            config[col] = st.column_config.NumberColumn(col, format="%.1f")
+    return config
+
+
+def column_config_tabela(df, fixar_colunas=True):
+    config = {}
+    if fixar_colunas:
+        if "codigo" in df.columns:
+            config["codigo"] = st.column_config.TextColumn("Codigo", width="small", pinned=True)
+        if "descricao" in df.columns:
+            config["descricao"] = st.column_config.TextColumn("Descricao", width="large", pinned=True)
+
+    coluna_fabrica = next((col for col in df.columns if "brica" in str(col)), None)
+    if coluna_fabrica:
+        config[coluna_fabrica] = st.column_config.TextColumn("Codigo Fabrica", width="medium")
+
+    for col in df.columns:
+        col_txt = str(col)
+        if col in config:
+            continue
+        if "Pre" in col_txt or "Valor" in col_txt:
+            config[col] = st.column_config.NumberColumn(col, format="R$ %.2f")
+        elif "Sugest" in col_txt or col in ["PEDIDO Final", "Embalagem"]:
+            config[col] = st.column_config.NumberColumn(col, format="%d")
+        elif pd.api.types.is_numeric_dtype(df[col]):
+            config[col] = st.column_config.NumberColumn(col, format="%.1f")
+    return config
+
+
 def render_tabela_interativa_colorida(df, height=650):
+    if usar_renderizacao_leve(df):
+        st.caption(
+            "Modo rÃƒÂ¡pido ativado para muitos meses/itens. "
+            "A tabela fica completa, mas sem pintura cÃƒÂ©lula a cÃƒÂ©lula para evitar queda do Streamlit."
+        )
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            height=height,
+            column_config=column_config_tabela(df),
+        )
+        return
+
     styled = df.style.apply(colorir_colunas_consolidada, axis=0).apply(estilos_alerta_giro_fora_curva, axis=1).format(formatadores_para_tabela(df))
     st.dataframe(
         styled,
@@ -1558,10 +1645,35 @@ def render_tabela_interativa_colorida(df, height=650):
         hide_index=True,
         height=height,
         column_config={
-            "codigo": st.column_config.TextColumn("Código", width="small", pinned=True),
-            "descricao": st.column_config.TextColumn("Descrição", width="large", pinned=True),
-            "Código Fábrica": st.column_config.TextColumn("Código Fábrica", width="medium"),
+            "codigo": st.column_config.TextColumn("CÃ³digo", width="small", pinned=True),
+            "descricao": st.column_config.TextColumn("DescriÃ§Ã£o", width="large", pinned=True),
+            "CÃ³digo FÃ¡brica": st.column_config.TextColumn("CÃ³digo FÃ¡brica", width="medium"),
         },
+    )
+
+
+def render_tabela_interativa_colorida(df, height=650):
+    if usar_renderizacao_leve(df):
+        st.caption(
+            "Modo rapido ativado para muitos meses/itens. "
+            "A tabela fica completa, mas sem pintura celula a celula para evitar queda do Streamlit."
+        )
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            height=height,
+            column_config=column_config_tabela(df),
+        )
+        return
+
+    styled = df.style.apply(colorir_colunas_consolidada, axis=0).apply(estilos_alerta_giro_fora_curva, axis=1).format(formatadores_para_tabela(df))
+    st.dataframe(
+        styled,
+        use_container_width=True,
+        hide_index=True,
+        height=height,
+        column_config=column_config_tabela(df),
     )
 
 
@@ -1595,10 +1707,10 @@ def google_mensagem_configuracao():
             "google-api-python-client, google-auth e google-auth-httplib2."
         )
     return (
-        "Configure o OAuth 2.0 da conta dona do Drive em st.secrets, na seção "
+        "Configure o OAuth 2.0 da conta dona do Drive em st.secrets, na seÃ§Ã£o "
         "[google_oauth_user], com client_id, client_secret, refresh_token e token_uri. "
         "A conta autorizada deve ser gdautotintas@gmail.com. Enquanto o refresh_token "
-        "não estiver configurado, o app não consegue criar planilhas no Drive."
+        "nÃ£o estiver configurado, o app nÃ£o consegue criar planilhas no Drive."
     )
 
 
@@ -1803,10 +1915,10 @@ def google_get_resources_cached(_cache_key):
     Recursos fixos do Drive/Sheets.
 
     Importante:
-    - Não cria novas pastas nem planilhas centrais aqui.
-    - Isso evita o erro storageQuotaExceeded da conta de serviço ao tentar criar
+    - NÃ£o cria novas pastas nem planilhas centrais aqui.
+    - Isso evita o erro storageQuotaExceeded da conta de serviÃ§o ao tentar criar
       arquivos nativos do Google Sheets no Meu Drive.
-    - Os pedidos são gerados do zero pelo código, sem copiar planilha modelo.
+    - Os pedidos sÃ£o gerados do zero pelo cÃ³digo, sem copiar planilha modelo.
     """
     google_get_services()
     return {
@@ -1856,15 +1968,15 @@ def google_listar_planilhas_pasta(drive_service, folder_id):
     return arquivos
 
 
-def google_controle_padrao(status="Em edição", criado_por="", criado_em="", fornecedor="", valor="", pedido_id="", observacao=""):
+def google_controle_padrao(status="Em ediÃ§Ã£o", criado_por="", criado_em="", fornecedor="", valor="", pedido_id="", observacao=""):
     return pd.DataFrame([
         {"Campo": "Status", "Valor": status},
         {"Campo": "Criado por", "Valor": criado_por},
         {"Campo": "Criado em", "Valor": criado_em},
-        {"Campo": "Última alteração", "Valor": datetime.now().strftime("%d/%m/%Y %H:%M")},
+        {"Campo": "Ãšltima alteraÃ§Ã£o", "Valor": datetime.now().strftime("%d/%m/%Y %H:%M")},
         {"Campo": "Aprovado por", "Valor": ""},
         {"Campo": "Aprovado em", "Valor": ""},
-        {"Campo": "Observação", "Valor": observacao},
+        {"Campo": "ObservaÃ§Ã£o", "Valor": observacao},
         {"Campo": "Fornecedor", "Valor": fornecedor},
         {"Campo": "Valor do Pedido", "Valor": valor},
         {"Campo": "ID Pedido", "Valor": pedido_id},
@@ -1879,7 +1991,7 @@ def google_normalizar_chave_controle(valor):
 
 
 def google_ler_controle_pedido(spreadsheet_id):
-    """Lê a aba Controle. Aceita layout Campo/Valor ou layout antigo por cabeçalhos."""
+    """LÃª a aba Controle. Aceita layout Campo/Valor ou layout antigo por cabeÃ§alhos."""
     _, sheets_service, _ = google_get_services()
     try:
         df = google_read_df(sheets_service, spreadsheet_id, "Controle")
@@ -1916,7 +2028,7 @@ def google_escrever_controle_pedido(spreadsheet_id, **kwargs):
     _, sheets_service, _ = google_get_services()
     atual = google_ler_controle_pedido(spreadsheet_id)
     mapa = {
-        "status": kwargs.get("status", atual.get("status", "Em edição")),
+        "status": kwargs.get("status", atual.get("status", "Em ediÃ§Ã£o")),
         "criado_por": kwargs.get("criado_por", atual.get("criado_por", "")),
         "criado_em": kwargs.get("criado_em", atual.get("criado_em", "")),
         "ultima_alteracao": datetime.now().strftime("%d/%m/%Y %H:%M"),
@@ -1931,10 +2043,10 @@ def google_escrever_controle_pedido(spreadsheet_id, **kwargs):
         {"Campo": "Status", "Valor": mapa["status"]},
         {"Campo": "Criado por", "Valor": mapa["criado_por"]},
         {"Campo": "Criado em", "Valor": mapa["criado_em"]},
-        {"Campo": "Última alteração", "Valor": mapa["ultima_alteracao"]},
+        {"Campo": "Ãšltima alteraÃ§Ã£o", "Valor": mapa["ultima_alteracao"]},
         {"Campo": "Aprovado por", "Valor": mapa["aprovado_por"]},
         {"Campo": "Aprovado em", "Valor": mapa["aprovado_em"]},
-        {"Campo": "Observação", "Valor": mapa["observacao"]},
+        {"Campo": "ObservaÃ§Ã£o", "Valor": mapa["observacao"]},
         {"Campo": "Fornecedor", "Valor": mapa["fornecedor"]},
         {"Campo": "Valor do Pedido", "Valor": mapa["valor_do_pedido"]},
         {"Campo": "ID Pedido", "Valor": mapa["id_pedido"]},
@@ -1944,10 +2056,10 @@ def google_escrever_controle_pedido(spreadsheet_id, **kwargs):
 
 def google_enviar_email_aprovadores(nome_pedido, fornecedor, valor, link_pedido, criado_por=""):
     """Envia e-mail aos aprovadores via Gmail API usando o OAuth configurado."""
-    assunto = f"Novo pedido aguardando aprovação - {fornecedor or nome_pedido}"
-    corpo = f"""Olá,
+    assunto = f"Novo pedido aguardando aprovaÃ§Ã£o - {fornecedor or nome_pedido}"
+    corpo = f"""OlÃ¡,
 
-Um novo pedido foi gerado e está aguardando aprovação.
+Um novo pedido foi gerado e estÃ¡ aguardando aprovaÃ§Ã£o.
 
 Pedido: {nome_pedido}
 Fornecedor: {fornecedor}
@@ -1973,17 +2085,17 @@ Sistema de Pedidos
         gmail_service.users().messages().send(userId="me", body={"raw": raw}).execute()
         return True, "E-mail enviado aos aprovadores."
     except Exception as e:
-        return False, f"Pedido criado, mas não consegui enviar e-mail pela Gmail API: {e}"
+        return False, f"Pedido criado, mas nÃ£o consegui enviar e-mail pela Gmail API: {e}"
 
 
 def google_criar_spreadsheet_do_zero(drive_service, sheets_service, titulo, folder_id):
     """
     Cria uma planilha Google Sheets do zero, sem usar files().copy().
 
-    Motivo: copiar uma planilha modelo com conta de serviço pode fazer o Google
-    tentar atribuir a cópia à cota da própria conta de serviço, gerando
-    storageQuotaExceeded. Aqui a planilha é criada vazia e depois estruturada
-    pelo código.
+    Motivo: copiar uma planilha modelo com conta de serviÃ§o pode fazer o Google
+    tentar atribuir a cÃ³pia Ã  cota da prÃ³pria conta de serviÃ§o, gerando
+    storageQuotaExceeded. Aqui a planilha Ã© criada vazia e depois estruturada
+    pelo cÃ³digo.
     """
     ultimo_erro = None
 
@@ -2011,7 +2123,7 @@ def google_criar_spreadsheet_do_zero(drive_service, sheets_service, titulo, fold
         ).execute()
         spreadsheet_id = criado["spreadsheetId"]
 
-        # Move para a pasta de aprovação. Se a planilha nasceu em uma raiz acessível,
+        # Move para a pasta de aprovaÃ§Ã£o. Se a planilha nasceu em uma raiz acessÃ­vel,
         # remove os pais atuais e adiciona a pasta correta.
         arquivo = drive_service.files().get(
             fileId=spreadsheet_id,
@@ -2029,9 +2141,9 @@ def google_criar_spreadsheet_do_zero(drive_service, sheets_service, titulo, fold
         return spreadsheet_id, google_link_planilha(spreadsheet_id)
     except Exception as e2:
         raise RuntimeError(
-            "Não consegui criar a planilha do pedido no Google Sheets. "
-            "O código já foi ajustado para NÃO copiar modelo e gerar a planilha do zero. "
-            "Se este erro continuar, a conta de serviço está impedida pelo Google de criar "
+            "NÃ£o consegui criar a planilha do pedido no Google Sheets. "
+            "O cÃ³digo jÃ¡ foi ajustado para NÃƒO copiar modelo e gerar a planilha do zero. "
+            "Se este erro continuar, a conta de serviÃ§o estÃ¡ impedida pelo Google de criar "
             "arquivos nativos do Google Sheets em Meu Drive. Nesse caso, use OAuth da conta "
             "dona da pasta ou um Drive Compartilhado do Google Workspace. "
             f"Erro Drive API: {ultimo_erro} | Erro Sheets API: {e2}"
@@ -2057,12 +2169,12 @@ def google_remover_abas_padrao(sheets_service, spreadsheet_id, abas_manter):
                 body={"requests": requests},
             ).execute()
     except Exception:
-        # Não trava o fluxo por causa de uma aba padrão extra.
+        # NÃ£o trava o fluxo por causa de uma aba padrÃ£o extra.
         pass
 
 
 def google_formatar_planilha_pedido(sheets_service, spreadsheet_id, pedido_df):
-    """Aplica formatação básica e menu de status na planilha gerada do zero."""
+    """Aplica formataÃ§Ã£o bÃ¡sica e menu de status na planilha gerada do zero."""
     meta = sheets_service.spreadsheets().get(
         spreadsheetId=spreadsheet_id,
         fields="sheets(properties(sheetId,title))",
@@ -2115,8 +2227,8 @@ def google_formatar_planilha_pedido(sheets_service, spreadsheet_id, pedido_df):
                     "condition": {
                         "type": "ONE_OF_LIST",
                         "values": [
-                            {"userEnteredValue": "Em edição"},
-                            {"userEnteredValue": "Aguardando aprovação"},
+                            {"userEnteredValue": "Em ediÃ§Ã£o"},
+                            {"userEnteredValue": "Aguardando aprovaÃ§Ã£o"},
                             {"userEnteredValue": "Aprovado"},
                             {"userEnteredValue": "Reprovado"},
                             {"userEnteredValue": "Finalizado"},
@@ -2138,7 +2250,7 @@ def google_formatar_planilha_pedido(sheets_service, spreadsheet_id, pedido_df):
                 body={"requests": requests},
             ).execute()
         except Exception:
-            # Formatação não deve impedir a criação do pedido.
+            # FormataÃ§Ã£o nÃ£o deve impedir a criaÃ§Ã£o do pedido.
             pass
 
 
@@ -2157,7 +2269,7 @@ def google_criar_planilha_pedido(nome_pedido, fornecedor, pedido_df, criado_por=
     valor = totalizar_valor_pedido(df_export)
     agora = datetime.now().strftime("%d/%m/%Y %H:%M")
 
-    # Cria a planilha do zero. Não usa files().copy() nem planilha modelo.
+    # Cria a planilha do zero. NÃ£o usa files().copy() nem planilha modelo.
     spreadsheet_id, link = google_criar_spreadsheet_do_zero(
         drive_service,
         sheets_service,
@@ -2168,7 +2280,7 @@ def google_criar_planilha_pedido(nome_pedido, fornecedor, pedido_df, criado_por=
     google_write_df(sheets_service, spreadsheet_id, "Pedido", df_export)
     google_escrever_controle_pedido(
         spreadsheet_id,
-        status="Aguardando aprovação",
+        status="Aguardando aprovaÃ§Ã£o",
         criado_por=criado_por,
         criado_em=agora,
         fornecedor=fornecedor_limpo,
@@ -2194,7 +2306,7 @@ def google_criar_planilha_pedido(nome_pedido, fornecedor, pedido_df, criado_por=
 def google_exportar_pedido_sheets_simples(nome_pedido, fornecedor, pedido_df, criado_por=""):
     """
     Exporta o pedido de compra diretamente para uma nova planilha Google Sheets
-    na pasta de aprovação configurada, sem gerar Excel e sem depender do envio de e-mail.
+    na pasta de aprovaÃ§Ã£o configurada, sem gerar Excel e sem depender do envio de e-mail.
     """
     drive_service, sheets_service, _ = google_get_services()
 
@@ -2247,7 +2359,7 @@ def google_exportar_pedido_sheets_simples(nome_pedido, fornecedor, pedido_df, cr
 
 
 # =========================================================
-# EXPORTAÇÃO VIA GOOGLE APPS SCRIPT (SEM OAUTH / SEM SERVICE ACCOUNT)
+# EXPORTAÃ‡ÃƒO VIA GOOGLE APPS SCRIPT (SEM OAUTH / SEM SERVICE ACCOUNT)
 # =========================================================
 
 def apps_script_configurado():
@@ -2261,8 +2373,8 @@ def apps_script_configurado():
 def apps_script_mensagem_configuracao():
     return (
         "Configure a URL do Web App do Google Apps Script em .streamlit/secrets.toml, "
-        "na seção [apps_script], campo web_app_url. Use a URL terminada em /exec do deploy atual. "
-        "Não precisa OAuth, refresh_token nem Service Account."
+        "na seÃ§Ã£o [apps_script], campo web_app_url. Use a URL terminada em /exec do deploy atual. "
+        "NÃ£o precisa OAuth, refresh_token nem Service Account."
     )
 
 
@@ -2276,8 +2388,8 @@ def apps_script_payload_pedido(nome_pedido, fornecedor, pedido_df, criado_por=""
 
     # IMPORTANTE:
     # Para o Google Sheets, a ordem precisa ficar sem a coluna auxiliar "zx",
-    # porque a fórmula solicitada considera:
-    # P = Preço Última Compra
+    # porque a fÃ³rmula solicitada considera:
+    # P = PreÃ§o Ãšltima Compra
     # R = PEDIDO Final
     # T = Valor Final do Pedido = R * P
     # W = Total Geral do Pedido = soma da coluna T
@@ -2294,13 +2406,13 @@ def apps_script_payload_pedido(nome_pedido, fornecedor, pedido_df, criado_por=""
         c for c in df_export.columns
         if (
             c.startswith("Giro ")
-            or c.startswith("Média ")
+            or c.startswith("MÃ©dia ")
             or c.startswith("Estoque")
-            or c.startswith("Sugestão")
+            or c.startswith("SugestÃ£o")
             or c in [
-                "Saldo em Trânsito/ABERTO",
+                "Saldo em TrÃ¢nsito/ABERTO",
                 "PEDIDO Final",
-                "Preço Última Compra",
+                "PreÃ§o Ãšltima Compra",
                 "Valor Final do Pedido",
                 "Embalagem",
             ]
@@ -2308,15 +2420,15 @@ def apps_script_payload_pedido(nome_pedido, fornecedor, pedido_df, criado_por=""
     ]
     for col in colunas_numericas:
         if col in df_export.columns:
-            if col in ["PEDIDO Final", "Sugestão Sistema", "Sugestão arredondada", "Embalagem"]:
+            if col in ["PEDIDO Final", "SugestÃ£o Sistema", "SugestÃ£o arredondada", "Embalagem"]:
                 df_export[col] = pd.to_numeric(df_export[col], errors="coerce").fillna(0).round(0).astype(int)
             else:
                 df_export[col] = df_export[col].apply(numero_planilha_para_float)
 
-    if "PEDIDO Final" in df_export.columns and "Preço Última Compra" in df_export.columns:
+    if "PEDIDO Final" in df_export.columns and "PreÃ§o Ãšltima Compra" in df_export.columns:
         df_export["Valor Final do Pedido"] = (
             pd.to_numeric(df_export["PEDIDO Final"], errors="coerce").fillna(0)
-            * pd.to_numeric(df_export["Preço Última Compra"], errors="coerce").fillna(0)
+            * pd.to_numeric(df_export["PreÃ§o Ãšltima Compra"], errors="coerce").fillna(0)
         ).round(2)
 
     # Garante que "Total Geral do Pedido" fique na coluna W apenas para o Apps Script
@@ -2331,13 +2443,13 @@ def apps_script_payload_pedido(nome_pedido, fornecedor, pedido_df, criado_por=""
 
     controle = [
         ["Campo", "Valor"],
-        ["Status", "Aguardando aprovação"],
+        ["Status", "Aguardando aprovaÃ§Ã£o"],
         ["Criado por", criado_por],
         ["Criado em", agora],
-        ["Última alteração", agora],
+        ["Ãšltima alteraÃ§Ã£o", agora],
         ["Aprovado por", ""],
         ["Aprovado em", ""],
-        ["Observação", "Pedido criado pelo Streamlit via Google Apps Script."],
+        ["ObservaÃ§Ã£o", "Pedido criado pelo Streamlit via Google Apps Script."],
         ["Fornecedor", fornecedor_limpo],
         ["Valor do Pedido", round(float(valor or 0), 2)],
         ["ID Pedido", pedido_id],
@@ -2366,7 +2478,7 @@ def apps_script_post(payload):
         raise RuntimeError(apps_script_mensagem_configuracao())
     if "/macros/s/" not in url or not url.rstrip("/").endswith("/exec"):
         raise RuntimeError(
-            "URL do Apps Script inválida. Use a URL do Web App implantado, no formato "
+            "URL do Apps Script invÃ¡lida. Use a URL do Web App implantado, no formato "
             "https://script.google.com/macros/s/SEU_DEPLOY_ID/exec"
         )
 
@@ -2388,18 +2500,18 @@ def apps_script_post(payload):
         detalhe = e.read().decode("utf-8", errors="ignore")
         if e.code == 404:
             raise RuntimeError(
-                "Apps Script retornou 404. A URL do Web App está inválida, antiga ou o deploy não foi publicado. "
-                "No Apps Script, clique em Implantar > Gerenciar implantações > copie a URL do app da web terminada em /exec "
+                "Apps Script retornou 404. A URL do Web App estÃ¡ invÃ¡lida, antiga ou o deploy nÃ£o foi publicado. "
+                "No Apps Script, clique em Implantar > Gerenciar implantaÃ§Ãµes > copie a URL do app da web terminada em /exec "
                 "e atualize o secret [apps_script].web_app_url no Streamlit."
             ) from e
         raise RuntimeError(f"Erro HTTP ao chamar o Apps Script: {e.code} - {detalhe}")
     except Exception as e:
-        raise RuntimeError(f"Não consegui chamar o Apps Script: {e}")
+        raise RuntimeError(f"NÃ£o consegui chamar o Apps Script: {e}")
 
     try:
         result = json.loads(body)
     except Exception:
-        raise RuntimeError(f"Resposta inválida do Apps Script: {body[:500]}")
+        raise RuntimeError(f"Resposta invÃ¡lida do Apps Script: {body[:500]}")
 
     if not result.get("ok"):
         raise RuntimeError(result.get("error") or result.get("message") or "Apps Script retornou erro desconhecido.")
@@ -2449,7 +2561,7 @@ def google_listar_pedidos():
     drive_service, _, _ = google_get_services()
     linhas = []
     for arq in google_listar_planilhas_pasta(drive_service, GOOGLE_PASTA_APROVACAO_ID):
-        linhas.append(google_linha_pedido_por_arquivo(arq, "Aguardando aprovação"))
+        linhas.append(google_linha_pedido_por_arquivo(arq, "Aguardando aprovaÃ§Ã£o"))
     for arq in google_listar_planilhas_pasta(drive_service, GOOGLE_PASTA_APROVADOS_ID):
         linhas.append(google_linha_pedido_por_arquivo(arq, "Aprovado"))
     df = pd.DataFrame(linhas)
@@ -2549,8 +2661,8 @@ def google_upload_bytes(nome_arquivo, dados, mime_type, folder_id):
 
 
 def google_registrar_acompanhamento(pedido_info):
-    # Nesta versão, o acompanhamento principal é feito pela leitura das próprias
-    # planilhas nas pastas de aprovação/aprovados. Mantido por compatibilidade.
+    # Nesta versÃ£o, o acompanhamento principal Ã© feito pela leitura das prÃ³prias
+    # planilhas nas pastas de aprovaÃ§Ã£o/aprovados. Mantido por compatibilidade.
     return None
 
 
@@ -2589,17 +2701,17 @@ def google_finalizar_pedido(pedido_id, df_tratamento, usuario=""):
 
 def gerar_excel_pedido_editavel(df):
     """
-    Gera uma planilha Excel editável do pedido.
+    Gera uma planilha Excel editÃ¡vel do pedido.
     Recursos aplicados:
-    - Valor Final do Pedido formulado: PEDIDO Final x Preço Última Compra.
-    - Painéis congelados para facilitar navegação.
+    - Valor Final do Pedido formulado: PEDIDO Final x PreÃ§o Ãšltima Compra.
+    - PainÃ©is congelados para facilitar navegaÃ§Ã£o.
     - Coluna Total Geral do Pedido ao lado do Valor Final, pintada em amarelo.
 
-    Observação: CSV não suporta fórmulas, congelamento de painéis nem pintura de células.
-    Por isso este download é gerado em .xlsx.
+    ObservaÃ§Ã£o: CSV nÃ£o suporta fÃ³rmulas, congelamento de painÃ©is nem pintura de cÃ©lulas.
+    Por isso este download Ã© gerado em .xlsx.
     """
     if Workbook is None:
-        raise RuntimeError("A biblioteca openpyxl não está instalada. Rode: python -m pip install openpyxl")
+        raise RuntimeError("A biblioteca openpyxl nÃ£o estÃ¡ instalada. Rode: python -m pip install openpyxl")
 
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
@@ -2623,7 +2735,7 @@ def gerar_excel_pedido_editavel(df):
 
     wb = Workbook()
     ws = wb.active
-    ws.title = "Pedido Editável"
+    ws.title = "Pedido EditÃ¡vel"
 
     header_fill = PatternFill("solid", fgColor="D9EAF7")
     total_fill = PatternFill("solid", fgColor="FFF2CC")
@@ -2638,7 +2750,7 @@ def gerar_excel_pedido_editavel(df):
         cell.border = border
 
     idx_pedido = df_export.columns.get_loc("PEDIDO Final") + 1 if "PEDIDO Final" in df_export.columns else None
-    idx_preco = df_export.columns.get_loc("Preço Última Compra") + 1 if "Preço Última Compra" in df_export.columns else None
+    idx_preco = df_export.columns.get_loc("PreÃ§o Ãšltima Compra") + 1 if "PreÃ§o Ãšltima Compra" in df_export.columns else None
     idx_valor = df_export.columns.get_loc("Valor Final do Pedido") + 1 if "Valor Final do Pedido" in df_export.columns else None
     idx_total = df_export.columns.get_loc("Total Geral do Pedido") + 1
 
@@ -2658,9 +2770,9 @@ def gerar_excel_pedido_editavel(df):
 
             if col_name == "Total Geral do Pedido":
                 cell.fill = total_fill
-            if col_name in ["Preço Última Compra", "Valor Final do Pedido", "Total Geral do Pedido"]:
+            if col_name in ["PreÃ§o Ãšltima Compra", "Valor Final do Pedido", "Total Geral do Pedido"]:
                 cell.number_format = 'R$ #,##0.00'
-            elif col_name in ["PEDIDO Final", "Sugestão Sistema", "Sugestão arredondada", "Embalagem"]:
+            elif col_name in ["PEDIDO Final", "SugestÃ£o Sistema", "SugestÃ£o arredondada", "Embalagem"]:
                 cell.number_format = '0'
             elif isinstance(value, (int, float)):
                 cell.number_format = '#,##0.0'
@@ -2674,7 +2786,7 @@ def gerar_excel_pedido_editavel(df):
         ws.cell(row=2, column=idx_total).font = Font(bold=True)
         ws.cell(row=2, column=idx_total).number_format = 'R$ #,##0.00'
 
-    # Congela cabeçalho e as primeiras colunas de identificação.
+    # Congela cabeÃ§alho e as primeiras colunas de identificaÃ§Ã£o.
     ws.freeze_panes = "C2"
     ws.auto_filter.ref = ws.dimensions
 
@@ -2682,9 +2794,9 @@ def gerar_excel_pedido_editavel(df):
         letter = get_column_letter(col_idx)
         if col_name == "descricao":
             ws.column_dimensions[letter].width = 42
-        elif col_name in ["Código Fábrica", "Data Última Compra", "Origem Sugestão"]:
+        elif col_name in ["CÃ³digo FÃ¡brica", "Data Ãšltima Compra", "Origem SugestÃ£o"]:
             ws.column_dimensions[letter].width = 18
-        elif col_name in ["Valor Final do Pedido", "Total Geral do Pedido", "Preço Última Compra"]:
+        elif col_name in ["Valor Final do Pedido", "Total Geral do Pedido", "PreÃ§o Ãšltima Compra"]:
             ws.column_dimensions[letter].width = 20
         else:
             ws.column_dimensions[letter].width = max(12, min(22, len(str(col_name)) + 2))
@@ -2697,16 +2809,16 @@ def gerar_excel_pedido_editavel(df):
 
 def gerar_copia_fornecedor_csv(df):
     if df is None or df.empty:
-        fornecedor = pd.DataFrame(columns=["Código Fábrica", "Descrição", "Quantidade"])
+        fornecedor = pd.DataFrame(columns=["CÃ³digo FÃ¡brica", "DescriÃ§Ã£o", "Quantidade"])
     else:
         fornecedor = df.copy()
         fornecedor["PEDIDO Final"] = pd.to_numeric(fornecedor.get("PEDIDO Final", 0), errors="coerce").fillna(0).round(0).astype(int)
         fornecedor = fornecedor[fornecedor["PEDIDO Final"] > 0].copy()
-        for col in ["Código Fábrica", "descricao"]:
+        for col in ["CÃ³digo FÃ¡brica", "descricao"]:
             if col not in fornecedor.columns:
                 fornecedor[col] = ""
-        fornecedor = fornecedor[["Código Fábrica", "descricao", "PEDIDO Final"]].rename(columns={
-            "descricao": "Descrição",
+        fornecedor = fornecedor[["CÃ³digo FÃ¡brica", "descricao", "PEDIDO Final"]].rename(columns={
+            "descricao": "DescriÃ§Ã£o",
             "PEDIDO Final": "Quantidade",
         })
     return fornecedor.to_csv(index=False, sep=";", decimal=",", encoding="utf-8-sig").encode("utf-8-sig")
@@ -2714,13 +2826,13 @@ def gerar_copia_fornecedor_csv(df):
 
 def gerar_excel_pedido(df_pedido):
     """
-    Excel para importação no Autcom, sem cabeçalho:
-    Coluna B = código
+    Excel para importaÃ§Ã£o no Autcom, sem cabeÃ§alho:
+    Coluna B = cÃ³digo
     Coluna F = quantidade
-    Coluna H = valor unitário
+    Coluna H = valor unitÃ¡rio
     """
     if Workbook is None:
-        raise RuntimeError("A biblioteca openpyxl não está instalada. Rode: python -m pip install openpyxl")
+        raise RuntimeError("A biblioteca openpyxl nÃ£o estÃ¡ instalada. Rode: python -m pip install openpyxl")
 
     wb = Workbook()
     ws = wb.active
@@ -2733,7 +2845,7 @@ def gerar_excel_pedido(df_pedido):
             continue
         ws.cell(row=linha_excel, column=2, value=str(row.get("codigo", "")).zfill(5))
         ws.cell(row=linha_excel, column=6, value=qtd)
-        ws.cell(row=linha_excel, column=8, value=round(float(str(row.get("Preço Última Compra", 0)).replace(",", "." ) or 0), 2))
+        ws.cell(row=linha_excel, column=8, value=round(float(str(row.get("PreÃ§o Ãšltima Compra", 0)).replace(",", "." ) or 0), 2))
         linha_excel += 1
 
     output = BytesIO()
@@ -2745,7 +2857,7 @@ def gerar_excel_pedido(df_pedido):
 
 def ler_planilha_tratamento_pedido(uploaded_file):
     """
-    Lê a planilha final editável enviada pelo usuário na página Tratamento de Pedido Final.
+    LÃª a planilha final editÃ¡vel enviada pelo usuÃ¡rio na pÃ¡gina Tratamento de Pedido Final.
     Aceita .xlsx, .xls e .csv.
     """
     if uploaded_file is None:
@@ -2793,7 +2905,7 @@ def ler_planilha_tratamento_pedido(uploaded_file):
             ultimo_erro = str(e)
             continue
 
-    raise RuntimeError(f"Não consegui ler a planilha enviada. Último erro: {ultimo_erro}")
+    raise RuntimeError(f"NÃ£o consegui ler a planilha enviada. Ãšltimo erro: {ultimo_erro}")
 
 
 def extrair_google_sheet_id_e_gid(link):
@@ -2895,8 +3007,8 @@ def detectar_linha_cabecalho_pedido(df_raw, max_linhas=50):
     melhor_score = -1
 
     termos_fortes = [
-        "CODIGO", "CÓDIGO", "DESCRICAO", "DESCRIÇÃO", "PEDIDO FINAL",
-        "PREÇO ÚLTIMA COMPRA", "PRECO ULTIMA COMPRA", "DATA ÚLTIMA COMPRA",
+        "CODIGO", "CÃ“DIGO", "DESCRICAO", "DESCRIÃ‡ÃƒO", "PEDIDO FINAL",
+        "PREÃ‡O ÃšLTIMA COMPRA", "PRECO ULTIMA COMPRA", "DATA ÃšLTIMA COMPRA",
         "DATA ULTIMA COMPRA", "VALOR FINAL DO PEDIDO",
     ]
 
@@ -2906,10 +3018,10 @@ def detectar_linha_cabecalho_pedido(df_raw, max_linhas=50):
         if not norm:
             continue
 
-        tem_descricao = any(v in ["DESCRICAO", "DESCRIÇÃO"] for v in norm)
-        tem_codigo = any(v in ["CODIGO", "CÓDIGO", "ZX"] for v in norm)
+        tem_descricao = any(v in ["DESCRICAO", "DESCRIÃ‡ÃƒO"] for v in norm)
+        tem_codigo = any(v in ["CODIGO", "CÃ“DIGO", "ZX"] for v in norm)
         tem_pedido = "PEDIDO FINAL" in norm
-        tem_preco = any(v in ["PREÇO ÚLTIMA COMPRA", "PRECO ULTIMA COMPRA"] for v in norm)
+        tem_preco = any(v in ["PREÃ‡O ÃšLTIMA COMPRA", "PRECO ULTIMA COMPRA"] for v in norm)
         score = sum(1 for termo in termos_fortes if termo in norm)
 
         if tem_descricao and (tem_codigo or tem_pedido or tem_preco):
@@ -3051,23 +3163,23 @@ def ler_pedido_unica_comparativo_google_sheets(link):
 
 def gerar_excel_autcom_tratamento(df_tratamento):
     """
-    Gera o Excel para importação no Autcom a partir da planilha de Tratamento de Pedido Final.
-    Sem cabeçalho:
-    - Coluna B = código da coluna zx
+    Gera o Excel para importaÃ§Ã£o no Autcom a partir da planilha de Tratamento de Pedido Final.
+    Sem cabeÃ§alho:
+    - Coluna B = cÃ³digo da coluna zx
     - Coluna F = quantidade da coluna PEDIDO Final
-    - Coluna H = preço da coluna Preço Última Compra
+    - Coluna H = preÃ§o da coluna PreÃ§o Ãšltima Compra
     """
     if Workbook is None:
-        raise RuntimeError("A biblioteca openpyxl não está instalada. Rode: python -m pip install openpyxl")
+        raise RuntimeError("A biblioteca openpyxl nÃ£o estÃ¡ instalada. Rode: python -m pip install openpyxl")
 
     df = aplicar_cabecalho_pedido_unica_sheets(df_tratamento)
     df.columns = [str(c).strip() for c in df.columns]
 
     colunas_norm = {normalizar_coluna(c): c for c in df.columns}
 
-    col_codigo = colunas_norm.get("ZX") or colunas_norm.get("CODIGO") or colunas_norm.get("CÓDIGO")
+    col_codigo = colunas_norm.get("ZX") or colunas_norm.get("CODIGO") or colunas_norm.get("CÃ“DIGO")
     col_qtd = colunas_norm.get("PEDIDO FINAL")
-    col_preco = colunas_norm.get("PREÇO ÚLTIMA COMPRA") or colunas_norm.get("PRECO ULTIMA COMPRA")
+    col_preco = colunas_norm.get("PREÃ‡O ÃšLTIMA COMPRA") or colunas_norm.get("PRECO ULTIMA COMPRA")
 
     faltantes = []
     if not col_codigo:
@@ -3075,10 +3187,10 @@ def gerar_excel_autcom_tratamento(df_tratamento):
     if not col_qtd:
         faltantes.append("PEDIDO Final")
     if not col_preco:
-        faltantes.append("Preço Última Compra")
+        faltantes.append("PreÃ§o Ãšltima Compra")
 
     if faltantes:
-        raise ValueError("A planilha enviada não possui as colunas obrigatórias: " + ", ".join(faltantes))
+        raise ValueError("A planilha enviada nÃ£o possui as colunas obrigatÃ³rias: " + ", ".join(faltantes))
 
     wb = Workbook()
     ws = wb.active
@@ -3124,18 +3236,18 @@ def gerar_excel_fornecedor_tratamento(df_tratamento):
     A = codigo, B = descricao, C = Codigo de fabrica, D = quantidade.
     """
     if Workbook is None:
-        raise RuntimeError("A biblioteca openpyxl não está instalada. Rode: python -m pip install openpyxl")
+        raise RuntimeError("A biblioteca openpyxl nÃ£o estÃ¡ instalada. Rode: python -m pip install openpyxl")
 
     df = aplicar_cabecalho_pedido_unica_sheets(df_tratamento)
     df.columns = [str(c).strip() for c in df.columns]
     colunas_norm = {normalizar_coluna(c): c for c in df.columns}
 
-    col_codigo = colunas_norm.get("ZX") or colunas_norm.get("CODIGO") or colunas_norm.get("CÓDIGO")
-    col_descricao = colunas_norm.get("DESCRICAO") or colunas_norm.get("DESCRIÇÃO") or colunas_norm.get("DESCRICAO DO ITEM") or colunas_norm.get("DESCRIÇÃO DO ITEM")
+    col_codigo = colunas_norm.get("ZX") or colunas_norm.get("CODIGO") or colunas_norm.get("CÃ“DIGO")
+    col_descricao = colunas_norm.get("DESCRICAO") or colunas_norm.get("DESCRIÃ‡ÃƒO") or colunas_norm.get("DESCRICAO DO ITEM") or colunas_norm.get("DESCRIÃ‡ÃƒO DO ITEM")
     col_fabrica = (
-        colunas_norm.get("CÓDIGO FÁBRICA") or colunas_norm.get("CODIGO FABRICA") or
-        colunas_norm.get("CÓD. FÁBRICA") or colunas_norm.get("COD. FABRICA") or
-        colunas_norm.get("CÓDIGO DE FÁBRICA") or colunas_norm.get("CODIGO DE FABRICA")
+        colunas_norm.get("CÃ“DIGO FÃBRICA") or colunas_norm.get("CODIGO FABRICA") or
+        colunas_norm.get("CÃ“D. FÃBRICA") or colunas_norm.get("COD. FABRICA") or
+        colunas_norm.get("CÃ“DIGO DE FÃBRICA") or colunas_norm.get("CODIGO DE FABRICA")
     )
     col_qtd = colunas_norm.get("PEDIDO FINAL") or colunas_norm.get("QUANTIDADE") or colunas_norm.get("QTD") or colunas_norm.get("QTDE")
 
@@ -3145,16 +3257,16 @@ def gerar_excel_fornecedor_tratamento(df_tratamento):
     if not col_descricao:
         faltantes.append("descricao")
     if not col_fabrica:
-        faltantes.append("Código Fábrica")
+        faltantes.append("CÃ³digo FÃ¡brica")
     if not col_qtd:
         faltantes.append("PEDIDO Final/Quantidade")
     if faltantes:
-        raise ValueError("A planilha enviada não possui as colunas obrigatórias para fornecedor: " + ", ".join(faltantes))
+        raise ValueError("A planilha enviada nÃ£o possui as colunas obrigatÃ³rias para fornecedor: " + ", ".join(faltantes))
 
     wb = Workbook()
     ws = wb.active
     ws.title = "Fornecedor"
-    ws.append(["Código", "Descrição", "Código de Fábrica", "Quantidade"])
+    ws.append(["CÃ³digo", "DescriÃ§Ã£o", "CÃ³digo de FÃ¡brica", "Quantidade"])
 
     for _, row in df.iterrows():
         qtd = numero_planilha_para_float(row.get(col_qtd, 0))
@@ -3233,8 +3345,8 @@ def _serie_parece_quantidade(series):
     qtd_positivos = sum(1 for n in numericos if n > 0)
     qtd_inteiros = sum(1 for n in numericos if abs(n - round(n)) < 0.0001)
 
-    # Proteção: código de fábrica/EAN/produto costuma ser uma sequência inteira longa.
-    # Quantidade real geralmente é pequena/média e não deve ter maioria de valores com 6+ dígitos.
+    # ProteÃ§Ã£o: cÃ³digo de fÃ¡brica/EAN/produto costuma ser uma sequÃªncia inteira longa.
+    # Quantidade real geralmente Ã© pequena/mÃ©dia e nÃ£o deve ter maioria de valores com 6+ dÃ­gitos.
     qtd_codigos_longos = 0
     for v in valores:
         bruto = re.sub(r"\D+", "", str(v or ""))
@@ -3279,16 +3391,16 @@ def corrigir_desalinhamento_menu_pedido(df):
     col_embalagem_real = colunas[idx_pedido + 4] if idx_pedido + 4 < len(colunas) else None
     col_fabrica_real = colunas[idx_pedido + 5] if idx_pedido + 5 < len(colunas) else None
 
-    df["Data Última Compra"] = df[col_data_real]
+    df["Data Ãšltima Compra"] = df[col_data_real]
     df["PEDIDO Final"] = df[col_pedido_real]
     if col_origem_real is not None:
-        df["Origem Sugestão"] = df[col_origem_real]
+        df["Origem SugestÃ£o"] = df[col_origem_real]
     if col_valor_real is not None:
         df["Valor Final do Pedido"] = df[col_valor_real]
     if col_embalagem_real is not None:
         df["Embalagem"] = df[col_embalagem_real]
     if col_fabrica_real is not None:
-        df["Código Fábrica"] = df[col_fabrica_real]
+        df["CÃ³digo FÃ¡brica"] = df[col_fabrica_real]
 
     return df
 
@@ -3299,22 +3411,22 @@ CABECALHO_PEDIDO_UNICA_SHEETS = [
     "Giro Geral Abr/26",
     "Giro Geral Mai/26",
     "Giro Geral Jun/26",
-    "Média Giro Geral",
+    "MÃ©dia Giro Geral",
     "Estoque Lojas",
-    "Estoque Única",
+    "Estoque Ãšnica",
     "Estoque Geral",
-    "Saldo em Trânsito/ABERTO",
+    "Saldo em TrÃ¢nsito/ABERTO",
     "Estoque Final",
     "Estoque Alvo",
-    "Sugestão Sistema",
-    "Sugestão arredondada",
-    "Preço Última Compra",
-    "Data Última Compra",
+    "SugestÃ£o Sistema",
+    "SugestÃ£o arredondada",
+    "PreÃ§o Ãšltima Compra",
+    "Data Ãšltima Compra",
     "PEDIDO Final",
-    "Origem Sugestão",
+    "Origem SugestÃ£o",
     "Valor Final do Pedido",
     "Embalagem",
-    "Código Fábrica",
+    "CÃ³digo FÃ¡brica",
 ]
 
 
@@ -3326,7 +3438,7 @@ def montar_cabecalho_pedido_dinamico(qtd_colunas, linha_menu=None):
     valores_menu = [str(v or "").strip() for v in (linha_menu or [])]
     origem_idx = None
     for i, valor in enumerate(valores_menu):
-        if normalizar_coluna(valor) == "ORIGEM SUGESTÃO":
+        if normalizar_coluna(valor) == "ORIGEM SUGESTÃƒO":
             origem_idx = i
             break
 
@@ -3340,22 +3452,22 @@ def montar_cabecalho_pedido_dinamico(qtd_colunas, linha_menu=None):
         "codigo",
         "descricao",
         *labels_giro,
-        "Média Giro Geral",
+        "MÃ©dia Giro Geral",
         "Estoque Lojas",
-        "Estoque Única",
+        "Estoque Ãšnica",
         "Estoque Geral",
-        "Saldo em Trânsito/ABERTO",
+        "Saldo em TrÃ¢nsito/ABERTO",
         "Estoque Final",
         "Estoque Alvo",
-        "Sugestão Sistema",
-        "Sugestão arredondada",
-        "Preço Última Compra",
-        "Data Última Compra",
+        "SugestÃ£o Sistema",
+        "SugestÃ£o arredondada",
+        "PreÃ§o Ãšltima Compra",
+        "Data Ãšltima Compra",
         "PEDIDO Final",
-        "Origem Sugestão",
+        "Origem SugestÃ£o",
         "Valor Final do Pedido",
         "Embalagem",
-        "Código Fábrica",
+        "CÃ³digo FÃ¡brica",
         "Total Geral do Pedido",
     ]
 
@@ -3373,11 +3485,11 @@ def aplicar_cabecalho_pedido_unica_sheets(df):
     colunas = [str(c or "").strip() for c in df.columns]
     colunas_norm = [normalizar_coluna(c) for c in colunas]
 
-    tem_codigo = any(c in ["CODIGO", "CÓDIGO"] for c in colunas_norm)
+    tem_codigo = any(c in ["CODIGO", "CÃ“DIGO"] for c in colunas_norm)
     tem_pedido_final = "PEDIDO FINAL" in colunas_norm
     tem_menu_parcial_sheets = (
-        any(c in ["DESCRICAO", "DESCRIÇÃO"] for c in colunas_norm)
-        and "ORIGEM SUGESTÃO" in colunas_norm
+        any(c in ["DESCRICAO", "DESCRIÃ‡ÃƒO"] for c in colunas_norm)
+        and "ORIGEM SUGESTÃƒO" in colunas_norm
         and not tem_pedido_final
     )
     qtd_sem_nome = sum(
@@ -3410,14 +3522,14 @@ def planilha_tratamento_tem_colunas_obrigatorias(df):
         return False
 
     colunas_norm = {normalizar_coluna(c): c for c in df.columns}
-    tem_codigo = any(col in colunas_norm for col in ["ZX", "CODIGO", "CÓDIGO"])
+    tem_codigo = any(col in colunas_norm for col in ["ZX", "CODIGO", "CÃ“DIGO"])
     tem_pedido_final = "PEDIDO FINAL" in colunas_norm
-    tem_preco = any(col in colunas_norm for col in ["PREÇO ÚLTIMA COMPRA", "PRECO ULTIMA COMPRA"])
+    tem_preco = any(col in colunas_norm for col in ["PREÃ‡O ÃšLTIMA COMPRA", "PRECO ULTIMA COMPRA"])
     return tem_codigo and tem_pedido_final and tem_preco
 
 
 def _normalizar_nome_coluna_flex(nome):
-    """Normaliza nome de coluna para reconhecimento flexível."""
+    """Normaliza nome de coluna para reconhecimento flexÃ­vel."""
     txt = _texto_sem_acentos(nome).upper().strip()
     txt = re.sub(r"[^A-Z0-9]+", " ", txt)
     txt = re.sub(r"\s+", " ", txt).strip()
@@ -3429,15 +3541,15 @@ def _coluna_quantidade_flexivel(df):
     Encontra coluna de quantidade mesmo quando o fornecedor usa nomes variados.
     Aceita: QTD, QTDE, QUANT, QUANT., QUANTIDADE, QTD PEDIDA, QTDE SOLICITADA,
     QTD FATURADA, QTD COMPRA, QTE, QTY, QUANTITY, VOL, VOLUME etc.
-    Evita confundir com preço, valor total, saldo, código, embalagem ou peso.
+    Evita confundir com preÃ§o, valor total, saldo, cÃ³digo, embalagem ou peso.
     """
     if df is None or df.empty:
         return None
 
     bloqueios = [
-        "PRECO", "PREÇO", "VALOR", "VL", "VLR", "UNIT", "UNITARIO", "UNITÁRIO",
-        "TOTAL", "IPI", "SUB", "ST", "COD", "CÓD", "CODIGO", "CÓDIGO",
-        "FABRICA", "FÁBRICA", "REFERENCIA", "REFERÊNCIA", "SKU", "DESCR",
+        "PRECO", "PREÃ‡O", "VALOR", "VL", "VLR", "UNIT", "UNITARIO", "UNITÃRIO",
+        "TOTAL", "IPI", "SUB", "ST", "COD", "CÃ“D", "CODIGO", "CÃ“DIGO",
+        "FABRICA", "FÃBRICA", "REFERENCIA", "REFERÃŠNCIA", "SKU", "DESCR",
         "PESO", "PES", "KIL", "LIT", "LITRO", "EMB", "EMBALAGEM",
         "ESTOQUE", "SALDO", "BAIXADO", "ABERTO", "DATA", "DT",
     ]
@@ -3460,7 +3572,7 @@ def _coluna_quantidade_flexivel(df):
             return col
 
     # 2) Depois aceita qualquer coluna que contenha uma palavra clara de quantidade,
-    # desde que não contenha termos típicos de preço, código, estoque etc.
+    # desde que nÃ£o contenha termos tÃ­picos de preÃ§o, cÃ³digo, estoque etc.
     padrao_qtd = re.compile(r"(^| )(QTD|QTDE|QTE|QTY|QUANT|QUANTIDADE|QUANTITY|VOLUME|VOL)( |$)")
     for col in df.columns:
         norm = _normalizar_nome_coluna_flex(col)
@@ -3469,8 +3581,8 @@ def _coluna_quantidade_flexivel(df):
         if padrao_qtd.search(norm) and not any(b in norm for b in bloqueios):
             return col
 
-    # 3) Caso o nome seja algo como 'QTD_PED', 'QTDE-SOLIC', 'QUANT.' já estará
-    # normalizado com espaço. Este fallback pega prefixos comuns.
+    # 3) Caso o nome seja algo como 'QTD_PED', 'QTDE-SOLIC', 'QUANT.' jÃ¡ estarÃ¡
+    # normalizado com espaÃ§o. Este fallback pega prefixos comuns.
     for col in df.columns:
         norm = _normalizar_nome_coluna_flex(col)
         compact = re.sub(r"[^A-Z0-9]+", "", norm)
@@ -3544,13 +3656,13 @@ def _texto_sem_acentos(txt):
 
 def normalizar_codigo_fabrica(valor):
     """
-    Normaliza código de fábrica para comparação entre Excel e PDF.
+    Normaliza cÃ³digo de fÃ¡brica para comparaÃ§Ã£o entre Excel e PDF.
 
-    Correção importante para PDFs de fornecedores:
-    - Alguns PDFs, como propostas Akzo/Coral, trazem o código do produto com zeros à esquerda
-      (ex.: 000000000005202143), enquanto a planilha da Única pode estar como 5202143.
-    - Para códigos puramente numéricos, remove zeros à esquerda para o relacionamento não falhar.
-    - Para códigos alfanuméricos, mantém letras/números e remove apenas pontuação/espaços.
+    CorreÃ§Ã£o importante para PDFs de fornecedores:
+    - Alguns PDFs, como propostas Akzo/Coral, trazem o cÃ³digo do produto com zeros Ã  esquerda
+      (ex.: 000000000005202143), enquanto a planilha da Ãšnica pode estar como 5202143.
+    - Para cÃ³digos puramente numÃ©ricos, remove zeros Ã  esquerda para o relacionamento nÃ£o falhar.
+    - Para cÃ³digos alfanumÃ©ricos, mantÃ©m letras/nÃºmeros e remove apenas pontuaÃ§Ã£o/espaÃ§os.
 
     Exemplos:
     - "000000000005202143" -> "5202143"
@@ -3561,8 +3673,8 @@ def normalizar_codigo_fabrica(valor):
     """
     raw = _texto_sem_acentos(valor).upper().strip()
 
-    # Quando o Excel/Sheets transforma código em número, pode chegar como 5202143.0
-    # ou 000000000005202143,0. Trata isso antes de remover pontuação.
+    # Quando o Excel/Sheets transforma cÃ³digo em nÃºmero, pode chegar como 5202143.0
+    # ou 000000000005202143,0. Trata isso antes de remover pontuaÃ§Ã£o.
     raw_sem_espaco = re.sub(r"\s+", "", raw)
     match_num_decimal_zero = re.fullmatch(r"(\d+)(?:[\.,]0+)?", raw_sem_espaco)
     if match_num_decimal_zero:
@@ -3573,8 +3685,8 @@ def normalizar_codigo_fabrica(valor):
     if txt in ["", "NAN", "NONE", "NULL", "SEM", "SNCODIGO"]:
         return ""
 
-    # PDFs de fornecedor costumam completar código numérico com zeros à esquerda.
-    # Isso quebrava o relacionamento com a planilha da Única.
+    # PDFs de fornecedor costumam completar cÃ³digo numÃ©rico com zeros Ã  esquerda.
+    # Isso quebrava o relacionamento com a planilha da Ãšnica.
     if re.fullmatch(r"\d+", txt):
         txt = txt.lstrip("0") or "0"
 
@@ -3589,7 +3701,7 @@ def normalizar_descricao_chave(valor):
 
 
 def _tokens_numericos_linha(txt):
-    """Extrai números em padrão BR/US preservando a ordem visual da linha."""
+    """Extrai nÃºmeros em padrÃ£o BR/US preservando a ordem visual da linha."""
     txt = str(txt or "")
     padrao = r"(?<![A-Z0-9])-?(?:R\$\s*)?\d{1,3}(?:\.\d{3})*(?:,\d+)?(?![A-Z0-9])|(?<![A-Z0-9])-?\d+(?:[\.,]\d+)?(?![A-Z0-9])"
     valores = []
@@ -3625,8 +3737,8 @@ def _inferir_qtd_preco_total_por_numeros(candidatos):
         if not depois:
             continue
 
-        # Em pedido de fornecedor, se aparecem unitário sem imposto e valor com imposto,
-        # o unitário sem imposto costuma ser o menor valor monetário plausível depois da quantidade.
+        # Em pedido de fornecedor, se aparecem unitÃ¡rio sem imposto e valor com imposto,
+        # o unitÃ¡rio sem imposto costuma ser o menor valor monetÃ¡rio plausÃ­vel depois da quantidade.
         for j, preco in enumerate(depois):
             if preco <= 0:
                 continue
@@ -3650,7 +3762,7 @@ def _inferir_qtd_preco_total_por_numeros(candidatos):
             if total <= 0:
                 total = total_calculado
 
-            # Prefere quantidade inteira e preços menores quando há unitário com/sem imposto.
+            # Prefere quantidade inteira e preÃ§os menores quando hÃ¡ unitÃ¡rio com/sem imposto.
             if abs(qtd - round(qtd)) < 0.0001:
                 score += 12
             if i <= 2:
@@ -3666,7 +3778,7 @@ def _inferir_qtd_preco_total_por_numeros(candidatos):
     if melhor:
         qtd, preco, total = melhor
 
-        # Segunda passada: se houver outro valor unitário menor logo após a quantidade
+        # Segunda passada: se houver outro valor unitÃ¡rio menor logo apÃ³s a quantidade
         # e antes do total, usa o menor. Ex.: qtd=1, unit=25, total c/imposto=25,90.
         try:
             idx_qtd = candidatos.index(qtd)
@@ -3692,9 +3804,9 @@ def _inferir_qtd_preco_total_por_numeros(candidatos):
 
 def _inferir_qtd_preco_total_por_linha(linha, pos_codigo=0):
     """
-    Heurística para PDFs de fornecedores com layouts variados.
-    Após encontrar o código de fábrica na linha, procura quantidade, preço unitário e total.
-    Se houver total, tenta validar pares em que qtd x preço ~= total.
+    HeurÃ­stica para PDFs de fornecedores com layouts variados.
+    ApÃ³s encontrar o cÃ³digo de fÃ¡brica na linha, procura quantidade, preÃ§o unitÃ¡rio e total.
+    Se houver total, tenta validar pares em que qtd x preÃ§o ~= total.
     """
     linha = str(linha or "")
     numeros = [(pos, bruto, val) for pos, bruto, val in _tokens_numericos_linha(linha) if pos >= max(0, pos_codigo)]
@@ -3768,10 +3880,10 @@ def extrair_itens_por_codigos_em_textos(textos, codigos_referencia=None, origem_
                 continue
             vistos.add(chave)
             registros.append({
-                "Código Fábrica": cod_original,
-                "Descrição": desc,
+                "CÃ³digo FÃ¡brica": cod_original,
+                "DescriÃ§Ã£o": desc,
                 "Quantidade": qtd,
-                "Valor Unitário": preco,
+                "Valor UnitÃ¡rio": preco,
                 "Valor Total": total if total > 0 else qtd * preco,
                 origem_linha: linha,
                 "Linha PDF": linha,
@@ -3803,8 +3915,8 @@ def dataframe_fornecedor_tem_colunas_confiaveis(df):
         return False
 
     col_codigo = _coluna_por_candidatos(df, [
-        "Código Fábrica", "Codigo Fabrica", "Código", "Codigo", "CÓDIGO", "Cód.",
-        "Cod.", "Referência", "Referencia", "SKU", "Código Produto", "Codigo Produto",
+        "CÃ³digo FÃ¡brica", "Codigo Fabrica", "CÃ³digo", "Codigo", "CÃ“DIGO", "CÃ³d.",
+        "Cod.", "ReferÃªncia", "Referencia", "SKU", "CÃ³digo Produto", "Codigo Produto",
     ])
     col_qtd = _coluna_quantidade_flexivel(df)
     col_preco = _coluna_valor_unitario_flexivel(df)
@@ -3877,7 +3989,7 @@ def extrair_itens_por_codigos_em_dataframe(df, codigos_referencia=None):
                     continue
                 if _tokens_numericos_linha(txt) and len(txt) <= 25:
                     continue
-                if re.search(r"[A-Za-zÁÉÍÓÚÃÕÇáéíóúãõç]{3,}", txt):
+                if re.search(r"[A-Za-zÃÃ‰ÃÃ“ÃšÃƒÃ•Ã‡Ã¡Ã©Ã­Ã³ÃºÃ£ÃµÃ§]{3,}", txt):
                     desc_partes.append(txt)
             desc = " ".join(desc_partes).strip()[:180] or _extrair_descricao_ao_redor_codigo(linha, cod_original)
 
@@ -3886,10 +3998,10 @@ def extrair_itens_por_codigos_em_dataframe(df, codigos_referencia=None):
                 continue
             vistos.add(chave)
             registros.append({
-                "Código Fábrica": cod_original,
-                "Descrição": desc,
+                "CÃ³digo FÃ¡brica": cod_original,
+                "DescriÃ§Ã£o": desc,
                 "Quantidade": qtd,
-                "Valor Unitário": preco,
+                "Valor UnitÃ¡rio": preco,
                 "Valor Total": total if total > 0 else qtd * preco,
                 "Linha Fornecedor": linha,
                 "Linha PDF": linha,
@@ -3900,10 +4012,10 @@ def extrair_itens_por_codigos_em_dataframe(df, codigos_referencia=None):
 
 def extrair_itens_pdf_por_codigos(uploaded_file, codigos_referencia=None):
     """
-    Lê PDF de fornecedor em vários modelos.
-    Estratégia principal: usa os códigos de fábrica do pedido da Única como âncora.
-    Assim, mesmo sem cabeçalho ou com layout diferente, o sistema busca o código no texto/tabela
-    e tenta capturar quantidade e preço unitário na mesma linha.
+    LÃª PDF de fornecedor em vÃ¡rios modelos.
+    EstratÃ©gia principal: usa os cÃ³digos de fÃ¡brica do pedido da Ãšnica como Ã¢ncora.
+    Assim, mesmo sem cabeÃ§alho ou com layout diferente, o sistema busca o cÃ³digo no texto/tabela
+    e tenta capturar quantidade e preÃ§o unitÃ¡rio na mesma linha.
     """
     referencias = _referencias_codigo_fabrica(codigos_referencia)
 
@@ -3926,7 +4038,7 @@ def extrair_itens_pdf_por_codigos(uploaded_file, codigos_referencia=None):
                 if cod_norm and cod_norm in linha_norm:
                     encontrados.append((cod_norm, cod_original))
         else:
-            # Sem referência, tenta pegar candidatos parecidos com código de fábrica.
+            # Sem referÃªncia, tenta pegar candidatos parecidos com cÃ³digo de fÃ¡brica.
             for token in re.findall(r"\b[A-Z]{0,4}\d[A-Z0-9\-\./:]{2,}\b", _texto_sem_acentos(linha).upper()):
                 cod_norm = normalizar_codigo_fabrica(token)
                 if len(cod_norm) >= 3:
@@ -3943,10 +4055,10 @@ def extrair_itens_pdf_por_codigos(uploaded_file, codigos_referencia=None):
                 continue
             vistos.add(chave_visto)
             registros.append({
-                "Código Fábrica": cod_original,
-                "Descrição": desc,
+                "CÃ³digo FÃ¡brica": cod_original,
+                "DescriÃ§Ã£o": desc,
                 "Quantidade": qtd,
-                "Valor Unitário": preco,
+                "Valor UnitÃ¡rio": preco,
                 "Valor Total": total,
                 "Linha PDF": linha,
             })
@@ -3972,8 +4084,8 @@ def _particionar_blocos_itens_pdf(texto):
                 blocos.append(atual)
             atual = [linha]
         elif atual:
-            # evita puxar rodapé/cabeçalho grande depois do fim do item
-            if re.match(r"^(Página|Pedido:|Cliente:|Item\s+Abrev|Total do Pedido)", linha, flags=re.IGNORECASE):
+            # evita puxar rodapÃ©/cabeÃ§alho grande depois do fim do item
+            if re.match(r"^(PÃ¡gina|Pedido:|Cliente:|Item\s+Abrev|Total do Pedido)", linha, flags=re.IGNORECASE):
                 if re.match(r"^Total do Pedido", linha, flags=re.IGNORECASE):
                     blocos.append(atual)
                     atual = []
@@ -3995,15 +4107,15 @@ def _codigo_fabrica_do_bloco_pdf(bloco):
     item, abrev, unid, produto = m.group(1), m.group(2), m.group(3), m.group(4)
     produto_completo = produto
 
-    # Alguns PDFs quebram o final do código do produto na(s) linha(s) seguinte(s).
+    # Alguns PDFs quebram o final do cÃ³digo do produto na(s) linha(s) seguinte(s).
     # Ex.: 05.66.H003\n5 => 05.66.H0035; 05.00.M350\n0 => 05.00.M3500.
     for linha in bloco[1:4]:
         token = str(linha).strip()
         if re.fullmatch(r"[A-Z0-9]{1,3}", token, flags=re.IGNORECASE):
             produto_completo += token
             break
-        # quando já começou descrição, para
-        if re.search(r"[A-ZÁÉÍÓÚÃÕÇ]{3,}", token, flags=re.IGNORECASE) and not re.fullmatch(r"[A-Z0-9\.\-/]+", token, flags=re.IGNORECASE):
+        # quando jÃ¡ comeÃ§ou descriÃ§Ã£o, para
+        if re.search(r"[A-ZÃÃ‰ÃÃ“ÃšÃƒÃ•Ã‡]{3,}", token, flags=re.IGNORECASE) and not re.fullmatch(r"[A-Z0-9\.\-/]+", token, flags=re.IGNORECASE):
             break
 
     codigo_original = f"{produto_completo}-{unid}"
@@ -4022,9 +4134,9 @@ def _descricao_do_bloco_pdf(bloco):
             continue
         if re.fullmatch(r"\d+(?:[\.,]\d+)?", t):
             continue
-        # remove a cauda numérica de quantidade/preço/total da última linha
+        # remove a cauda numÃ©rica de quantidade/preÃ§o/total da Ãºltima linha
         t = re.sub(r"\s+\d+(?:[\.,]\d+)?\s+\d+(?:[\.,]\d+)?\s+\d{1,3}(?:\.\d{3})*,\d+\s*$", "", t).strip()
-        if re.search(r"[A-ZÁÉÍÓÚÃÕÇ]{3,}", t, flags=re.IGNORECASE):
+        if re.search(r"[A-ZÃÃ‰ÃÃ“ÃšÃƒÃ•Ã‡]{3,}", t, flags=re.IGNORECASE):
             partes.append(t)
     return " ".join(partes).strip()[:180]
 
@@ -4036,8 +4148,8 @@ def _qtd_preco_total_do_bloco_pdf(bloco):
     if len(valores) < 3:
         return 0.0, 0.0, 0.0
 
-    # Nos pedidos de fornecedor, normalmente os 3 últimos números do bloco são:
-    # quantidade, preço unitário e preço total. Valida qtd x preço ~= total.
+    # Nos pedidos de fornecedor, normalmente os 3 Ãºltimos nÃºmeros do bloco sÃ£o:
+    # quantidade, preÃ§o unitÃ¡rio e preÃ§o total. Valida qtd x preÃ§o ~= total.
     for i in range(len(valores) - 3, -1, -1):
         qtd, preco, total = valores[i], valores[i + 1], valores[i + 2]
         if qtd > 0 and preco > 0 and total > 0:
@@ -4053,7 +4165,7 @@ def extrair_itens_pdf_por_blocos(uploaded_file, codigos_referencia=None):
     Exemplo real Sherwin/Lazzuril:
     - Excel: 05.66.H0035-261
     - PDF: linha do produto 05.66.H003 / linha do item com UNID 261 / linha seguinte 5 0
-    O parser monta Código de Fábrica como Produto-Unid e valida contra os códigos do Excel.
+    O parser monta CÃ³digo de FÃ¡brica como Produto-Unid e valida contra os cÃ³digos do Excel.
     """
     referencias = set()
     for c in (codigos_referencia or []):
@@ -4082,7 +4194,7 @@ def extrair_itens_pdf_por_blocos(uploaded_file, codigos_referencia=None):
 
             item, abrev, unid, resto = m.group(1), m.group(2), m.group(3), m.group(4)
             nums_linha = _tokens_numericos_linha(linha)
-            # item, abrev e unid também entram como número; os três últimos são qtd/preço/total.
+            # item, abrev e unid tambÃ©m entram como nÃºmero; os trÃªs Ãºltimos sÃ£o qtd/preÃ§o/total.
             if len(nums_linha) < 6:
                 continue
             qtd = float(nums_linha[-3][2])
@@ -4109,7 +4221,7 @@ def extrair_itens_pdf_por_blocos(uploaded_file, codigos_referencia=None):
                 if desc_prefixo:
                     desc_partes.append(desc_prefixo)
             else:
-                # Produto pode estar na linha anterior, junto com litragem e parte da descrição.
+                # Produto pode estar na linha anterior, junto com litragem e parte da descriÃ§Ã£o.
                 for prev in [prev1, prev2]:
                     cods_prev = padrao_cod_produto.findall(prev)
                     if cods_prev:
@@ -4125,7 +4237,7 @@ def extrair_itens_pdf_por_blocos(uploaded_file, codigos_referencia=None):
             if not cod_base:
                 continue
 
-            # Gera variações com complemento quebrado na linha seguinte.
+            # Gera variaÃ§Ãµes com complemento quebrado na linha seguinte.
             candidatos_produto = [cod_base]
             next_tokens = str(next1 or "").split()
             if next_tokens:
@@ -4148,12 +4260,12 @@ def extrair_itens_pdf_por_blocos(uploaded_file, codigos_referencia=None):
                 escolhido_original = original
                 escolhido_norm = norm
 
-            # Complementa descrição com a linha seguinte quando ela é descrição, removendo quebra de código/litragem.
+            # Complementa descriÃ§Ã£o com a linha seguinte quando ela Ã© descriÃ§Ã£o, removendo quebra de cÃ³digo/litragem.
             if next1:
                 prox = str(next1).strip()
                 prox_limpo = re.sub(r"^\d{1,3}\s+", "", prox).strip()
                 prox_limpo = re.sub(r"^\d+(?:[\.,]\d+)?\s+", "", prox_limpo).strip()
-                if re.search(r"[A-ZÁÉÍÓÚÃÕÇ]{3,}", prox_limpo, flags=re.IGNORECASE):
+                if re.search(r"[A-ZÃÃ‰ÃÃ“ÃšÃƒÃ•Ã‡]{3,}", prox_limpo, flags=re.IGNORECASE):
                     desc_partes.append(prox_limpo)
 
             descricao = " ".join([d for d in desc_partes if d]).strip()
@@ -4164,10 +4276,10 @@ def extrair_itens_pdf_por_blocos(uploaded_file, codigos_referencia=None):
                 continue
             vistos.add(chave)
             registros.append({
-                "Código Fábrica": escolhido_original,
-                "Descrição": descricao,
+                "CÃ³digo FÃ¡brica": escolhido_original,
+                "DescriÃ§Ã£o": descricao,
                 "Quantidade": qtd,
-                "Valor Unitário": preco,
+                "Valor UnitÃ¡rio": preco,
                 "Valor Total": total,
                 "Linha PDF": linha,
             })
@@ -4175,7 +4287,7 @@ def extrair_itens_pdf_por_blocos(uploaded_file, codigos_referencia=None):
     return pd.DataFrame(registros)
 
 def _deduplicar_headers_planilha(headers):
-    """Garante nomes únicos de colunas, preservando o texto original quando existir."""
+    """Garante nomes Ãºnicos de colunas, preservando o texto original quando existir."""
     saida = []
     contagem = {}
     for i, h in enumerate(headers):
@@ -4193,9 +4305,9 @@ def _deduplicar_headers_planilha(headers):
 
 def _pontuar_linha_cabecalho_planilha(valores):
     """
-    Pontua uma possível linha de cabeçalho em planilhas de fornecedor.
-    Resolve arquivos que vêm com dados do cliente antes da tabela, como:
-    CÓDIGO | DESCRIÇÃO | ... | QTDE | LITROS | VL. UNIT. | ... | VL. TOTAL
+    Pontua uma possÃ­vel linha de cabeÃ§alho em planilhas de fornecedor.
+    Resolve arquivos que vÃªm com dados do cliente antes da tabela, como:
+    CÃ“DIGO | DESCRIÃ‡ÃƒO | ... | QTDE | LITROS | VL. UNIT. | ... | VL. TOTAL
     """
     textos = [_normalizar_nome_coluna_flex(v) for v in valores]
     compactos = [re.sub(r"[^A-Z0-9]+", "", t) for t in textos]
@@ -4214,7 +4326,7 @@ def _pontuar_linha_cabecalho_planilha(valores):
     score += 2 if tem_preco else 0
     score += 2 if tem_total else 0
 
-    # Penaliza linhas de formulário/cadastro do cliente, não tabela de produtos.
+    # Penaliza linhas de formulÃ¡rio/cadastro do cliente, nÃ£o tabela de produtos.
     if any(p in linha for p in ["DADOS DO CLIENTE", "CNPJ", "CONDICAO PAGTO", "OBSERVACAO NF", "BAIRRO", "SUB REGIAO"]):
         score -= 4
     return score
@@ -4222,7 +4334,7 @@ def _pontuar_linha_cabecalho_planilha(valores):
 
 def _ajustar_cabecalho_planilha_fornecedor(df_raw):
     """
-    Quando o Excel do fornecedor possui cabeçalho fora da primeira linha,
+    Quando o Excel do fornecedor possui cabeÃ§alho fora da primeira linha,
     encontra a linha da tabela e transforma em DataFrame tabular.
     """
     if df_raw is None or df_raw.empty:
@@ -4240,7 +4352,7 @@ def _ajustar_cabecalho_planilha_fornecedor(df_raw):
             melhor_score = score
             melhor_idx = idx
 
-    # Exige pelo menos código/descrição/quantidade ou pontuação equivalente.
+    # Exige pelo menos cÃ³digo/descriÃ§Ã£o/quantidade ou pontuaÃ§Ã£o equivalente.
     if melhor_idx is None or melhor_score < 7:
         return df_raw.copy()
 
@@ -4248,7 +4360,7 @@ def _ajustar_cabecalho_planilha_fornecedor(df_raw):
     df = df_scan.iloc[melhor_idx + 1:].copy()
     df.columns = headers
 
-    # Remove linhas totalmente vazias e linhas de totalização.
+    # Remove linhas totalmente vazias e linhas de totalizaÃ§Ã£o.
     df = df.dropna(how="all")
     primeira_col = df.columns[0] if len(df.columns) else None
     if primeira_col:
@@ -4256,15 +4368,15 @@ def _ajustar_cabecalho_planilha_fornecedor(df_raw):
         df = df[~primeira_txt.isin(["", "NAN", "NONE"])]
         df = df[~primeira_txt.str.contains(r"^TOTA(IS|L)?$|^TOTAL", regex=True, na=False)]
 
-    # Remove colunas completamente vazias, mas mantém nomes reconhecidos.
+    # Remove colunas completamente vazias, mas mantÃ©m nomes reconhecidos.
     df = df.dropna(axis=1, how="all")
     return df.reset_index(drop=True)
 
 
 def ler_planilha_comparativo_fornecedor(uploaded_file):
     """
-    Lê Excel/CSV do fornecedor procurando automaticamente a linha real do cabeçalho.
-    Importante para modelos em que a tabela começa depois de blocos como DADOS DO CLIENTE.
+    LÃª Excel/CSV do fornecedor procurando automaticamente a linha real do cabeÃ§alho.
+    Importante para modelos em que a tabela comeÃ§a depois de blocos como DADOS DO CLIENTE.
     """
     if uploaded_file is None:
         return pd.DataFrame()
@@ -4276,12 +4388,12 @@ def ler_planilha_comparativo_fornecedor(uploaded_file):
         pass
 
     if nome.endswith((".xlsx", ".xls")):
-        # header=None permite localizar cabeçalhos que não estão na primeira linha.
+        # header=None permite localizar cabeÃ§alhos que nÃ£o estÃ£o na primeira linha.
         # Para .xls, mantenha xlrd>=2.0.1 no requirements.txt.
         df_raw = pd.read_excel(uploaded_file, dtype=str, header=None)
         return _ajustar_cabecalho_planilha_fornecedor(df_raw)
 
-    # CSV: também pode ter linhas acima do cabeçalho.
+    # CSV: tambÃ©m pode ter linhas acima do cabeÃ§alho.
     tentativas = [
         {"sep": ";", "encoding": "utf-8-sig"},
         {"sep": ";", "encoding": "latin1"},
@@ -4308,15 +4420,15 @@ def ler_planilha_comparativo_fornecedor(uploaded_file):
             ultimo_erro = str(e)
             continue
 
-    raise RuntimeError(f"Não consegui ler a planilha do fornecedor. Último erro: {ultimo_erro}")
+    raise RuntimeError(f"NÃ£o consegui ler a planilha do fornecedor. Ãšltimo erro: {ultimo_erro}")
 
 
 
 def _dataframe_de_tabela_pdf_fornecedor(linhas):
     """
-    Converte uma tabela extraída do PDF do fornecedor em DataFrame padronizado.
-    Corrige principalmente PDFs Akzo/Coral em que as colunas são:
-    Código Produto | Descrição | Código EAN | Embalagem | Qtd. | ... | VL. Unitário | VL. Total
+    Converte uma tabela extraÃ­da do PDF do fornecedor em DataFrame padronizado.
+    Corrige principalmente PDFs Akzo/Coral em que as colunas sÃ£o:
+    CÃ³digo Produto | DescriÃ§Ã£o | CÃ³digo EAN | Embalagem | Qtd. | ... | VL. UnitÃ¡rio | VL. Total
     """
     if not linhas:
         return pd.DataFrame()
@@ -4360,18 +4472,18 @@ def _dataframe_de_tabela_pdf_fornecedor(linhas):
         return pd.DataFrame()
 
     col_codigo = _coluna_por_candidatos(df, [
-        "Código Produto", "Codigo Produto", "Cód Produto", "Cod Produto", "Código", "Codigo",
-        "Cód.", "Cod.", "SKU", "Referência", "Referencia", "Part Number"
+        "CÃ³digo Produto", "Codigo Produto", "CÃ³d Produto", "Cod Produto", "CÃ³digo", "Codigo",
+        "CÃ³d.", "Cod.", "SKU", "ReferÃªncia", "Referencia", "Part Number"
     ])
     col_desc = _coluna_por_candidatos(df, [
-        "Descrição", "Descricao", "Descrição do item", "Descricao do item", "Produto", "Item", "Nome", "Descr"
+        "DescriÃ§Ã£o", "Descricao", "DescriÃ§Ã£o do item", "Descricao do item", "Produto", "Item", "Nome", "Descr"
     ])
     col_qtd = _coluna_quantidade_flexivel(df) or _coluna_por_candidatos(df, [
         "Qtd.", "Qtd", "Qtde", "Quantidade", "Quant", "Qte", "Qty"
     ])
     col_preco = _coluna_valor_unitario_flexivel(df) or _coluna_por_candidatos(df, [
-        "VL. Unitário", "VL Unitário", "VL. Unitario", "VL Unitario", "Valor Unitário", "Valor Unitario",
-        "Preço Unitário", "Preco Unitario", "Preço", "Preco"
+        "VL. UnitÃ¡rio", "VL UnitÃ¡rio", "VL. Unitario", "VL Unitario", "Valor UnitÃ¡rio", "Valor Unitario",
+        "PreÃ§o UnitÃ¡rio", "Preco Unitario", "PreÃ§o", "Preco"
     ])
     col_total = _coluna_valor_total_flexivel(df) or _coluna_por_candidatos(df, [
         "VL. Total", "VL Total", "Valor Total", "Vlr Total", "Total"
@@ -4380,28 +4492,28 @@ def _dataframe_de_tabela_pdf_fornecedor(linhas):
     if not col_codigo or not col_qtd:
         return pd.DataFrame()
 
-    # Se a coluna escolhida como quantidade parecer código/EAN, não usa esta tabela.
+    # Se a coluna escolhida como quantidade parecer cÃ³digo/EAN, nÃ£o usa esta tabela.
     if not _serie_parece_quantidade(df[col_qtd]):
         return pd.DataFrame()
 
     out = pd.DataFrame()
-    out["Código Fábrica"] = df[col_codigo].astype(str).str.strip()
-    out["Descrição"] = df[col_desc].astype(str).str.strip() if col_desc else out["Código Fábrica"]
+    out["CÃ³digo FÃ¡brica"] = df[col_codigo].astype(str).str.strip()
+    out["DescriÃ§Ã£o"] = df[col_desc].astype(str).str.strip() if col_desc else out["CÃ³digo FÃ¡brica"]
     out["Quantidade"] = df[col_qtd].apply(numero_planilha_para_float)
-    out["Valor Unitário"] = df[col_preco].apply(numero_planilha_para_float) if col_preco else 0.0
+    out["Valor UnitÃ¡rio"] = df[col_preco].apply(numero_planilha_para_float) if col_preco else 0.0
     out["Valor Total"] = df[col_total].apply(numero_planilha_para_float) if col_total else 0.0
     out["Linha PDF"] = df.astype(str).agg(" | ".join, axis=1)
 
-    out = out[~out["Código Fábrica"].astype(str).str.upper().str.contains("TOTAL DO PEDIDO|NUMERO DE ITENS|NÚMERO DE ITENS", na=False)]
-    out = out[out["Código Fábrica"].astype(str).str.extract(r"([A-Za-z0-9]{3,})", expand=False).notna()]
+    out = out[~out["CÃ³digo FÃ¡brica"].astype(str).str.upper().str.contains("TOTAL DO PEDIDO|NUMERO DE ITENS|NÃšMERO DE ITENS", na=False)]
+    out = out[out["CÃ³digo FÃ¡brica"].astype(str).str.extract(r"([A-Za-z0-9]{3,})", expand=False).notna()]
     out = out[out["Quantidade"] > 0].copy()
-    out.loc[(out["Valor Total"] <= 0) & (out["Valor Unitário"] > 0), "Valor Total"] = out["Quantidade"] * out["Valor Unitário"]
-    out.loc[(out["Valor Unitário"] <= 0) & (out["Valor Total"] > 0) & (out["Quantidade"] > 0), "Valor Unitário"] = out["Valor Total"] / out["Quantidade"]
+    out.loc[(out["Valor Total"] <= 0) & (out["Valor UnitÃ¡rio"] > 0), "Valor Total"] = out["Quantidade"] * out["Valor UnitÃ¡rio"]
+    out.loc[(out["Valor UnitÃ¡rio"] <= 0) & (out["Valor Total"] > 0) & (out["Quantidade"] > 0), "Valor UnitÃ¡rio"] = out["Valor Total"] / out["Quantidade"]
     return out.reset_index(drop=True)
 
 
 def extrair_itens_pdf_por_tabelas(uploaded_file):
-    """Lê PDFs de fornecedor com tabela real antes das heurísticas por texto."""
+    """LÃª PDFs de fornecedor com tabela real antes das heurÃ­sticas por texto."""
     if uploaded_file is None:
         return pd.DataFrame()
     try:
@@ -4427,7 +4539,7 @@ def _qtd_codigos_referencia_encontrados(df, codigos_referencia=None):
     if not referencias:
         return 0
 
-    col_codigo = _coluna_por_candidatos(df, ["Código Fábrica", "Codigo Fabrica", "Código", "Codigo", "Referência", "Referencia", "SKU", "Produto"])
+    col_codigo = _coluna_por_candidatos(df, ["CÃ³digo FÃ¡brica", "Codigo Fabrica", "CÃ³digo", "Codigo", "ReferÃªncia", "Referencia", "SKU", "Produto"])
     if not col_codigo:
         return 0
     cods = set(df[col_codigo].astype(str).apply(normalizar_codigo_fabrica))
@@ -4452,6 +4564,97 @@ def extrair_texto_imagem_ocr(uploaded_file):
             return ""
 
 
+
+def _decodificar_arquivo_texto_comparativo(uploaded_file):
+    """Lê TXT do fornecedor aceitando os encodings mais comuns no Windows/ERP."""
+    try:
+        uploaded_file.seek(0)
+    except Exception:
+        pass
+    try:
+        dados = uploaded_file.read()
+    except Exception:
+        return ""
+    if isinstance(dados, str):
+        return dados
+    for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin1"):
+        try:
+            return bytes(dados).decode(encoding)
+        except Exception:
+            continue
+    return bytes(dados).decode("latin1", errors="replace")
+
+
+def extrair_itens_txt_comparativo(uploaded_file, codigos_referencia=None):
+    """
+    Extrai itens de pedidos TXT em formato de relatório/pré-nota.
+
+    Layout suportado, inclusive o arquivo MAXIRUBBER anexado:
+    It | Código | Descrição | TES | UM | Qt.Ped | Valor Unit. | IPI | ICM | Tab | Total
+
+    A expressão é ancorada no início e no fim da linha para não capturar cabeçalhos,
+    totais ou dados cadastrais. Como fallback, usa os códigos do Pedido Única como âncora.
+    """
+    texto = _decodificar_arquivo_texto_comparativo(uploaded_file)
+    if not texto.strip():
+        return pd.DataFrame()
+
+    registros = []
+    vistos = set()
+    padrao = re.compile(
+        r"^\s*(?P<item>\d{1,4})\s+"
+        r"(?P<codigo>[A-Z0-9][A-Z0-9.\-/_]{2,})\s+"
+        r"(?P<descricao>.+?)\s+"
+        r"(?P<tes>\d{3})\s+"
+        r"(?P<um>[A-Z]{1,4})\s+"
+        r"(?P<qtd>-?\d+(?:[.,]\d+)?)\s+"
+        r"(?P<unit>-?\d{1,3}(?:\.\d{3})*,\d{2,4}|-?\d+[.,]\d{2,4})\s+"
+        r"(?P<ipi>-?\d+(?:[.,]\d+)?)\s+"
+        r"(?P<icm>-?\d+(?:[.,]\d+)?)\s+"
+        r"(?P<tab>[A-Z0-9]+)\s+"
+        r"(?P<total>-?\d{1,3}(?:\.\d{3})*,\d{2}|-?\d+[.,]\d{2})\s*$",
+        flags=re.IGNORECASE,
+    )
+
+    for raw in texto.splitlines():
+        linha = str(raw or "").rstrip()
+        m = padrao.match(linha)
+        if not m:
+            continue
+        codigo = m.group("codigo").strip()
+        qtd = numero_planilha_para_float(m.group("qtd"))
+        preco = numero_planilha_para_float(m.group("unit"))
+        total = numero_planilha_para_float(m.group("total"))
+        if qtd <= 0 or not codigo:
+            continue
+        chave = (normalizar_codigo_fabrica(codigo), round(qtd, 6), round(preco, 6), round(total, 6))
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+        registros.append({
+            "CÃ³digo FÃ¡brica": codigo,
+            "DescriÃ§Ã£o": re.sub(r"\s+", " ", m.group("descricao")).strip(),
+            "Quantidade": qtd,
+            "Valor UnitÃ¡rio": preco,
+            "Valor Total": total if total > 0 else qtd * preco,
+            "Linha Fornecedor": linha,
+            "Linha TXT": linha,
+        })
+
+    df = pd.DataFrame(registros)
+    if not df.empty:
+        return df.reset_index(drop=True)
+
+    # Fallback para outros TXT: procura os códigos de fábrica do Pedido Única em cada linha.
+    linhas = [l.strip() for l in texto.splitlines() if l.strip()]
+    df_anchor = extrair_itens_por_codigos_em_textos(
+        linhas,
+        codigos_referencia,
+        origem_linha="Linha TXT",
+    )
+    return df_anchor if df_anchor is not None else pd.DataFrame()
+
+
 def ler_arquivo_comparativo(uploaded_file, codigos_referencia=None):
     if uploaded_file is None:
         return pd.DataFrame()
@@ -4462,9 +4665,12 @@ def ler_arquivo_comparativo(uploaded_file, codigos_referencia=None):
     except Exception:
         pass
 
+    if nome.endswith(".txt"):
+        return extrair_itens_txt_comparativo(uploaded_file, codigos_referencia=codigos_referencia)
+
     if nome.endswith(".pdf"):
-        # Primeiro tenta tabela real do PDF. Isso evita confundir Código Produto/EAN/Código de Fábrica
-        # com quantidade quando o PDF possui colunas explícitas como Qtd., VL. Unitário e VL. Total.
+        # Primeiro tenta tabela real do PDF. Isso evita confundir CÃ³digo Produto/EAN/CÃ³digo de FÃ¡brica
+        # com quantidade quando o PDF possui colunas explÃ­citas como Qtd., VL. UnitÃ¡rio e VL. Total.
         df_pdf = extrair_itens_pdf_por_tabelas(uploaded_file)
         if not df_pdf.empty and codigos_referencia:
             df_anchor = extrair_itens_por_codigos_em_dataframe(df_pdf, codigos_referencia)
@@ -4479,7 +4685,7 @@ def ler_arquivo_comparativo(uploaded_file, codigos_referencia=None):
         if not df_pdf.empty:
             return df_pdf
 
-        # Fallback antigo: tenta tabelas com cabeçalho quando não encontrou códigos no texto.
+        # Fallback antigo: tenta tabelas com cabeÃ§alho quando nÃ£o encontrou cÃ³digos no texto.
         _linhas_texto_pdf, linhas = extract_pdf_linhas_e_tabelas(uploaded_file)
         if not linhas:
             return pd.DataFrame()
@@ -4489,7 +4695,7 @@ def ler_arquivo_comparativo(uploaded_file, codigos_referencia=None):
         header_idx = 0
         for i, linha in enumerate(linhas[:15]):
             linha_norm = " ".join(normalizar_coluna(c) for c in linha)
-            if any(p in linha_norm for p in ["COD", "CÓD", "DESCR", "QTD", "QTDE", "QUANT", "UNIT", "PRECO", "PREÇO"]):
+            if any(p in linha_norm for p in ["COD", "CÃ“D", "DESCR", "QTD", "QTDE", "QUANT", "UNIT", "PRECO", "PREÃ‡O"]):
                 header_idx = i
                 break
         headers = [str(c).strip() or f"COLUNA {i+1}" for i, c in enumerate(linhas[header_idx])]
@@ -4539,16 +4745,16 @@ def ler_arquivo_comparativo(uploaded_file, codigos_referencia=None):
 
 def _opcoes_colunas_mapeamento(df, incluir_vazio=True):
     cols = [str(c) for c in list(df.columns)] if df is not None else []
-    return (["-- Não usar --"] + cols) if incluir_vazio else cols
+    return (["-- NÃ£o usar --"] + cols) if incluir_vazio else cols
 
 
 def _primeira_coluna_existente(df, candidatos, permitir_vazio=True):
     if df is None or df.empty:
-        return "-- Não usar --" if permitir_vazio else None
+        return "-- NÃ£o usar --" if permitir_vazio else None
     col = _coluna_por_candidatos(df, candidatos)
     if col:
         return str(col)
-    return "-- Não usar --" if permitir_vazio else (str(df.columns[0]) if len(df.columns) else None)
+    return "-- NÃ£o usar --" if permitir_vazio else (str(df.columns[0]) if len(df.columns) else None)
 
 
 def _mapear_colunas_comparativo(df, prefixo, origem):
@@ -4557,23 +4763,23 @@ def _mapear_colunas_comparativo(df, prefixo, origem):
     op_opc = _opcoes_colunas_mapeamento(df, incluir_vazio=True)
 
     if not op_obrig:
-        st.error(f"Não encontrei colunas no arquivo {origem}.")
+        st.error(f"NÃ£o encontrei colunas no arquivo {origem}.")
         return None
 
     default_codigo = _primeira_coluna_existente(df, [
-        "Código Fábrica", "Codigo Fabrica", "Cód. Fábrica", "Cod. Fabrica",
-        "Código de Fábrica", "Codigo de Fabrica", "Código", "Codigo", "Cód.", "Cod.", "Cod",
-        "Referência", "Referencia", "Ref", "SKU", "Produto", "Cod Produto", "Código Produto"
+        "CÃ³digo FÃ¡brica", "Codigo Fabrica", "CÃ³d. FÃ¡brica", "Cod. Fabrica",
+        "CÃ³digo de FÃ¡brica", "Codigo de Fabrica", "CÃ³digo", "Codigo", "CÃ³d.", "Cod.", "Cod",
+        "ReferÃªncia", "Referencia", "Ref", "SKU", "Produto", "Cod Produto", "CÃ³digo Produto"
     ], permitir_vazio=True)
     default_desc = _primeira_coluna_existente(df, [
-        "descricao", "descrição", "descrição do item", "descricao do item", "produto", "item", "nome", "descr", "Linha PDF"
+        "descricao", "descriÃ§Ã£o", "descriÃ§Ã£o do item", "descricao do item", "produto", "item", "nome", "descr", "Linha PDF"
     ], permitir_vazio=True)
     default_qtd = _coluna_quantidade_flexivel(df) or _primeira_coluna_existente(df, [
         "PEDIDO Final", "Quantidade", "Qtd", "Qtde", "Quant", "Qte", "Qty", "QTDE"
     ], permitir_vazio=True)
     default_preco = _coluna_valor_unitario_flexivel(df) or _primeira_coluna_existente(df, [
-        "Preço Última Compra", "Preco Ultima Compra", "Preço", "Preco", "Preço Unitário", "Preco Unitario",
-        "Valor Unitário", "Valor Unitario", "Vlr Unit", "Vl Unit", "VL. UNIT.", "VL UNIT", "VR.UNIT"
+        "PreÃ§o Ãšltima Compra", "Preco Ultima Compra", "PreÃ§o", "Preco", "PreÃ§o UnitÃ¡rio", "Preco Unitario",
+        "Valor UnitÃ¡rio", "Valor Unitario", "Vlr Unit", "Vl Unit", "VL. UNIT.", "VL UNIT", "VR.UNIT"
     ], permitir_vazio=True)
     default_total = _coluna_valor_total_flexivel(df) or _primeira_coluna_existente(df, [
         "Valor Final do Pedido", "Valor Total", "VL. TOTAL", "VL TOTAL", "Vlr Total", "Total", "Valor"
@@ -4584,15 +4790,15 @@ def _mapear_colunas_comparativo(df, prefixo, origem):
 
     c1, c2 = st.columns(2)
     with c1:
-        col_codigo = st.selectbox("Coluna de Código de Fábrica / relacionamento", op_opc, index=idx(op_opc, default_codigo), key=f"{prefixo}_codigo")
-        col_desc = st.selectbox("Coluna de descrição", op_opc, index=idx(op_opc, default_desc), key=f"{prefixo}_desc")
+        col_codigo = st.selectbox("Coluna de CÃ³digo de FÃ¡brica / relacionamento", op_opc, index=idx(op_opc, default_codigo), key=f"{prefixo}_codigo")
+        col_desc = st.selectbox("Coluna de descriÃ§Ã£o", op_opc, index=idx(op_opc, default_desc), key=f"{prefixo}_desc")
     with c2:
         col_qtd = st.selectbox("Coluna de quantidade", op_opc, index=idx(op_opc, default_qtd), key=f"{prefixo}_qtd")
-        col_preco = st.selectbox("Coluna de valor unitário", op_opc, index=idx(op_opc, default_preco), key=f"{prefixo}_preco")
+        col_preco = st.selectbox("Coluna de valor unitÃ¡rio", op_opc, index=idx(op_opc, default_preco), key=f"{prefixo}_preco")
         col_total = st.selectbox("Coluna de valor total (opcional)", op_opc, index=idx(op_opc, default_total), key=f"{prefixo}_total")
 
     def limpar(v):
-        return None if v == "-- Não usar --" else v
+        return None if v == "-- NÃ£o usar --" else v
 
     return {
         "codigo": limpar(col_codigo),
@@ -4608,16 +4814,16 @@ def normalizar_pedido_comparativo(df, origem, mapa_colunas=None):
     df.columns = [str(c).strip() for c in df.columns]
     mapa_colunas = mapa_colunas or {}
 
-    # Quando houver mapeamento manual, ele manda. O reconhecimento automático fica só como fallback.
+    # Quando houver mapeamento manual, ele manda. O reconhecimento automÃ¡tico fica sÃ³ como fallback.
     col_fabrica = mapa_colunas.get("codigo") or _coluna_por_candidatos(df, [
-        "Código Fábrica", "Codigo Fabrica", "Cód. Fábrica", "Cod. Fabrica",
-        "Código de Fábrica", "Codigo de Fabrica", "Cod Fabrica", "Cód Fabrica",
-        "Código", "Codigo", "Cód.", "Cod.", "Cod",
-        "Referência", "Referencia", "Ref", "Código Fornecedor", "Codigo Fornecedor",
-        "Cod Produto", "Código Produto", "Codigo Produto", "SKU", "Part Number", "Linha PDF",
+        "CÃ³digo FÃ¡brica", "Codigo Fabrica", "CÃ³d. FÃ¡brica", "Cod. Fabrica",
+        "CÃ³digo de FÃ¡brica", "Codigo de Fabrica", "Cod Fabrica", "CÃ³d Fabrica",
+        "CÃ³digo", "Codigo", "CÃ³d.", "Cod.", "Cod",
+        "ReferÃªncia", "Referencia", "Ref", "CÃ³digo Fornecedor", "Codigo Fornecedor",
+        "Cod Produto", "CÃ³digo Produto", "Codigo Produto", "SKU", "Part Number", "Linha PDF",
     ])
     col_descricao = mapa_colunas.get("descricao") or _coluna_por_candidatos(df, [
-        "descricao", "descrição", "descrição do item", "descricao do item", "produto", "item", "nome", "descr", "linha pdf",
+        "descricao", "descriÃ§Ã£o", "descriÃ§Ã£o do item", "descricao do item", "produto", "item", "nome", "descr", "linha pdf",
     ])
     col_qtd = mapa_colunas.get("quantidade") or _coluna_quantidade_flexivel(df) or _coluna_por_candidatos(df, [
         "PEDIDO Final", "Quantidade", "Qtd", "Qtde", "Quant", "Quant.", "Qte", "Qty", "Quantity",
@@ -4629,9 +4835,9 @@ def normalizar_pedido_comparativo(df, origem, mapa_colunas=None):
         "Volume", "Vol",
     ])
     col_preco = mapa_colunas.get("preco_unitario") or _coluna_valor_unitario_flexivel(df) or _coluna_por_candidatos(df, [
-        "Preço Última Compra", "Preco Ultima Compra", "Preço", "Preco", "Preço Unitário", "Preco Unitario",
-        "Valor Unitário", "Valor Unitario", "Vlr Unit", "Vl Unit", "VL. UNIT.", "VL UNIT",
-        "Vr.Unit", "VR.UNIT", "VR UNIT", "Unitário", "Unitario", "Preço Uni",
+        "PreÃ§o Ãšltima Compra", "Preco Ultima Compra", "PreÃ§o", "Preco", "PreÃ§o UnitÃ¡rio", "Preco Unitario",
+        "Valor UnitÃ¡rio", "Valor Unitario", "Vlr Unit", "Vl Unit", "VL. UNIT.", "VL UNIT",
+        "Vr.Unit", "VR.UNIT", "VR UNIT", "UnitÃ¡rio", "Unitario", "PreÃ§o Uni",
     ])
     col_total = mapa_colunas.get("valor_total") or _coluna_valor_total_flexivel(df) or _coluna_por_candidatos(df, [
         "Valor Final do Pedido", "Valor Total", "VL. TOTAL", "VL TOTAL", "Vlr Total",
@@ -4648,8 +4854,8 @@ def normalizar_pedido_comparativo(df, origem, mapa_colunas=None):
         if col_preco_alt and not _coluna_auxiliar_nao_preco_quantidade(col_preco_alt):
             col_preco = col_preco_alt
 
-    # Segurança contra PDF/Excel desalinhado: se a coluna mapeada como quantidade
-    # parecer código de fábrica/EAN/produto, procura outra coluna ou força inferência pela linha.
+    # SeguranÃ§a contra PDF/Excel desalinhado: se a coluna mapeada como quantidade
+    # parecer cÃ³digo de fÃ¡brica/EAN/produto, procura outra coluna ou forÃ§a inferÃªncia pela linha.
     if col_qtd and col_qtd in df.columns and not _serie_parece_quantidade(df[col_qtd]):
         col_qtd_original = col_qtd
         col_qtd = None
@@ -4660,7 +4866,7 @@ def normalizar_pedido_comparativo(df, origem, mapa_colunas=None):
                 col_qtd = candidato
                 break
 
-    # Quando o arquivo veio de PDF sem cabeçalho perfeito, tenta inferir por linha completa.
+    # Quando o arquivo veio de PDF sem cabeÃ§alho perfeito, tenta inferir por linha completa.
     if (not col_qtd or not col_preco) and "Linha PDF" in df.columns:
         linhas_inferidas = df["Linha PDF"].astype(str).apply(_inferir_qtd_preco_total_por_linha)
         df["__qtd_inferida"] = [x[0] for x in linhas_inferidas]
@@ -4672,7 +4878,7 @@ def normalizar_pedido_comparativo(df, origem, mapa_colunas=None):
 
     faltantes = []
     if not col_fabrica:
-        faltantes.append("Código de Fábrica / relacionamento")
+        faltantes.append("CÃ³digo de FÃ¡brica / relacionamento")
     if not col_qtd:
         faltantes.append("quantidade")
     if faltantes:
@@ -4700,16 +4906,16 @@ def agregar_pedido_comparativo(df):
     df["codigo_fabrica"] = df["codigo_fabrica"].fillna("").astype(str).str.strip()
     df["codigo_fabrica_norm"] = df["codigo_fabrica_norm"].fillna("").astype(str).str.strip()
 
-    # Regra principal do comparativo: relacionamento automático SOMENTE por Código de Fábrica.
-    # Itens sem código não são aproximados por descrição; ficam separados e podem ser vinculados manualmente.
+    # Regra principal do comparativo: relacionamento automÃ¡tico SOMENTE por CÃ³digo de FÃ¡brica.
+    # Itens sem cÃ³digo nÃ£o sÃ£o aproximados por descriÃ§Ã£o; ficam separados e podem ser vinculados manualmente.
     df["chave"] = df.apply(
         lambda r: str(r["codigo_fabrica_norm"]) if str(r["codigo_fabrica_norm"]).strip() else f"SEM_CODIGO_{r.name}",
         axis=1,
     )
-    # Mantém o preço unitário real lido do arquivo e calcula média ponderada pela quantidade.
-    # Correção para planilhas que trazem simultaneamente VL. UNIT., UNIT.TOT e VL. TOTAL:
-    # antes o agrupamento sempre fazia valor_total / quantidade, o que substituía o
-    # valor unitário pela coluna de total unitário/total do item em alguns modelos.
+    # MantÃ©m o preÃ§o unitÃ¡rio real lido do arquivo e calcula mÃ©dia ponderada pela quantidade.
+    # CorreÃ§Ã£o para planilhas que trazem simultaneamente VL. UNIT., UNIT.TOT e VL. TOTAL:
+    # antes o agrupamento sempre fazia valor_total / quantidade, o que substituÃ­a o
+    # valor unitÃ¡rio pela coluna de total unitÃ¡rio/total do item em alguns modelos.
     df["__valor_unitario_ponderado"] = pd.to_numeric(df["preco_unitario"], errors="coerce").fillna(0) * pd.to_numeric(df["quantidade"], errors="coerce").fillna(0)
 
     agg = df.groupby("chave", as_index=False).agg(
@@ -4735,7 +4941,7 @@ def agregar_pedido_comparativo(df):
 
 def codigos_referencia_comparativo(df_unica_raw, mapa_unica=None):
     try:
-        unica_norm = normalizar_pedido_comparativo(df_unica_raw, "Única", mapa_unica)
+        unica_norm = normalizar_pedido_comparativo(df_unica_raw, "Ãšnica", mapa_unica)
         codigos = unica_norm["codigo_fabrica"].dropna().astype(str).str.strip().tolist()
         return [c for c in codigos if normalizar_codigo_fabrica(c)]
     except Exception:
@@ -4758,11 +4964,11 @@ def _aplicar_relacionamentos_manuais(unica, fornecedor, relacionamentos):
 
 
 def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw, mapa_unica=None, mapa_fornecedor=None, relacionamentos_manuais=None):
-    unica_normalizada = normalizar_pedido_comparativo(df_unica_raw, "Única", mapa_unica)
+    unica_normalizada = normalizar_pedido_comparativo(df_unica_raw, "Ãšnica", mapa_unica)
 
-    # Regra do comparativo: itens com PEDIDO FINAL / quantidade da Única igual a zero
-    # não entram na base de comparação. Isso evita apontar divergência de itens que
-    # foram carregados na planilha, mas não foram efetivamente pedidos.
+    # Regra do comparativo: itens com PEDIDO FINAL / quantidade da Ãšnica igual a zero
+    # nÃ£o entram na base de comparaÃ§Ã£o. Isso evita apontar divergÃªncia de itens que
+    # foram carregados na planilha, mas nÃ£o foram efetivamente pedidos.
     if not unica_normalizada.empty and "quantidade" in unica_normalizada.columns:
         unica_normalizada["quantidade"] = pd.to_numeric(unica_normalizada["quantidade"], errors="coerce").fillna(0)
         unica_normalizada = unica_normalizada[unica_normalizada["quantidade"] > 0].copy()
@@ -4780,7 +4986,7 @@ def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw, mapa_unica=None,
         cod_fab = str(row.get("codigo_fabrica", "")).strip()
         cod_fab_norm = str(row.get("codigo_fabrica_norm", "")).strip()
 
-        # 1) Relacionamento manual salvo pelo usuário.
+        # 1) Relacionamento manual salvo pelo usuÃ¡rio.
         candidatos_manual = fornecedor[fornecedor["chave"].astype(str) == str(row.get("chave", ""))]
         candidatos_manual = candidatos_manual[~candidatos_manual.index.isin(usados_fornecedor)]
         if not candidatos_manual.empty:
@@ -4788,37 +4994,37 @@ def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw, mapa_unica=None,
             usados_fornecedor.add(match.name)
             metodo = "Relacionamento manual"
 
-        # 2) Relacionamento automático SOMENTE por Código de Fábrica normalizado.
+        # 2) Relacionamento automÃ¡tico SOMENTE por CÃ³digo de FÃ¡brica normalizado.
         if match is None and cod_fab_norm:
             candidatos = fornecedor[fornecedor["codigo_fabrica_norm"].astype(str).str.strip() == cod_fab_norm]
             candidatos = candidatos[~candidatos.index.isin(usados_fornecedor)]
             if not candidatos.empty:
                 match = candidatos.iloc[0]
                 usados_fornecedor.add(match.name)
-                metodo = "Código de Fábrica"
+                metodo = "CÃ³digo de FÃ¡brica"
 
-        # Não usa descrição aproximada/fuzzy para evitar comparação de produtos parecidos.
+        # NÃ£o usa descriÃ§Ã£o aproximada/fuzzy para evitar comparaÃ§Ã£o de produtos parecidos.
 
         if match is None:
             linhas.append({
-                "Status": "Não encontrado no fornecedor",
-                "Método": "Sem correspondência",
-                "Chave Única": row.get("chave", ""),
+                "Status": "NÃ£o encontrado no fornecedor",
+                "MÃ©todo": "Sem correspondÃªncia",
+                "Chave Ãšnica": row.get("chave", ""),
                 "Chave Fornecedor": "",
-                "Código Única": cod_fab,
-                "Descrição Única": row.get("descricao", ""),
-                "Qtd Única": row.get("quantidade", 0),
-                "Preço Única": row.get("preco_unitario", 0),
-                "Valor Única": row.get("valor_total", 0),
-                "Código Fornecedor": "",
-                "Descrição Fornecedor": "",
+                "CÃ³digo Ãšnica": cod_fab,
+                "DescriÃ§Ã£o Ãšnica": row.get("descricao", ""),
+                "Qtd Ãšnica": row.get("quantidade", 0),
+                "PreÃ§o Ãšnica": row.get("preco_unitario", 0),
+                "Valor Ãšnica": row.get("valor_total", 0),
+                "CÃ³digo Fornecedor": "",
+                "DescriÃ§Ã£o Fornecedor": "",
                 "Qtd Fornecedor": 0,
-                "Preço Fornecedor": 0,
+                "PreÃ§o Fornecedor": 0,
                 "Valor Fornecedor": 0,
-                "Diferença Qtd": -float(row.get("quantidade", 0) or 0),
-                "Diferença Preço": -float(row.get("preco_unitario", 0) or 0),
-                "Diferença Preço %": -100.0 if float(row.get("preco_unitario", 0) or 0) > 0 else 0.0,
-                "Diferença Valor": -float(row.get("valor_total", 0) or 0),
+                "DiferenÃ§a Qtd": -float(row.get("quantidade", 0) or 0),
+                "DiferenÃ§a PreÃ§o": -float(row.get("preco_unitario", 0) or 0),
+                "DiferenÃ§a PreÃ§o %": -100.0 if float(row.get("preco_unitario", 0) or 0) > 0 else 0.0,
+                "DiferenÃ§a Valor": -float(row.get("valor_total", 0) or 0),
             })
             continue
 
@@ -4836,46 +5042,46 @@ def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw, mapa_unica=None,
         status = "OK" if abs(dif_qtd) < 0.0001 and abs(dif_preco) < 0.01 else "Divergente"
         linhas.append({
             "Status": status,
-            "Método": metodo,
-            "Chave Única": row.get("chave", ""),
+            "MÃ©todo": metodo,
+            "Chave Ãšnica": row.get("chave", ""),
             "Chave Fornecedor": match.get("chave", ""),
-            "Código Única": cod_fab,
-            "Descrição Única": row.get("descricao", ""),
-            "Qtd Única": row.get("quantidade", 0),
-            "Preço Única": row.get("preco_unitario", 0),
-            "Valor Única": row.get("valor_total", 0),
-            "Código Fornecedor": match.get("codigo_fabrica", ""),
-            "Descrição Fornecedor": match.get("descricao", ""),
+            "CÃ³digo Ãšnica": cod_fab,
+            "DescriÃ§Ã£o Ãšnica": row.get("descricao", ""),
+            "Qtd Ãšnica": row.get("quantidade", 0),
+            "PreÃ§o Ãšnica": row.get("preco_unitario", 0),
+            "Valor Ãšnica": row.get("valor_total", 0),
+            "CÃ³digo Fornecedor": match.get("codigo_fabrica", ""),
+            "DescriÃ§Ã£o Fornecedor": match.get("descricao", ""),
             "Qtd Fornecedor": match.get("quantidade", 0),
-            "Preço Fornecedor": match.get("preco_unitario", 0),
+            "PreÃ§o Fornecedor": match.get("preco_unitario", 0),
             "Valor Fornecedor": match.get("valor_total", 0),
-            "Diferença Qtd": dif_qtd,
-            "Diferença Preço": dif_preco,
-            "Diferença Preço %": dif_preco_pct,
-            "Diferença Valor": dif_valor,
+            "DiferenÃ§a Qtd": dif_qtd,
+            "DiferenÃ§a PreÃ§o": dif_preco,
+            "DiferenÃ§a PreÃ§o %": dif_preco_pct,
+            "DiferenÃ§a Valor": dif_valor,
         })
 
     extras = fornecedor[~fornecedor.index.isin(usados_fornecedor)].copy()
     for _, row in extras.iterrows():
         linhas.append({
             "Status": "Somente fornecedor",
-            "Método": "Sem correspondência",
-            "Chave Única": "",
+            "MÃ©todo": "Sem correspondÃªncia",
+            "Chave Ãšnica": "",
             "Chave Fornecedor": row.get("chave", ""),
-            "Código Única": "",
-            "Descrição Única": "",
-            "Qtd Única": 0,
-            "Preço Única": 0,
-            "Valor Única": 0,
-            "Código Fornecedor": row.get("codigo_fabrica", ""),
-            "Descrição Fornecedor": row.get("descricao", ""),
+            "CÃ³digo Ãšnica": "",
+            "DescriÃ§Ã£o Ãšnica": "",
+            "Qtd Ãšnica": 0,
+            "PreÃ§o Ãšnica": 0,
+            "Valor Ãšnica": 0,
+            "CÃ³digo Fornecedor": row.get("codigo_fabrica", ""),
+            "DescriÃ§Ã£o Fornecedor": row.get("descricao", ""),
             "Qtd Fornecedor": row.get("quantidade", 0),
-            "Preço Fornecedor": row.get("preco_unitario", 0),
+            "PreÃ§o Fornecedor": row.get("preco_unitario", 0),
             "Valor Fornecedor": row.get("valor_total", 0),
-            "Diferença Qtd": row.get("quantidade", 0),
-            "Diferença Preço": row.get("preco_unitario", 0),
-            "Diferença Preço %": 100.0 if float(row.get("preco_unitario", 0) or 0) > 0 else 0.0,
-            "Diferença Valor": row.get("valor_total", 0),
+            "DiferenÃ§a Qtd": row.get("quantidade", 0),
+            "DiferenÃ§a PreÃ§o": row.get("preco_unitario", 0),
+            "DiferenÃ§a PreÃ§o %": 100.0 if float(row.get("preco_unitario", 0) or 0) > 0 else 0.0,
+            "DiferenÃ§a Valor": row.get("valor_total", 0),
         })
 
     return pd.DataFrame(linhas)
@@ -4883,26 +5089,26 @@ def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw, mapa_unica=None,
 
 def gerar_relatorio_executivo_comparativo(df_comparativo, limite_itens=80):
     """
-    Gera um relatório executivo em Markdown para a conferência do pedido.
-    O texto é dividido por tópicos para facilitar copiar/colar no WhatsApp, e-mail ou ata.
+    Gera um relatÃ³rio executivo em Markdown para a conferÃªncia do pedido.
+    O texto Ã© dividido por tÃ³picos para facilitar copiar/colar no WhatsApp, e-mail ou ata.
     """
     if df_comparativo is None or df_comparativo.empty:
-        return """# 📋 RELATÓRIO DE CONFERÊNCIA DO PEDIDO
+        return """# ðŸ“‹ RELATÃ“RIO DE CONFERÃŠNCIA DO PEDIDO
 
-## ✅ Resumo Geral
+## âœ… Resumo Geral
 
-- Nenhum item foi encontrado para comparação.
+- Nenhum item foi encontrado para comparaÃ§Ã£o.
 
-## ✅ Conclusão
+## âœ… ConclusÃ£o
 
-Não há divergências a reportar porque o comparativo está vazio.
+NÃ£o hÃ¡ divergÃªncias a reportar porque o comparativo estÃ¡ vazio.
 """
 
     df = df_comparativo.copy()
     for col in [
-        "Qtd Única", "Qtd Fornecedor", "Preço Única", "Preço Fornecedor",
-        "Diferença Qtd", "Diferença Preço", "Diferença Preço %", "Diferença Valor",
-        "Valor Única", "Valor Fornecedor",
+        "Qtd Ãšnica", "Qtd Fornecedor", "PreÃ§o Ãšnica", "PreÃ§o Fornecedor",
+        "DiferenÃ§a Qtd", "DiferenÃ§a PreÃ§o", "DiferenÃ§a PreÃ§o %", "DiferenÃ§a Valor",
+        "Valor Ãšnica", "Valor Fornecedor",
     ]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
@@ -4910,24 +5116,24 @@ Não há divergências a reportar porque o comparativo está vazio.
     total = len(df)
     qtd_ok = int((df["Status"] == "OK").sum()) if "Status" in df.columns else 0
     qtd_div = int((df["Status"] == "Divergente").sum()) if "Status" in df.columns else 0
-    qtd_nao_fornecedor = int((df["Status"] == "Não encontrado no fornecedor").sum()) if "Status" in df.columns else 0
+    qtd_nao_fornecedor = int((df["Status"] == "NÃ£o encontrado no fornecedor").sum()) if "Status" in df.columns else 0
     qtd_somente_fornecedor = int((df["Status"] == "Somente fornecedor").sum()) if "Status" in df.columns else 0
 
     diverg_qtd = df[
-        (df["Status"].isin(["Divergente", "Somente fornecedor", "Não encontrado no fornecedor"]))
-        & (df["Diferença Qtd"].abs() > 0.0001)
+        (df["Status"].isin(["Divergente", "Somente fornecedor", "NÃ£o encontrado no fornecedor"]))
+        & (df["DiferenÃ§a Qtd"].abs() > 0.0001)
     ].copy()
     diverg_preco = df[
-        (df["Status"].isin(["Divergente", "Somente fornecedor", "Não encontrado no fornecedor"]))
-        & (df["Diferença Preço"].abs() > 0.01)
+        (df["Status"].isin(["Divergente", "Somente fornecedor", "NÃ£o encontrado no fornecedor"]))
+        & (df["DiferenÃ§a PreÃ§o"].abs() > 0.01)
     ].copy()
 
     def nome_item(row):
-        codigo = str(row.get("Código Única") or row.get("Código Fornecedor") or "").strip()
-        desc = str(row.get("Descrição Única") or row.get("Descrição Fornecedor") or "").strip()
+        codigo = str(row.get("CÃ³digo Ãšnica") or row.get("CÃ³digo Fornecedor") or "").strip()
+        desc = str(row.get("DescriÃ§Ã£o Ãšnica") or row.get("DescriÃ§Ã£o Fornecedor") or "").strip()
         if codigo and desc:
             return f"{codigo} - {desc}"
-        return codigo or desc or "item sem código"
+        return codigo or desc or "item sem cÃ³digo"
 
     def sinal_num(valor, casas=1):
         try:
@@ -4946,133 +5152,133 @@ Não há divergências a reportar porque o comparativo está vazio.
             return str(valor)
 
     linhas = []
-    linhas.append("# 📋 RELATÓRIO DE CONFERÊNCIA DO PEDIDO")
+    linhas.append("# ðŸ“‹ RELATÃ“RIO DE CONFERÃŠNCIA DO PEDIDO")
     linhas.append("")
-    linhas.append("## ✅ Resumo Geral")
+    linhas.append("## âœ… Resumo Geral")
     linhas.append("")
     linhas.append(f"- **Itens comparados:** {format_int_br(total)}")
-    linhas.append(f"- **Itens sem divergência:** {format_int_br(qtd_ok)}")
-    linhas.append(f"- **Itens com divergência:** {format_int_br(qtd_div)}")
-    linhas.append(f"- **Itens no Pedido Única não encontrados no fornecedor:** {format_int_br(qtd_nao_fornecedor)}")
-    linhas.append(f"- **Itens enviados pelo fornecedor que não constam no Pedido Única:** {format_int_br(qtd_somente_fornecedor)}")
+    linhas.append(f"- **Itens sem divergÃªncia:** {format_int_br(qtd_ok)}")
+    linhas.append(f"- **Itens com divergÃªncia:** {format_int_br(qtd_div)}")
+    linhas.append(f"- **Itens no Pedido Ãšnica nÃ£o encontrados no fornecedor:** {format_int_br(qtd_nao_fornecedor)}")
+    linhas.append(f"- **Itens enviados pelo fornecedor que nÃ£o constam no Pedido Ãšnica:** {format_int_br(qtd_somente_fornecedor)}")
     linhas.append("")
 
-    linhas.append("## 📦 Divergências de Quantidade")
+    linhas.append("## ðŸ“¦ DivergÃªncias de Quantidade")
     linhas.append("")
     if diverg_qtd.empty:
-        linhas.append("- Não foram identificadas divergências de quantidade.")
+        linhas.append("- NÃ£o foram identificadas divergÃªncias de quantidade.")
     else:
-        linhas.append("Foram identificadas divergências nas quantidades dos seguintes itens:")
+        linhas.append("Foram identificadas divergÃªncias nas quantidades dos seguintes itens:")
         linhas.append("")
         for _, r in diverg_qtd.head(limite_itens).iterrows():
             status = str(r.get("Status", ""))
             item = nome_item(r)
-            linhas.append(f"### 🔸 {item}")
+            linhas.append(f"### ðŸ”¸ {item}")
             if status == "Somente fornecedor":
-                linhas.append("- **Situação:** item consta somente no pedido do fornecedor.")
+                linhas.append("- **SituaÃ§Ã£o:** item consta somente no pedido do fornecedor.")
                 linhas.append(f"- **Quantidade no fornecedor:** {format_num_br(r.get('Qtd Fornecedor', 0), 1)}")
-                linhas.append("- **Quantidade no Pedido Única:** 0")
-                linhas.append("- **Ação recomendada:** verificar se o fornecedor incluiu item indevido ou se houve alteração posterior no pedido.")
-            elif status == "Não encontrado no fornecedor":
-                linhas.append("- **Situação:** item consta no Pedido Única, mas não foi encontrado no fornecedor.")
-                linhas.append(f"- **Quantidade no Pedido Única:** {format_num_br(r.get('Qtd Única', 0), 1)}")
+                linhas.append("- **Quantidade no Pedido Ãšnica:** 0")
+                linhas.append("- **AÃ§Ã£o recomendada:** verificar se o fornecedor incluiu item indevido ou se houve alteraÃ§Ã£o posterior no pedido.")
+            elif status == "NÃ£o encontrado no fornecedor":
+                linhas.append("- **SituaÃ§Ã£o:** item consta no Pedido Ãšnica, mas nÃ£o foi encontrado no fornecedor.")
+                linhas.append(f"- **Quantidade no Pedido Ãšnica:** {format_num_br(r.get('Qtd Ãšnica', 0), 1)}")
                 linhas.append("- **Quantidade no fornecedor:** 0")
-                linhas.append("- **Ação recomendada:** confirmar se houve corte, ruptura ou omissão do item pelo fornecedor.")
+                linhas.append("- **AÃ§Ã£o recomendada:** confirmar se houve corte, ruptura ou omissÃ£o do item pelo fornecedor.")
             else:
-                linhas.append(f"- **Quantidade no Pedido Única:** {format_num_br(r.get('Qtd Única', 0), 1)}")
+                linhas.append(f"- **Quantidade no Pedido Ãšnica:** {format_num_br(r.get('Qtd Ãšnica', 0), 1)}")
                 linhas.append(f"- **Quantidade no fornecedor:** {format_num_br(r.get('Qtd Fornecedor', 0), 1)}")
-                linhas.append(f"- **Diferença:** {sinal_num(r.get('Diferença Qtd', 0), 1)} unidade(s)")
+                linhas.append(f"- **DiferenÃ§a:** {sinal_num(r.get('DiferenÃ§a Qtd', 0), 1)} unidade(s)")
             linhas.append("")
         if len(diverg_qtd) > limite_itens:
-            linhas.append(f"- Existem mais **{format_int_br(len(diverg_qtd) - limite_itens)}** divergência(s) de quantidade não listadas neste texto.")
+            linhas.append(f"- Existem mais **{format_int_br(len(diverg_qtd) - limite_itens)}** divergÃªncia(s) de quantidade nÃ£o listadas neste texto.")
             linhas.append("")
 
-    linhas.append("## 💰 Divergências de Preço")
+    linhas.append("## ðŸ’° DivergÃªncias de PreÃ§o")
     linhas.append("")
     if diverg_preco.empty:
-        linhas.append("- Não foram identificadas divergências de preço unitário.")
+        linhas.append("- NÃ£o foram identificadas divergÃªncias de preÃ§o unitÃ¡rio.")
     else:
-        linhas.append("Foram identificadas divergências nos preços unitários dos seguintes itens:")
+        linhas.append("Foram identificadas divergÃªncias nos preÃ§os unitÃ¡rios dos seguintes itens:")
         linhas.append("")
         for _, r in diverg_preco.head(limite_itens).iterrows():
             status = str(r.get("Status", ""))
             item = nome_item(r)
-            linhas.append(f"### 🔸 {item}")
+            linhas.append(f"### ðŸ”¸ {item}")
             if status == "Somente fornecedor":
-                linhas.append("- **Situação:** item consta somente no pedido do fornecedor.")
-                linhas.append(f"- **Preço fornecedor:** {format_moeda_br(r.get('Preço Fornecedor', 0))}")
-                linhas.append("- **Preço Pedido Única:** R$ 0,00")
-                linhas.append("- **Ação recomendada:** validar se o item deve entrar no pedido antes da aprovação.")
-            elif status == "Não encontrado no fornecedor":
-                linhas.append("- **Situação:** item consta somente no Pedido Única.")
-                linhas.append(f"- **Preço Pedido Única:** {format_moeda_br(r.get('Preço Única', 0))}")
-                linhas.append("- **Preço fornecedor:** R$ 0,00")
-                linhas.append("- **Ação recomendada:** confirmar se o fornecedor retirou o item ou se houve falha no arquivo recebido.")
+                linhas.append("- **SituaÃ§Ã£o:** item consta somente no pedido do fornecedor.")
+                linhas.append(f"- **PreÃ§o fornecedor:** {format_moeda_br(r.get('PreÃ§o Fornecedor', 0))}")
+                linhas.append("- **PreÃ§o Pedido Ãšnica:** R$ 0,00")
+                linhas.append("- **AÃ§Ã£o recomendada:** validar se o item deve entrar no pedido antes da aprovaÃ§Ã£o.")
+            elif status == "NÃ£o encontrado no fornecedor":
+                linhas.append("- **SituaÃ§Ã£o:** item consta somente no Pedido Ãšnica.")
+                linhas.append(f"- **PreÃ§o Pedido Ãšnica:** {format_moeda_br(r.get('PreÃ§o Ãšnica', 0))}")
+                linhas.append("- **PreÃ§o fornecedor:** R$ 0,00")
+                linhas.append("- **AÃ§Ã£o recomendada:** confirmar se o fornecedor retirou o item ou se houve falha no arquivo recebido.")
             else:
-                linhas.append(f"- **Preço Pedido Única:** {format_moeda_br(r.get('Preço Única', 0))}")
-                linhas.append(f"- **Preço fornecedor:** {format_moeda_br(r.get('Preço Fornecedor', 0))}")
-                linhas.append(f"- **Diferença unitária:** {format_moeda_br(r.get('Diferença Preço', 0))}")
-                linhas.append(f"- **Diferença percentual:** {sinal_pct(r.get('Diferença Preço %', 0))}")
+                linhas.append(f"- **PreÃ§o Pedido Ãšnica:** {format_moeda_br(r.get('PreÃ§o Ãšnica', 0))}")
+                linhas.append(f"- **PreÃ§o fornecedor:** {format_moeda_br(r.get('PreÃ§o Fornecedor', 0))}")
+                linhas.append(f"- **DiferenÃ§a unitÃ¡ria:** {format_moeda_br(r.get('DiferenÃ§a PreÃ§o', 0))}")
+                linhas.append(f"- **DiferenÃ§a percentual:** {sinal_pct(r.get('DiferenÃ§a PreÃ§o %', 0))}")
             linhas.append("")
         if len(diverg_preco) > limite_itens:
-            linhas.append(f"- Existem mais **{format_int_br(len(diverg_preco) - limite_itens)}** divergência(s) de preço não listadas neste texto.")
+            linhas.append(f"- Existem mais **{format_int_br(len(diverg_preco) - limite_itens)}** divergÃªncia(s) de preÃ§o nÃ£o listadas neste texto.")
             linhas.append("")
 
     somente_forn = df[df["Status"] == "Somente fornecedor"].copy()
-    nao_encontrado = df[df["Status"] == "Não encontrado no fornecedor"].copy()
+    nao_encontrado = df[df["Status"] == "NÃ£o encontrado no fornecedor"].copy()
 
-    linhas.append("## ⚠️ Itens Apenas no Fornecedor")
+    linhas.append("## âš ï¸ Itens Apenas no Fornecedor")
     linhas.append("")
     if somente_forn.empty:
         linhas.append("- Nenhum item foi encontrado apenas no arquivo do fornecedor.")
     else:
-        linhas.append("Os itens abaixo foram enviados pelo fornecedor, porém não constam no Pedido Única considerado para comparação:")
+        linhas.append("Os itens abaixo foram enviados pelo fornecedor, porÃ©m nÃ£o constam no Pedido Ãšnica considerado para comparaÃ§Ã£o:")
         linhas.append("")
         for _, r in somente_forn.head(limite_itens).iterrows():
-            linhas.append(f"- **{nome_item(r)}** | Qtd: **{format_num_br(r.get('Qtd Fornecedor', 0), 1)}** | Preço: **{format_moeda_br(r.get('Preço Fornecedor', 0))}**")
+            linhas.append(f"- **{nome_item(r)}** | Qtd: **{format_num_br(r.get('Qtd Fornecedor', 0), 1)}** | PreÃ§o: **{format_moeda_br(r.get('PreÃ§o Fornecedor', 0))}**")
         if len(somente_forn) > limite_itens:
-            linhas.append(f"- Mais **{format_int_br(len(somente_forn) - limite_itens)}** item(ns) não listado(s).")
+            linhas.append(f"- Mais **{format_int_br(len(somente_forn) - limite_itens)}** item(ns) nÃ£o listado(s).")
     linhas.append("")
 
-    linhas.append("## ⚠️ Itens do Pedido Única não encontrados no fornecedor")
+    linhas.append("## âš ï¸ Itens do Pedido Ãšnica nÃ£o encontrados no fornecedor")
     linhas.append("")
     if nao_encontrado.empty:
-        linhas.append("- Nenhum item do Pedido Única ficou sem correspondência no fornecedor.")
+        linhas.append("- Nenhum item do Pedido Ãšnica ficou sem correspondÃªncia no fornecedor.")
     else:
-        linhas.append("Os itens abaixo constam no Pedido Única, mas não foram encontrados no arquivo do fornecedor:")
+        linhas.append("Os itens abaixo constam no Pedido Ãšnica, mas nÃ£o foram encontrados no arquivo do fornecedor:")
         linhas.append("")
         for _, r in nao_encontrado.head(limite_itens).iterrows():
-            linhas.append(f"- **{nome_item(r)}** | Qtd: **{format_num_br(r.get('Qtd Única', 0), 1)}** | Preço: **{format_moeda_br(r.get('Preço Única', 0))}**")
+            linhas.append(f"- **{nome_item(r)}** | Qtd: **{format_num_br(r.get('Qtd Ãšnica', 0), 1)}** | PreÃ§o: **{format_moeda_br(r.get('PreÃ§o Ãšnica', 0))}**")
         if len(nao_encontrado) > limite_itens:
-            linhas.append(f"- Mais **{format_int_br(len(nao_encontrado) - limite_itens)}** item(ns) não listado(s).")
+            linhas.append(f"- Mais **{format_int_br(len(nao_encontrado) - limite_itens)}** item(ns) nÃ£o listado(s).")
     linhas.append("")
 
     percentual_ok = (qtd_ok / total * 100) if total else 0
     percentual_div = ((total - qtd_ok) / total * 100) if total else 0
-    linhas.append("## 📊 Indicadores da Conferência")
+    linhas.append("## ðŸ“Š Indicadores da ConferÃªncia")
     linhas.append("")
-    linhas.append(f"- **Percentual sem divergência:** {format_num_br(percentual_ok, 2)}%")
+    linhas.append(f"- **Percentual sem divergÃªncia:** {format_num_br(percentual_ok, 2)}%")
     linhas.append(f"- **Percentual com algum apontamento:** {format_num_br(percentual_div, 2)}%")
-    linhas.append(f"- **Total de divergências de quantidade:** {format_int_br(len(diverg_qtd))}")
-    linhas.append(f"- **Total de divergências de preço:** {format_int_br(len(diverg_preco))}")
+    linhas.append(f"- **Total de divergÃªncias de quantidade:** {format_int_br(len(diverg_qtd))}")
+    linhas.append(f"- **Total de divergÃªncias de preÃ§o:** {format_int_br(len(diverg_preco))}")
     linhas.append("")
 
-    linhas.append("## ✅ Conclusão")
+    linhas.append("## âœ… ConclusÃ£o")
     linhas.append("")
     if qtd_div == 0 and qtd_nao_fornecedor == 0 and qtd_somente_fornecedor == 0:
-        linhas.append("A conferência foi finalizada sem divergências relevantes. O pedido pode seguir para validação final.")
+        linhas.append("A conferÃªncia foi finalizada sem divergÃªncias relevantes. O pedido pode seguir para validaÃ§Ã£o final.")
     else:
-        linhas.append("A conferência encontrou pontos que precisam ser validados antes da aprovação final do pedido:")
+        linhas.append("A conferÃªncia encontrou pontos que precisam ser validados antes da aprovaÃ§Ã£o final do pedido:")
         if len(diverg_qtd) > 0:
-            linhas.append(f"- **{format_int_br(len(diverg_qtd))}** divergência(s) de quantidade.")
+            linhas.append(f"- **{format_int_br(len(diverg_qtd))}** divergÃªncia(s) de quantidade.")
         if len(diverg_preco) > 0:
-            linhas.append(f"- **{format_int_br(len(diverg_preco))}** divergência(s) de preço.")
+            linhas.append(f"- **{format_int_br(len(diverg_preco))}** divergÃªncia(s) de preÃ§o.")
         if qtd_somente_fornecedor > 0:
-            linhas.append(f"- **{format_int_br(qtd_somente_fornecedor)}** item(ns) enviado(s) pelo fornecedor que não constam no Pedido Única.")
+            linhas.append(f"- **{format_int_br(qtd_somente_fornecedor)}** item(ns) enviado(s) pelo fornecedor que nÃ£o constam no Pedido Ãšnica.")
         if qtd_nao_fornecedor > 0:
-            linhas.append(f"- **{format_int_br(qtd_nao_fornecedor)}** item(ns) do Pedido Única não encontrado(s) no fornecedor.")
+            linhas.append(f"- **{format_int_br(qtd_nao_fornecedor)}** item(ns) do Pedido Ãšnica nÃ£o encontrado(s) no fornecedor.")
         linhas.append("")
-        linhas.append("Recomenda-se validar as divergências com o fornecedor antes de aprovar o pedido.")
+        linhas.append("Recomenda-se validar as divergÃªncias com o fornecedor antes de aprovar o pedido.")
 
     return "\n".join(linhas).strip()
 
@@ -5080,7 +5286,7 @@ Não há divergências a reportar porque o comparativo está vazio.
 def gerar_texto_divergencias_comparativo(df_comparativo):
     """
     Mantida por compatibilidade com o restante do app.
-    Agora retorna o relatório executivo completo e um texto focado em preço.
+    Agora retorna o relatÃ³rio executivo completo e um texto focado em preÃ§o.
     """
     relatorio = gerar_relatorio_executivo_comparativo(df_comparativo)
     return relatorio, relatorio
@@ -5096,7 +5302,7 @@ def colorir_comparativo_pedidos(row):
 
 def gerar_excel_comparativo_pedidos(df_comparativo):
     if Workbook is None:
-        raise RuntimeError("A biblioteca openpyxl não está instalada. Rode: python -m pip install openpyxl")
+        raise RuntimeError("A biblioteca openpyxl nÃ£o estÃ¡ instalada. Rode: python -m pip install openpyxl")
     wb = Workbook()
     ws = wb.active
     ws.title = "Comparativo"
@@ -5109,7 +5315,7 @@ def gerar_excel_comparativo_pedidos(df_comparativo):
         cell.font = cell.font.copy(bold=True)
     for idx, col in enumerate(df_comparativo.columns, start=1):
         letter = ws.cell(row=1, column=idx).column_letter
-        if "Descrição" in col:
+        if "DescriÃ§Ã£o" in col:
             ws.column_dimensions[letter].width = 42
         elif "%" in col:
             ws.column_dimensions[letter].width = 16
@@ -5119,7 +5325,7 @@ def gerar_excel_comparativo_pedidos(df_comparativo):
                     cell.value = float(cell.value or 0) / 100
                 except Exception:
                     pass
-        elif "Preço" in col or "Valor" in col:
+        elif "PreÃ§o" in col or "Valor" in col:
             ws.column_dimensions[letter].width = 16
             for cell in ws[letter][1:]:
                 cell.number_format = 'R$ #,##0.00'
@@ -5136,7 +5342,7 @@ def gerar_excel_comparativo_pedidos(df_comparativo):
 
 
 def render_pagina_comparativo_pedidos():
-    st.markdown('<div class="page-card"><div class="page-card-title">Comparativo de Pedidos</div><div class="page-card-subtitle">Compare o pedido da Única com o fornecedor usando o Código de Fábrica como vínculo principal.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="page-card"><div class="page-card-title">Comparativo de Pedidos</div><div class="page-card-subtitle">Compare o pedido da Ãšnica com o fornecedor usando o CÃ³digo de FÃ¡brica como vÃ­nculo principal.</div>', unsafe_allow_html=True)
 
     if "relacionamentos_comparativo" not in st.session_state:
         st.session_state["relacionamentos_comparativo"] = {}
@@ -5144,25 +5350,25 @@ def render_pagina_comparativo_pedidos():
     col1, col2 = st.columns(2)
     with col1:
         link_unica_sheets = st.text_input(
-            "Link do Google Sheets do pedido da Única",
+            "Link do Google Sheets do pedido da Ãšnica",
             value="",
             key="link_comparativo_unica_sheets",
             placeholder="https://docs.google.com/spreadsheets/d/.../edit#gid=...",
         )
         link_unica_sheets = str(link_unica_sheets or "").strip()
-        st.caption("Opcional. Se preenchido, o sistema lê a aba 'Pedido' do Sheets e ignora o upload da Única.")
-        pedido_unica = st.file_uploader("Planilha do pedido da Única", type=["xlsx", "xls", "csv", "html", "htm"], key="upload_comparativo_unica")
+        st.caption("Opcional. Se preenchido, o sistema lÃª a aba 'Pedido' do Sheets e ignora o upload da Ãšnica.")
+        pedido_unica = st.file_uploader("Planilha do pedido da Ãšnica", type=["xlsx", "xls", "csv", "txt", "html", "htm"], key="upload_comparativo_unica")
     with col2:
         pedido_fornecedor = st.file_uploader(
             "Pedido do fornecedor",
-            type=["xlsx", "xls", "csv", "pdf", "html", "htm", "png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"],
+            type=["xlsx", "xls", "csv", "txt", "pdf", "html", "htm", "png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"],
             key="upload_comparativo_fornecedor",
         )
 
     st.markdown("</div>", unsafe_allow_html=True)
 
     if (not link_unica_sheets and not pedido_unica) or not pedido_fornecedor:
-        st.info("Cole o link ou envie o pedido da Única, e envie o arquivo do fornecedor para iniciar o comparativo.")
+        st.info("Cole o link ou envie o pedido da Ãšnica, e envie o arquivo do fornecedor para iniciar o comparativo.")
         return
 
     try:
@@ -5173,15 +5379,15 @@ def render_pagina_comparativo_pedidos():
             df_unica = ler_arquivo_comparativo(pedido_unica)
             origem_unica = "upload"
         if df_unica.empty:
-            st.error("Não consegui ler o pedido da Única.")
+            st.error("NÃ£o consegui ler o pedido da Ãšnica.")
             return
-        st.success(f"Pedido da Única lido via {origem_unica}: {len(df_unica)} linha(s).")
+        st.success(f"Pedido da Ãšnica lido via {origem_unica}: {len(df_unica)} linha(s).")
 
-        st.markdown("### 1. Conferência e mapeamento das colunas")
-        with st.expander("Prévia do Pedido Única", expanded=False):
+        st.markdown("### 1. ConferÃªncia e mapeamento das colunas")
+        with st.expander("PrÃ©via do Pedido Ãšnica", expanded=False):
             st.dataframe(df_unica.head(30), use_container_width=True, hide_index=True)
 
-        mapa_unica = _mapear_colunas_comparativo(df_unica, "cmp_unica", "Pedido Única")
+        mapa_unica = _mapear_colunas_comparativo(df_unica, "cmp_unica", "Pedido Ãšnica")
         if not mapa_unica:
             return
 
@@ -5189,45 +5395,45 @@ def render_pagina_comparativo_pedidos():
         df_fornecedor = ler_arquivo_comparativo(pedido_fornecedor, codigos_referencia=codigos_ref)
         if df_fornecedor.empty:
             st.error(
-                "Não consegui ler o arquivo do fornecedor. Se for imagem ou PDF escaneado, "
-                "o OCR/Tesseract precisa estar disponível no ambiente do deploy."
+                "NÃ£o consegui ler o arquivo do fornecedor. Se for imagem ou PDF escaneado, "
+                "o OCR/Tesseract precisa estar disponÃ­vel no ambiente do deploy."
             )
             return
 
-        with st.expander("Prévia do Pedido Fornecedor", expanded=False):
+        with st.expander("PrÃ©via do Pedido Fornecedor", expanded=False):
             st.dataframe(df_fornecedor.head(30), use_container_width=True, hide_index=True)
 
         mapa_fornecedor = _mapear_colunas_comparativo(df_fornecedor, "cmp_fornecedor", "Pedido Fornecedor")
         if not mapa_fornecedor:
             return
 
-        st.markdown("### 2. Relacionamento manual dos itens sem identificação")
+        st.markdown("### 2. Relacionamento manual dos itens sem identificaÃ§Ã£o")
         relacionamentos = st.session_state.get("relacionamentos_comparativo", {})
         comparativo_base = montar_comparativo_pedidos(df_unica, df_fornecedor, mapa_unica, mapa_fornecedor, relacionamentos)
 
-        nao_encontrados = comparativo_base[comparativo_base["Status"] == "Não encontrado no fornecedor"].copy()
+        nao_encontrados = comparativo_base[comparativo_base["Status"] == "NÃ£o encontrado no fornecedor"].copy()
         somente_fornecedor = comparativo_base[comparativo_base["Status"] == "Somente fornecedor"].copy()
 
         if not nao_encontrados.empty and not somente_fornecedor.empty:
-            with st.expander("Relacionar manualmente itens não encontrados", expanded=True):
-                st.caption("O vínculo automático é feito apenas por Código de Fábrica. Use esta tela somente para relacionar manualmente códigos que não bateram entre os arquivos.")
-                opcoes_fornecedor = {"-- Não relacionar --": ""}
+            with st.expander("Relacionar manualmente itens nÃ£o encontrados", expanded=True):
+                st.caption("O vÃ­nculo automÃ¡tico Ã© feito apenas por CÃ³digo de FÃ¡brica. Use esta tela somente para relacionar manualmente cÃ³digos que nÃ£o bateram entre os arquivos.")
+                opcoes_fornecedor = {"-- NÃ£o relacionar --": ""}
                 for _, r in somente_fornecedor.iterrows():
-                    label = f'{str(r.get("Código Fornecedor", "")).strip()} | {str(r.get("Descrição Fornecedor", "")).strip()} | Qtd {format_num_br(r.get("Qtd Fornecedor", 0), 1)} | R$ {format_num_br(r.get("Preço Fornecedor", 0), 2)}'
+                    label = f'{str(r.get("CÃ³digo Fornecedor", "")).strip()} | {str(r.get("DescriÃ§Ã£o Fornecedor", "")).strip()} | Qtd {format_num_br(r.get("Qtd Fornecedor", 0), 1)} | R$ {format_num_br(r.get("PreÃ§o Fornecedor", 0), 2)}'
                     opcoes_fornecedor[label[:250]] = str(r.get("Chave Fornecedor", ""))
 
                 novos_rel = dict(relacionamentos)
                 limite_manual = min(len(nao_encontrados), 80)
                 for i, (_, r) in enumerate(nao_encontrados.head(limite_manual).iterrows()):
-                    st.markdown(f'**Única:** {str(r.get("Código Única", "")).strip()} | {str(r.get("Descrição Única", "")).strip()} | Qtd {format_num_br(r.get("Qtd Única", 0), 1)}')
+                    st.markdown(f'**Ãšnica:** {str(r.get("CÃ³digo Ãšnica", "")).strip()} | {str(r.get("DescriÃ§Ã£o Ãšnica", "")).strip()} | Qtd {format_num_br(r.get("Qtd Ãšnica", 0), 1)}')
                     escolha = st.selectbox(
                         "Item correspondente no fornecedor",
                         list(opcoes_fornecedor.keys()),
-                        key=f"rel_manual_{i}_{str(r.get('Chave Única', ''))[:20]}",
+                        key=f"rel_manual_{i}_{str(r.get('Chave Ãšnica', ''))[:20]}",
                     )
                     chave_f = opcoes_fornecedor.get(escolha, "")
                     if chave_f:
-                        novos_rel[str(r.get("Chave Única", ""))] = chave_f
+                        novos_rel[str(r.get("Chave Ãšnica", ""))] = chave_f
 
                 if len(nao_encontrados) > limite_manual:
                     st.info(f"Mostrando os primeiros {limite_manual} itens para relacionamento manual.")
@@ -5240,7 +5446,7 @@ def render_pagina_comparativo_pedidos():
                     st.session_state["relacionamentos_comparativo"] = {}
                     st.rerun()
         else:
-            st.info("Não há itens pendentes para relacionamento manual neste momento.")
+            st.info("NÃ£o hÃ¡ itens pendentes para relacionamento manual neste momento.")
 
         st.markdown("### 3. Resultado do comparativo")
         comparativo = montar_comparativo_pedidos(
@@ -5255,11 +5461,11 @@ def render_pagina_comparativo_pedidos():
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("OK", int((comparativo["Status"] == "OK").sum()))
         c2.metric("Divergentes", int((comparativo["Status"] == "Divergente").sum()))
-        c3.metric("Não encontrados", int((comparativo["Status"] == "Não encontrado no fornecedor").sum()))
+        c3.metric("NÃ£o encontrados", int((comparativo["Status"] == "NÃ£o encontrado no fornecedor").sum()))
         c4.metric("Somente fornecedor", int((comparativo["Status"] == "Somente fornecedor").sum()))
 
         relatorio_executivo = gerar_relatorio_executivo_comparativo(comparativo)
-        with st.expander("📋 Relatório executivo da conferência", expanded=True):
+        with st.expander("ðŸ“‹ RelatÃ³rio executivo da conferÃªncia", expanded=True):
             st.markdown(relatorio_executivo)
             st.text_area(
                 "Texto pronto para copiar",
@@ -5272,12 +5478,12 @@ def render_pagina_comparativo_pedidos():
         view = comparativo.copy()
         if termo:
             filtro = pd.Series(False, index=view.index)
-            for col in ["Código Única", "Descrição Única", "Código Fornecedor", "Descrição Fornecedor", "Status", "Método"]:
+            for col in ["CÃ³digo Ãšnica", "DescriÃ§Ã£o Ãšnica", "CÃ³digo Fornecedor", "DescriÃ§Ã£o Fornecedor", "Status", "MÃ©todo"]:
                 if col in view.columns:
                     filtro = filtro | view[col].astype(str).str.lower().str.contains(termo, na=False)
             view = view[filtro].copy()
 
-        colunas_ocultar = ["Chave Única", "Chave Fornecedor"]
+        colunas_ocultar = ["Chave Ãšnica", "Chave Fornecedor"]
         view_exibicao = view.drop(columns=colunas_ocultar, errors="ignore")
         st.dataframe(
             view_exibicao.style.apply(colorir_comparativo_pedidos, axis=1).format(formatadores_para_tabela(view_exibicao)),
@@ -5305,24 +5511,24 @@ def inicializar_pedido_editavel(tabela_resumo):
 
     for col in colunas_base:
         if col not in base.columns:
-            base[col] = 0 if col not in ["codigo", "descricao", "Código Fábrica", "Data Última Compra"] else ""
+            base[col] = 0 if col not in ["codigo", "descricao", "CÃ³digo FÃ¡brica", "Data Ãšltima Compra"] else ""
 
-    # garante existência das colunas calculadas antes de ordenar
-    base["PEDIDO Final"] = pd.to_numeric(base["Sugestão arredondada"], errors="coerce").fillna(0).round(0).astype(int)
-    base["Origem Sugestão"] = "Sugestão do sistema"
-    base["Valor Final do Pedido"] = base["PEDIDO Final"] * pd.to_numeric(base["Preço Última Compra"], errors="coerce").fillna(0)
+    # garante existÃªncia das colunas calculadas antes de ordenar
+    base["PEDIDO Final"] = pd.to_numeric(base["SugestÃ£o arredondada"], errors="coerce").fillna(0).round(0).astype(int)
+    base["Origem SugestÃ£o"] = "SugestÃ£o do sistema"
+    base["Valor Final do Pedido"] = base["PEDIDO Final"] * pd.to_numeric(base["PreÃ§o Ãšltima Compra"], errors="coerce").fillna(0)
     base = base[colunas_base].copy()
     return base
 
 def atualizar_valor_e_origem(df):
     df = df.copy()
     df["PEDIDO Final"] = pd.to_numeric(df.get("PEDIDO Final", 0), errors="coerce").fillna(0).round(0).astype(int)
-    df["Sugestão Sistema"] = pd.to_numeric(df.get("Sugestão Sistema", 0), errors="coerce").fillna(0).round(0).astype(int)
-    df["Sugestão arredondada"] = pd.to_numeric(df.get("Sugestão arredondada", df["Sugestão Sistema"]), errors="coerce").fillna(0).round(0).astype(int)
-    df["Preço Última Compra"] = pd.to_numeric(df.get("Preço Última Compra", 0), errors="coerce").fillna(0)
-    df["Valor Final do Pedido"] = df["PEDIDO Final"] * df["Preço Última Compra"]
-    df["Origem Sugestão"] = df.apply(
-        lambda row: "Sugestão do sistema" if int(row["PEDIDO Final"]) == int(row["Sugestão arredondada"]) else "Alterado pelo usuário",
+    df["SugestÃ£o Sistema"] = pd.to_numeric(df.get("SugestÃ£o Sistema", 0), errors="coerce").fillna(0).round(0).astype(int)
+    df["SugestÃ£o arredondada"] = pd.to_numeric(df.get("SugestÃ£o arredondada", df["SugestÃ£o Sistema"]), errors="coerce").fillna(0).round(0).astype(int)
+    df["PreÃ§o Ãšltima Compra"] = pd.to_numeric(df.get("PreÃ§o Ãšltima Compra", 0), errors="coerce").fillna(0)
+    df["Valor Final do Pedido"] = df["PEDIDO Final"] * df["PreÃ§o Ãšltima Compra"]
+    df["Origem SugestÃ£o"] = df.apply(
+        lambda row: "SugestÃ£o do sistema" if int(row["PEDIDO Final"]) == int(row["SugestÃ£o arredondada"]) else "Alterado pelo usuÃ¡rio",
         axis=1,
     )
     return df
@@ -5332,8 +5538,8 @@ def atualizar_valor_e_origem(df):
 
 def ajustar_pedido_para_multiplo_embalagem(qtd, embalagem):
     """
-    Valida o PEDIDO Final pelo múltiplo da embalagem.
-    Se a quantidade não for múltipla, ajusta sempre para o próximo múltiplo acima.
+    Valida o PEDIDO Final pelo mÃºltiplo da embalagem.
+    Se a quantidade nÃ£o for mÃºltipla, ajusta sempre para o prÃ³ximo mÃºltiplo acima.
     Ex.: qtd 45 e embalagem 12 => 48.
     """
     try:
@@ -5357,7 +5563,7 @@ def ajustar_pedido_para_multiplo_embalagem(qtd, embalagem):
 
 def validar_pedidos_por_embalagem(df):
     """
-    Ajusta todos os pedidos para múltiplos da embalagem e devolve mensagens de alerta.
+    Ajusta todos os pedidos para mÃºltiplos da embalagem e devolve mensagens de alerta.
     """
     df = df.copy()
     mensagens = []
@@ -5377,7 +5583,7 @@ def validar_pedidos_por_embalagem(df):
             codigo = str(row.get("codigo", "")).zfill(5)
             descricao = str(row.get("descricao", "")).strip()
             mensagens.append(
-                f"Item {codigo} - {descricao}: a embalagem é com {embalagem} unidades. "
+                f"Item {codigo} - {descricao}: a embalagem Ã© com {embalagem} unidades. "
                 f"O pedido {qtd_original} foi ajustado para {qtd_ajustada}."
             )
             df.at[idx, "PEDIDO Final"] = qtd_ajustada
@@ -5388,16 +5594,16 @@ def totalizar_valor_pedido(df):
     if df.empty:
         return 0.0
     qtd = pd.to_numeric(df.get("PEDIDO Final", 0), errors="coerce").fillna(0)
-    preco = pd.to_numeric(df.get("Preço Última Compra", 0), errors="coerce").fillna(0)
+    preco = pd.to_numeric(df.get("PreÃ§o Ãšltima Compra", 0), errors="coerce").fillna(0)
     return float((qtd * preco).sum())
 
 
 
 # =========================================================
-# UI / EXPERIÊNCIA DO USUÁRIO
+# UI / EXPERIÃŠNCIA DO USUÃRIO
 # =========================================================
 
-APP_NAME = "Análise de Giro e Pedido de Compra"
+APP_NAME = "AnÃ¡lise de Giro e Pedido de Compra"
 
 
 def aplicar_css_global():
@@ -5542,7 +5748,7 @@ def aplicar_css_global():
             }
 
 
-            /* Navegação lateral profissional */
+            /* NavegaÃ§Ã£o lateral profissional */
             [data-testid="stSidebar"] {
                 background: radial-gradient(circle at top left, #1e3a8a 0%, #0f172a 38%, #07111f 100%) !important;
                 border-right: 1px solid rgba(148, 163, 184, .18);
@@ -5712,7 +5918,7 @@ def aplicar_css_global():
     )
 
 
-def render_header(subtitulo="Sistema de apoio à decisão para giro, estoque e compra."):
+def render_header(subtitulo="Sistema de apoio Ã  decisÃ£o para giro, estoque e compra."):
     st.markdown(
         f"""
         <div class="hero-card">
@@ -5738,7 +5944,7 @@ def render_metric(label, value, hint=""):
 
 
 def render_upload_status(titulo, arquivo, obrigatorio=False):
-    status = "✓ Arquivo carregado" if arquivo else ("Obrigatório" if obrigatorio else "Opcional")
+    status = "âœ“ Arquivo carregado" if arquivo else ("ObrigatÃ³rio" if obrigatorio else "Opcional")
     classe = "status-ok" if arquivo else "status-warn"
     nome = getattr(arquivo, "name", "") if arquivo else ""
     st.markdown(
@@ -5759,7 +5965,7 @@ def render_kpis_gerais(tabela_resumo, pedido_df=None):
     total_produtos = len(tabela_resumo)
     itens_compra = int((pd.to_numeric(pedido_ref.get("PEDIDO Final", 0), errors="coerce").fillna(0) > 0).sum())
     valor_pedido = totalizar_valor_pedido(pedido_ref)
-    sem_compra = int(tabela_resumo.get("Data Última Compra", pd.Series(dtype=str)).astype(str).str.contains("⚠️", na=False).sum())
+    sem_compra = int(tabela_resumo.get("Data Ãšltima Compra", pd.Series(dtype=str)).astype(str).str.contains("âš ï¸", na=False).sum())
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -5767,9 +5973,9 @@ def render_kpis_gerais(tabela_resumo, pedido_df=None):
     with c2:
         render_metric("Itens com compra", format_int_br(itens_compra), "Pedido final maior que zero")
     with c3:
-        render_metric("Valor do pedido", format_moeda_br(valor_pedido), "Quantidade × última compra")
+        render_metric("Valor do pedido", format_moeda_br(valor_pedido), "Quantidade Ã— Ãºltima compra")
     with c4:
-        render_metric("Alertas sem compra", format_int_br(sem_compra), "Conforme parâmetro definido")
+        render_metric("Alertas sem compra", format_int_br(sem_compra), "Conforme parÃ¢metro definido")
 
 
 def render_download_card(titulo, descricao):
@@ -5812,8 +6018,8 @@ def _extrair_meses_cabecalho_marca(text):
 
 def parse_linha_giro_marca_independente(line, meses_ref):
     """
-    Parser independente para o relatório de Giro Geral por Marca.
-    Não interfere na lógica atual do dashboard.
+    Parser independente para o relatÃ³rio de Giro Geral por Marca.
+    NÃ£o interfere na lÃ³gica atual do dashboard.
     """
     line = str(line).strip()
     if not re.match(r"^\d{5}\s+", line):
@@ -5834,7 +6040,7 @@ def parse_linha_giro_marca_independente(line, meses_ref):
             break
 
     if un_index is None:
-        # fallback para relatórios que usam UN como unidade principal
+        # fallback para relatÃ³rios que usam UN como unidade principal
         for i, token in enumerate(partes):
             if token.upper() in ["UN", "LT", "GL", "CX", "PC", "MT", "KG", "DC"]:
                 proximos = partes[i + 1:i + 1 + qtd_meses + 3]
@@ -5872,10 +6078,10 @@ def parse_pdf_ruptura_por_marca(bytes_pdf):
     """
     Leitor otimizado para PDF grande.
 
-    O relatório de Giro Geral por Marca pode ter mais de 1.500 páginas.
-    pdfplumber é bom para tabelas, mas fica muito lento nesse volume.
-    Aqui usamos PyMuPDF primeiro, que extrai texto página a página com muito mais velocidade,
-    e só caímos para pdfplumber se PyMuPDF não estiver disponível.
+    O relatÃ³rio de Giro Geral por Marca pode ter mais de 1.500 pÃ¡ginas.
+    pdfplumber Ã© bom para tabelas, mas fica muito lento nesse volume.
+    Aqui usamos PyMuPDF primeiro, que extrai texto pÃ¡gina a pÃ¡gina com muito mais velocidade,
+    e sÃ³ caÃ­mos para pdfplumber se PyMuPDF nÃ£o estiver disponÃ­vel.
     """
     registros = []
     empresa_atual = None
@@ -5932,7 +6138,7 @@ def parse_pdf_ruptura_por_marca(bytes_pdf):
             if produto:
                 produto["codigo_empresa"] = empresa_atual
                 produto["loja"] = "GERAL" if empresa_atual == "GERAL" else LOJAS_MAP.get(empresa_atual, empresa_atual)
-                produto["tipo_unidade"] = "GERAL" if relatorio_consolidado else ("ÚNICA" if empresa_atual == CODIGO_UNICA else "LOJAS DAUTO")
+                produto["tipo_unidade"] = "GERAL" if relatorio_consolidado else ("ÃšNICA" if empresa_atual == CODIGO_UNICA else "LOJAS DAUTO")
                 produto["marca_codigo"] = marca_cod_atual
                 produto["marca"] = marca_nome_atual if marca_nome_atual else "SEM MARCA"
                 registros.append(produto)
@@ -5941,8 +6147,8 @@ def parse_pdf_ruptura_por_marca(bytes_pdf):
         import fitz  # PyMuPDF
     except Exception as e:
         raise RuntimeError(
-            "Para esta página, instale o PyMuPDF. Rode: pip install pymupdf. "
-            "O pdfplumber é lento demais para este relatório com muitas páginas."
+            "Para esta pÃ¡gina, instale o PyMuPDF. Rode: pip install pymupdf. "
+            "O pdfplumber Ã© lento demais para este relatÃ³rio com muitas pÃ¡ginas."
         ) from e
 
     try:
@@ -5953,7 +6159,7 @@ def parse_pdf_ruptura_por_marca(bytes_pdf):
         raise RuntimeError(f"Falha ao extrair texto do PDF com PyMuPDF: {e}") from e
 
     if not meses_ref:
-        meses_ref = ["Mês 1", "Mês 2", "Mês 3", "Mês 4"]
+        meses_ref = ["MÃªs 1", "MÃªs 2", "MÃªs 3", "MÃªs 4"]
 
     df = pd.DataFrame(registros)
     return df, meses_ref
@@ -5965,27 +6171,27 @@ def classificar_status_ruptura(media_mensal, estoque_geral, dias_cobertura):
     if media_mensal <= 0:
         return "SEM GIRO"
     if estoque_geral <= 0:
-        return "CRÍTICO"
+        return "CRÃTICO"
     if dias_cobertura <= 7:
-        return "CRÍTICO"
+        return "CRÃTICO"
     if dias_cobertura <= 15:
         return "ALTO"
     if dias_cobertura <= 30:
-        return "ATENÇÃO"
+        return "ATENÃ‡ÃƒO"
     return "OK"
 
 
 def montar_analise_ruptura_por_marca(df_ruptura, meses_ref, df_aberto_ruptura=None):
     """
-    Monta a visão gerencial de ruptura por marca.
+    Monta a visÃ£o gerencial de ruptura por marca.
 
-    Regra de negócio desta tela:
-    - Consolida o item por Marca + Código, somando Lojas Dauto + Única.
-    - Considera o saldo de Pedidos em Aberto como estoque em trânsito.
-    - O item só entra como "gera pedido" quando tem giro e o estoque considerado
-      não cobre 30 dias de venda média.
-    - A ruptura/risco é calculada em cima do Estoque Considerado:
-      Estoque Geral + Saldo em Trânsito/ABERTO.
+    Regra de negÃ³cio desta tela:
+    - Consolida o item por Marca + CÃ³digo, somando Lojas Dauto + Ãšnica.
+    - Considera o saldo de Pedidos em Aberto como estoque em trÃ¢nsito.
+    - O item sÃ³ entra como "gera pedido" quando tem giro e o estoque considerado
+      nÃ£o cobre 30 dias de venda mÃ©dia.
+    - A ruptura/risco Ã© calculada em cima do Estoque Considerado:
+      Estoque Geral + Saldo em TrÃ¢nsito/ABERTO.
     """
     if df_ruptura.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -6011,43 +6217,43 @@ def montar_analise_ruptura_por_marca(df_ruptura, meses_ref, df_aberto_ruptura=No
 
     itens = df.groupby(["marca", "codigo", "descricao"], as_index=False).agg(agg_dict)
     itens["Giro Geral"] = itens[meses_ref].sum(axis=1).round(2)
-    itens["Média Giro Geral"] = itens[meses_ref].mean(axis=1).round(2)
+    itens["MÃ©dia Giro Geral"] = itens[meses_ref].mean(axis=1).round(2)
     itens["Estoque Geral"] = pd.to_numeric(itens["estoque"], errors="coerce").fillna(0).round(2)
 
     if df_aberto_ruptura is not None and not df_aberto_ruptura.empty:
         aberto = df_aberto_ruptura.copy()
         aberto["codigo"] = aberto["codigo"].astype(str).str.extract(r"(\d+)")[0].fillna("").str.zfill(5)
-        aberto["Saldo em Trânsito/ABERTO"] = pd.to_numeric(aberto.get("Saldo em Trânsito/ABERTO", 0), errors="coerce").fillna(0)
+        aberto["Saldo em TrÃ¢nsito/ABERTO"] = pd.to_numeric(aberto.get("Saldo em TrÃ¢nsito/ABERTO", 0), errors="coerce").fillna(0)
         aberto = aberto[aberto["codigo"].str.strip().ne("")]
-        aberto = aberto.groupby("codigo", as_index=False)["Saldo em Trânsito/ABERTO"].sum()
+        aberto = aberto.groupby("codigo", as_index=False)["Saldo em TrÃ¢nsito/ABERTO"].sum()
         itens = itens.merge(aberto, on="codigo", how="left")
     else:
-        itens["Saldo em Trânsito/ABERTO"] = 0
+        itens["Saldo em TrÃ¢nsito/ABERTO"] = 0
 
-    itens["Saldo em Trânsito/ABERTO"] = pd.to_numeric(itens["Saldo em Trânsito/ABERTO"], errors="coerce").fillna(0).round(2)
-    itens["Estoque Considerado"] = (itens["Estoque Geral"] + itens["Saldo em Trânsito/ABERTO"]).round(2)
-    itens["Necessidade 30 dias"] = (itens["Média Giro Geral"] - itens["Estoque Considerado"]).apply(lambda x: max(math.ceil(float(x)), 0)).astype(int)
+    itens["Saldo em TrÃ¢nsito/ABERTO"] = pd.to_numeric(itens["Saldo em TrÃ¢nsito/ABERTO"], errors="coerce").fillna(0).round(2)
+    itens["Estoque Considerado"] = (itens["Estoque Geral"] + itens["Saldo em TrÃ¢nsito/ABERTO"]).round(2)
+    itens["Necessidade 30 dias"] = (itens["MÃ©dia Giro Geral"] - itens["Estoque Considerado"]).apply(lambda x: max(math.ceil(float(x)), 0)).astype(int)
     itens["Gera Pedido"] = itens.apply(
-        lambda r: "SIM" if float(r.get("Média Giro Geral", 0) or 0) > 0 and int(r.get("Necessidade 30 dias", 0) or 0) > 0 else "NÃO",
+        lambda r: "SIM" if float(r.get("MÃ©dia Giro Geral", 0) or 0) > 0 and int(r.get("Necessidade 30 dias", 0) or 0) > 0 else "NÃƒO",
         axis=1,
     )
     itens["Dias de Cobertura"] = itens.apply(
-        lambda r: round((float(r["Estoque Considerado"]) / float(r["Média Giro Geral"]) * 30), 1) if float(r["Média Giro Geral"] or 0) > 0 else 9999,
+        lambda r: round((float(r["Estoque Considerado"]) / float(r["MÃ©dia Giro Geral"]) * 30), 1) if float(r["MÃ©dia Giro Geral"] or 0) > 0 else 9999,
         axis=1,
     )
     itens["Status"] = itens.apply(
-        lambda r: classificar_status_ruptura(r["Média Giro Geral"], r["Estoque Considerado"], r["Dias de Cobertura"]),
+        lambda r: classificar_status_ruptura(r["MÃ©dia Giro Geral"], r["Estoque Considerado"], r["Dias de Cobertura"]),
         axis=1,
     )
     itens["Item em Ruptura"] = itens.apply(
-        lambda r: "SIM" if r.get("Gera Pedido") == "SIM" and str(r.get("Status")) in ["CRÍTICO", "ALTO", "ATENÇÃO"] else "NÃO",
+        lambda r: "SIM" if r.get("Gera Pedido") == "SIM" and str(r.get("Status")) in ["CRÃTICO", "ALTO", "ATENÃ‡ÃƒO"] else "NÃƒO",
         axis=1,
     )
-    itens["Peso Risco"] = itens["Status"].map({"CRÍTICO": 4, "ALTO": 3, "ATENÇÃO": 2, "OK": 1, "SEM GIRO": 0}).fillna(0)
+    itens["Peso Risco"] = itens["Status"].map({"CRÃTICO": 4, "ALTO": 3, "ATENÃ‡ÃƒO": 2, "OK": 1, "SEM GIRO": 0}).fillna(0)
     itens["Prioridade"] = itens.apply(
-        lambda r: "1 - Comprar agora" if r["Status"] == "CRÍTICO" else (
-            "2 - Comprar na próxima reposição" if r["Status"] == "ALTO" else (
-                "3 - Acompanhar pedido" if r["Status"] == "ATENÇÃO" else "4 - Sem ação"
+        lambda r: "1 - Comprar agora" if r["Status"] == "CRÃTICO" else (
+            "2 - Comprar na prÃ³xima reposiÃ§Ã£o" if r["Status"] == "ALTO" else (
+                "3 - Acompanhar pedido" if r["Status"] == "ATENÃ‡ÃƒO" else "4 - Sem aÃ§Ã£o"
             )
         ),
         axis=1,
@@ -6058,17 +6264,17 @@ def montar_analise_ruptura_por_marca(df_ruptura, meses_ref, df_aberto_ruptura=No
     resumo_base = itens.groupby("marca", as_index=False).agg(
         Itens_Analisados=("codigo", "count"),
         Giro_Geral_Total=("Giro Geral", "sum"),
-        Media_Giro_Total=("Média Giro Geral", "sum"),
+        Media_Giro_Total=("MÃ©dia Giro Geral", "sum"),
         Estoque_Geral_Total=("Estoque Geral", "sum"),
-        Em_Aberto_Total=("Saldo em Trânsito/ABERTO", "sum"),
+        Em_Aberto_Total=("Saldo em TrÃ¢nsito/ABERTO", "sum"),
         Estoque_Considerado_Total=("Estoque Considerado", "sum"),
     )
 
     resumo_risco = itens_risco.groupby("marca", as_index=False).agg(
         Itens_que_Geram_Pedido=("codigo", "count"),
-        Criticos=("Status", lambda s: int((s == "CRÍTICO").sum())),
+        Criticos=("Status", lambda s: int((s == "CRÃTICO").sum())),
         Alto=("Status", lambda s: int((s == "ALTO").sum())),
-        Atencao=("Status", lambda s: int((s == "ATENÇÃO").sum())),
+        Atencao=("Status", lambda s: int((s == "ATENÃ‡ÃƒO").sum())),
         Necessidade_30_dias=("Necessidade 30 dias", "sum"),
         Score_Risco=("Peso Risco", "sum"),
     )
@@ -6084,9 +6290,9 @@ def montar_analise_ruptura_por_marca(df_ruptura, meses_ref, df_aberto_ruptura=No
         lambda r: round((float(r["Estoque_Considerado_Total"]) / float(r["Media_Giro_Total"]) * 30), 1) if float(r["Media_Giro_Total"] or 0) > 0 else 9999,
         axis=1,
     )
-    resumo["Ação"] = resumo.apply(
+    resumo["AÃ§Ã£o"] = resumo.apply(
         lambda r: "Priorizar compra" if int(r["Criticos"] or 0) > 0 else (
-            "Comprar na próxima reposição" if int(r["Alto"] or 0) > 0 else (
+            "Comprar na prÃ³xima reposiÃ§Ã£o" if int(r["Alto"] or 0) > 0 else (
                 "Acompanhar" if int(r["Atencao"] or 0) > 0 else "Sem risco relevante"
             )
         ),
@@ -6101,33 +6307,33 @@ def montar_analise_ruptura_por_marca(df_ruptura, meses_ref, df_aberto_ruptura=No
         "marca": "Marca",
         "Itens_Analisados": "Itens analisados",
         "Itens_que_Geram_Pedido": "Itens com risco de ruptura",
-        "Criticos": "Críticos",
-        "Atencao": "Atenção",
+        "Criticos": "CrÃ­ticos",
+        "Atencao": "AtenÃ§Ã£o",
         "Giro_Geral_Total": "Giro Geral",
-        "Media_Giro_Total": "Média Giro Geral",
+        "Media_Giro_Total": "MÃ©dia Giro Geral",
         "Estoque_Geral_Total": "Estoque Geral",
         "Em_Aberto_Total": "Em Aberto",
         "Estoque_Considerado_Total": "Estoque Considerado",
-        "Necessidade_30_dias": "Sugestão de Pedido",
+        "Necessidade_30_dias": "SugestÃ£o de Pedido",
         "Score_Risco": "Score Risco",
     })
 
     itens = itens.rename(columns={
         "marca": "Marca",
-        "codigo": "Código",
-        "descricao": "Descrição",
+        "codigo": "CÃ³digo",
+        "descricao": "DescriÃ§Ã£o",
         "unidade": "UN",
     })
-    itens = itens.sort_values(["Item em Ruptura", "Peso Risco", "Dias de Cobertura", "Média Giro Geral"], ascending=[False, False, True, False])
+    itens = itens.sort_values(["Item em Ruptura", "Peso Risco", "Dias de Cobertura", "MÃ©dia Giro Geral"], ascending=[False, False, True, False])
     return resumo.reset_index(drop=True), itens.reset_index(drop=True)
 
 def colorir_status_ruptura(row):
     status = str(row.get("Status", ""))
-    if status == "CRÍTICO":
+    if status == "CRÃTICO":
         return ["background-color: #fee2e2; color: #7f1d1d; font-weight: 700"] * len(row)
     if status == "ALTO":
         return ["background-color: #ffedd5; color: #7c2d12; font-weight: 650"] * len(row)
-    if status == "ATENÇÃO":
+    if status == "ATENÃ‡ÃƒO":
         return ["background-color: #fef9c3; color: #713f12"] * len(row)
     if status == "OK":
         return ["background-color: #dcfce7; color: #14532d"] * len(row)
@@ -6135,9 +6341,9 @@ def colorir_status_ruptura(row):
 
 
 def colorir_resumo_marca(row):
-    criticos = int(row.get("Críticos", 0) or 0)
+    criticos = int(row.get("CrÃ­ticos", 0) or 0)
     alto = int(row.get("Alto", 0) or 0)
-    atencao = int(row.get("Atenção", 0) or 0)
+    atencao = int(row.get("AtenÃ§Ã£o", 0) or 0)
     if criticos > 0:
         return ["background-color: #fee2e2; color: #7f1d1d; font-weight: 700"] * len(row)
     if alto > 0:
@@ -6148,10 +6354,10 @@ def colorir_resumo_marca(row):
 
 
 def render_pagina_ruptura_por_marca():
-    st.markdown('<div class="section-title">🏷️ Ruptura por Marca</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">ðŸ·ï¸ Ruptura por Marca</div>', unsafe_allow_html=True)
     st.caption(
-        "Esta página funciona separada do pedido de compra. Envie aqui o PDF específico de Giro Geral por Marca "
-        "e, se houver, o PDF de Pedidos em Aberto. A análise soma lojas Dauto + Única e considera o saldo em aberto no estoque."
+        "Esta pÃ¡gina funciona separada do pedido de compra. Envie aqui o PDF especÃ­fico de Giro Geral por Marca "
+        "e, se houver, o PDF de Pedidos em Aberto. A anÃ¡lise soma lojas Dauto + Ãšnica e considera o saldo em aberto no estoque."
     )
 
     col_pdf_ruptura, col_pdf_aberto = st.columns(2)
@@ -6169,59 +6375,59 @@ def render_pagina_ruptura_por_marca():
         )
 
     if not pdf_marca:
-        st.info("Envie o PDF de Giro Geral por Marca para iniciar esta análise.")
+        st.info("Envie o PDF de Giro Geral por Marca para iniciar esta anÃ¡lise.")
         return
 
-    st.info("Leitura otimizada ativada: o Giro por Marca usa PyMuPDF. O PDF de Pedidos em Aberto, quando enviado, entra como saldo em trânsito no cálculo da ruptura.")
+    st.info("Leitura otimizada ativada: o Giro por Marca usa PyMuPDF. O PDF de Pedidos em Aberto, quando enviado, entra como saldo em trÃ¢nsito no cÃ¡lculo da ruptura.")
 
     try:
         bytes_pdf = pdf_marca.getvalue()
         df_ruptura, meses_ref = parse_pdf_ruptura_por_marca(bytes_pdf)
     except Exception as e:
-        st.error(f"Não consegui ler o PDF de Ruptura por Marca. Erro: {e}")
+        st.error(f"NÃ£o consegui ler o PDF de Ruptura por Marca. Erro: {e}")
         return
 
-    df_aberto_ruptura = pd.DataFrame(columns=["codigo", "Saldo em Trânsito/ABERTO"])
+    df_aberto_ruptura = pd.DataFrame(columns=["codigo", "Saldo em TrÃ¢nsito/ABERTO"])
     if pdf_pedidos_aberto_ruptura:
         try:
             with st.spinner("Lendo Pedidos em Aberto para considerar no estoque..."):
                 df_aberto_ruptura = parse_pedidos_compra_aberto_pdf(pdf_pedidos_aberto_ruptura)
             st.success(f"Pedidos em aberto lidos: {len(df_aberto_ruptura)} item(ns) com saldo em aberto.")
         except Exception as e:
-            st.warning(f"Não consegui ler o PDF de Pedidos em Aberto. A análise seguirá apenas com o estoque atual. Erro: {e}")
-            df_aberto_ruptura = pd.DataFrame(columns=["codigo", "Saldo em Trânsito/ABERTO"])
+            st.warning(f"NÃ£o consegui ler o PDF de Pedidos em Aberto. A anÃ¡lise seguirÃ¡ apenas com o estoque atual. Erro: {e}")
+            df_aberto_ruptura = pd.DataFrame(columns=["codigo", "Saldo em TrÃ¢nsito/ABERTO"])
 
     if df_ruptura.empty:
-        st.error("Não consegui extrair os itens do PDF enviado. Verifique se é o relatório de Giro Geral por Marca.")
+        st.error("NÃ£o consegui extrair os itens do PDF enviado. Verifique se Ã© o relatÃ³rio de Giro Geral por Marca.")
         return
 
     resumo_marca, itens_marca = montar_analise_ruptura_por_marca(df_ruptura, meses_ref, df_aberto_ruptura)
     if resumo_marca.empty:
-        st.warning("O PDF foi lido, mas não houve dados suficientes para análise.")
+        st.warning("O PDF foi lido, mas nÃ£o houve dados suficientes para anÃ¡lise.")
         return
 
     total_itens = int(len(itens_marca))
-    total_risco = int((itens_marca.get("Item em Ruptura", "NÃO") == "SIM").sum())
-    total_criticos = int((itens_marca["Status"] == "CRÍTICO").sum())
+    total_risco = int((itens_marca.get("Item em Ruptura", "NÃƒO") == "SIM").sum())
+    total_criticos = int((itens_marca["Status"] == "CRÃTICO").sum())
     total_alto = int((itens_marca["Status"] == "ALTO").sum())
-    total_em_aberto = float(pd.to_numeric(itens_marca.get("Saldo em Trânsito/ABERTO", 0), errors="coerce").fillna(0).sum())
-    total_sugestao = int(pd.to_numeric(itens_marca.loc[itens_marca.get("Item em Ruptura", "NÃO") == "SIM", "Necessidade 30 dias"], errors="coerce").fillna(0).sum())
+    total_em_aberto = float(pd.to_numeric(itens_marca.get("Saldo em TrÃ¢nsito/ABERTO", 0), errors="coerce").fillna(0).sum())
+    total_sugestao = int(pd.to_numeric(itens_marca.loc[itens_marca.get("Item em Ruptura", "NÃƒO") == "SIM", "Necessidade 30 dias"], errors="coerce").fillna(0).sum())
 
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
-        render_metric("Itens analisados", format_int_br(total_itens), "Lojas Dauto + Única")
+        render_metric("Itens analisados", format_int_br(total_itens), "Lojas Dauto + Ãšnica")
     with c2:
         render_metric("Itens com risco", format_int_br(total_risco), "Geram pedido")
     with c3:
-        render_metric("Críticos", format_int_br(total_criticos), "Sem estoque ou até 7 dias")
+        render_metric("CrÃ­ticos", format_int_br(total_criticos), "Sem estoque ou atÃ© 7 dias")
     with c4:
-        render_metric("Sugestão total", format_int_br(total_sugestao), "Necessidade 30 dias")
+        render_metric("SugestÃ£o total", format_int_br(total_sugestao), "Necessidade 30 dias")
     with c5:
         render_metric("Em aberto", format_num_br(total_em_aberto, 1), "Somado ao estoque")
 
     st.markdown("---")
     st.markdown('<div class="section-title">Ranking de marcas por risco</div>', unsafe_allow_html=True)
-    st.caption("O ranking abaixo mostra, por marca, quantos itens têm giro, geram pedido e continuam com risco de ruptura mesmo considerando o saldo em aberto.")
+    st.caption("O ranking abaixo mostra, por marca, quantos itens tÃªm giro, geram pedido e continuam com risco de ruptura mesmo considerando o saldo em aberto.")
 
     col_busca_marca, col_zero_marca = st.columns([2, 1])
     with col_busca_marca:
@@ -6244,7 +6450,7 @@ def render_pagina_ruptura_por_marca():
     )
 
     st.download_button(
-        "⬇️ Baixar ranking de marcas em CSV",
+        "â¬‡ï¸ Baixar ranking de marcas em CSV",
         gerar_csv(resumo_marca),
         "ranking_ruptura_por_marca.csv",
         "text/csv",
@@ -6261,7 +6467,7 @@ def render_pagina_ruptura_por_marca():
     with colf1:
         apenas_risco = st.checkbox("Apenas itens que geram pedido", value=True, key="apenas_itens_ruptura_marca")
     with colf2:
-        status_opcoes = ["Todos", "CRÍTICO", "ALTO", "ATENÇÃO", "OK", "SEM GIRO"]
+        status_opcoes = ["Todos", "CRÃTICO", "ALTO", "ATENÃ‡ÃƒO", "OK", "SEM GIRO"]
         status_sel = st.selectbox("Filtrar status", status_opcoes, key="status_ruptura_marca")
     with colf3:
         busca_item = st.text_input("Pesquisar produto dentro da marca", key="busca_item_ruptura_marca")
@@ -6273,12 +6479,12 @@ def render_pagina_ruptura_por_marca():
     if busca_item:
         termo = busca_item.lower()
         itens_view = itens_view[
-            itens_view["Código"].astype(str).str.lower().str.contains(termo, na=False)
-            | itens_view["Descrição"].astype(str).str.lower().str.contains(termo, na=False)
+            itens_view["CÃ³digo"].astype(str).str.lower().str.contains(termo, na=False)
+            | itens_view["DescriÃ§Ã£o"].astype(str).str.lower().str.contains(termo, na=False)
         ]
 
-    colunas_itens = ["Código", "Descrição", "UN"] + meses_ref + [
-        "Giro Geral", "Média Giro Geral", "Estoque Geral", "Saldo em Trânsito/ABERTO", "Estoque Considerado",
+    colunas_itens = ["CÃ³digo", "DescriÃ§Ã£o", "UN"] + meses_ref + [
+        "Giro Geral", "MÃ©dia Giro Geral", "Estoque Geral", "Saldo em TrÃ¢nsito/ABERTO", "Estoque Considerado",
         "Dias de Cobertura", "Necessidade 30 dias", "Gera Pedido", "Item em Ruptura", "Status", "Prioridade"
     ]
     colunas_itens = [c for c in colunas_itens if c in itens_view.columns]
@@ -6289,13 +6495,13 @@ def render_pagina_ruptura_por_marca():
         hide_index=True,
         height=560,
         column_config={
-            "Código": st.column_config.TextColumn("Código", pinned=True, width="small"),
-            "Descrição": st.column_config.TextColumn("Descrição", pinned=True, width="large"),
+            "CÃ³digo": st.column_config.TextColumn("CÃ³digo", pinned=True, width="small"),
+            "DescriÃ§Ã£o": st.column_config.TextColumn("DescriÃ§Ã£o", pinned=True, width="large"),
         },
     )
 
     st.download_button(
-        "⬇️ Baixar drill da marca em CSV",
+        "â¬‡ï¸ Baixar drill da marca em CSV",
         gerar_csv(itens_view[colunas_itens]),
         f"drill_ruptura_{re.sub(r'[^A-Za-z0-9]+', '_', str(marca_selecionada))}.csv",
         "text/csv",
@@ -6322,21 +6528,21 @@ token_uri = "https://oauth2.googleapis.com/token"
         recursos = google_get_resources()
         st.success(f"Google Drive conectado via OAuth: {recursos.get('oauth_user', 'gdautotintas@gmail.com')}")
         c1, c2, c3 = st.columns(3)
-        c1.link_button("Pedidos para aprovação", recursos["pedidos_link"])
+        c1.link_button("Pedidos para aprovaÃ§Ã£o", recursos["pedidos_link"])
         c2.link_button("Pedidos aprovados", recursos["aprovados_link"])
         c3.link_button("Cadastro", recursos["cadastro_link"])
 
-        st.markdown("### Sincronizar aprovações")
+        st.markdown("### Sincronizar aprovaÃ§Ãµes")
         st.caption("Altere o Status para Aprovado na aba Controle da planilha. Depois clique abaixo para mover os pedidos aprovados para a pasta PEDIDOS APROVADOS.")
-        usuario_sync = st.text_input("Responsável pela sincronização", value="", key="drive_usuario_sync")
-        if st.button("🔄 Sincronizar aprovações", type="primary"):
+        usuario_sync = st.text_input("ResponsÃ¡vel pela sincronizaÃ§Ã£o", value="", key="drive_usuario_sync")
+        if st.button("ðŸ”„ Sincronizar aprovaÃ§Ãµes", type="primary"):
             movidos, ignorados = google_sincronizar_aprovacoes(usuario=usuario_sync)
             if movidos:
                 st.success(f"{len(movidos)} pedido(s) movido(s) para PEDIDOS APROVADOS.")
                 for nome in movidos[:10]:
-                    st.caption(f"✅ {nome}")
+                    st.caption(f"âœ… {nome}")
             else:
-                st.info("Nenhum pedido com Status = Aprovado foi encontrado na pasta de aprovação.")
+                st.info("Nenhum pedido com Status = Aprovado foi encontrado na pasta de aprovaÃ§Ã£o.")
             st.rerun()
 
         pedidos = google_listar_pedidos()
@@ -6371,7 +6577,7 @@ token_uri = "https://oauth2.googleapis.com/token"
         }
         pedido_label = st.selectbox("Pedido", list(opcoes.keys()), key="drive_pedido_status")
         usuario = st.text_input("Usuario responsavel", value="", key="drive_usuario_status")
-        status = st.selectbox("Status", ["Aprovado", "Em edição", "Reprovado", "Finalizado"], key="drive_status")
+        status = st.selectbox("Status", ["Aprovado", "Em ediÃ§Ã£o", "Reprovado", "Finalizado"], key="drive_status")
         observacao = st.text_input("Observacao", key="drive_observacao_status")
 
         if st.button("Salvar status no controle", type="primary"):
@@ -6398,7 +6604,7 @@ st.sidebar.markdown(
             </svg>
         </div>
         <div>
-            <div class="sidebar-brand-title">Análise de Giro</div>
+            <div class="sidebar-brand-title">AnÃ¡lise de Giro</div>
             <div class="sidebar-brand-subtitle">Planeje melhor. Compre certo.</div>
         </div>
     </div>
@@ -6406,12 +6612,12 @@ st.sidebar.markdown(
     unsafe_allow_html=True,
 )
 pagina = st.sidebar.radio(
-    "Navegação",
-    ["Giro Consolidado", "Pedido de Compra", "Exportações", "Ruptura por Marca", "Comparativo de Pedidos", "Tratamento Final"],
+    "NavegaÃ§Ã£o",
+    ["Giro Consolidado", "Pedido de Compra", "ExportaÃ§Ãµes", "Ruptura por Marca", "Comparativo de Pedidos", "Tratamento Final"],
     label_visibility="collapsed",
 )
 
-st.sidebar.markdown("### Parâmetros")
+st.sidebar.markdown("### ParÃ¢metros")
 st.sidebar.markdown('<div class="param-card">', unsafe_allow_html=True)
 dias_estoque_alvo = st.sidebar.number_input(
     "Dias de estoque alvo",
@@ -6423,7 +6629,7 @@ dias_estoque_alvo = st.sidebar.number_input(
 )
 meses_alerta_sem_compra = 3
 st.sidebar.markdown(
-    '<div class="param-note">Alerta sem compra fixo em <strong>03 meses</strong>.<br>Estoque Final = Estoque Atual Geral + Saldo em Trânsito/ABERTO.</div></div>',
+    '<div class="param-note">Alerta sem compra fixo em <strong>03 meses</strong>.<br>Estoque Final = Estoque Atual Geral + Saldo em TrÃ¢nsito/ABERTO.</div></div>',
     unsafe_allow_html=True,
 )
 
@@ -6438,8 +6644,8 @@ if pagina == "Comparativo de Pedidos":
 if pagina == "Tratamento Final":
     st.markdown('<div class="section-title">Tratamento de Pedido Final</div>', unsafe_allow_html=True)
     st.caption(
-        "Envie a planilha final editável. O sistema vai gerar um Excel para importação no Autcom: "
-        "coluna B = zx, coluna F = PEDIDO Final e coluna H = Preço Última Compra."
+        "Envie a planilha final editÃ¡vel. O sistema vai gerar um Excel para importaÃ§Ã£o no Autcom: "
+        "coluna B = zx, coluna F = PEDIDO Final e coluna H = PreÃ§o Ãšltima Compra."
     )
 
     if False and google_configurado():
@@ -6448,7 +6654,7 @@ if pagina == "Tratamento Final":
             pedidos_drive = google_listar_pedidos()
             pedidos_aprovados = pedidos_drive[pedidos_drive["status"].astype(str).str.lower().isin(["aprovado", "em edicao"])].copy()
             if pedidos_aprovados.empty:
-                st.info("Não há pedidos aprovados ou em edição no controle do Drive.")
+                st.info("NÃ£o hÃ¡ pedidos aprovados ou em ediÃ§Ã£o no controle do Drive.")
             else:
                 opcoes_drive = {
                     f"{r.get('id_pedido', '')} | {r.get('fornecedor', '')} | {r.get('nome_pedido', '')} | {r.get('status', '')}": r.to_dict()
@@ -6467,7 +6673,7 @@ if pagina == "Tratamento Final":
                 df_drive_preview = st.session_state.get("df_tratamento_drive")
                 pedido_drive_id = st.session_state.get("pedido_tratamento_drive_id")
                 if df_drive_preview is not None and pedido_drive_id:
-                    colunas_preview_drive = [c for c in ["zx", "codigo", "descricao", "Código Fábrica", "PEDIDO Final", "Preço Última Compra", "Valor Final do Pedido", "Total Geral do Pedido"] if c in df_drive_preview.columns]
+                    colunas_preview_drive = [c for c in ["zx", "codigo", "descricao", "CÃ³digo FÃ¡brica", "PEDIDO Final", "PreÃ§o Ãšltima Compra", "Valor Final do Pedido", "Total Geral do Pedido"] if c in df_drive_preview.columns]
                     st.dataframe(
                         df_drive_preview[colunas_preview_drive].head(50) if colunas_preview_drive else df_drive_preview.head(50),
                         use_container_width=True,
@@ -6486,7 +6692,7 @@ if pagina == "Tratamento Final":
                         c_forn.link_button("Abrir arquivo fornecedor", link_fornecedor)
                         st.rerun()
         except Exception as e:
-            st.warning(f"Não consegui usar o fluxo do Google Drive: {e}")
+            st.warning(f"NÃ£o consegui usar o fluxo do Google Drive: {e}")
 
         st.markdown("---")
         st.markdown("### Upload manual")
@@ -6509,7 +6715,7 @@ if pagina == "Tratamento Final":
     )
 
     if not link_tratamento and not planilha_tratamento:
-        st.info("Cole o link da planilha aprovada ou envie a planilha do pedido final para gerar o arquivo de importação Autcom.")
+        st.info("Cole o link da planilha aprovada ou envie a planilha do pedido final para gerar o arquivo de importaÃ§Ã£o Autcom.")
         st.stop()
 
     try:
@@ -6523,7 +6729,7 @@ if pagina == "Tratamento Final":
 
         st.success(f"Planilha lida com sucesso via {origem_tratamento}: {len(df_tratamento)} linha(s).")
 
-        colunas_preview = [c for c in ["zx", "descricao", "Código Fábrica", "PEDIDO Final", "Preço Última Compra", "Valor Final do Pedido", "Total Geral do Pedido"] if c in df_tratamento.columns]
+        colunas_preview = [c for c in ["zx", "descricao", "CÃ³digo FÃ¡brica", "PEDIDO Final", "PreÃ§o Ãšltima Compra", "Valor Final do Pedido", "Total Geral do Pedido"] if c in df_tratamento.columns]
         if colunas_preview:
             st.dataframe(
                 df_tratamento[colunas_preview].head(50),
@@ -6538,7 +6744,7 @@ if pagina == "Tratamento Final":
         col_dl_autcom, col_dl_fornecedor = st.columns(2)
         with col_dl_autcom:
             st.download_button(
-                "⬇️ Baixar pedido tratado para importação no Autcom",
+                "â¬‡ï¸ Baixar pedido tratado para importaÃ§Ã£o no Autcom",
                 excel_tratamento,
                 "pedido_tratado_importacao_autcom.xlsx",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -6546,7 +6752,7 @@ if pagina == "Tratamento Final":
             )
         with col_dl_fornecedor:
             st.download_button(
-                "⬇️ Baixar pedido para envio ao fornecedor",
+                "â¬‡ï¸ Baixar pedido para envio ao fornecedor",
                 gerar_excel_fornecedor_tratamento(df_tratamento),
                 "pedido_envio_fornecedor.xlsx",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -6556,7 +6762,7 @@ if pagina == "Tratamento Final":
 
     st.stop()
 
-st.markdown('<div class="page-card"><div class="page-card-title">Upload dos arquivos</div><div class="page-card-subtitle">Envie o PDF de Giro para iniciar. Os demais arquivos enriquecem a análise e o pedido final.</div>', unsafe_allow_html=True)
+st.markdown('<div class="page-card"><div class="page-card-title">Upload dos arquivos</div><div class="page-card-subtitle">Envie o PDF de Giro para iniciar. Os demais arquivos enriquecem a anÃ¡lise e o pedido final.</div>', unsafe_allow_html=True)
 col_upload_1, col_upload_2, col_upload_3 = st.columns(3)
 cadastro_google = pd.DataFrame()
 
@@ -6568,19 +6774,19 @@ with col_upload_2:
     render_upload_status("Pedidos em Aberto", pedidos_pdf)
 with col_upload_3:
     st.markdown("**Cadastro de Produtos**")
-    st.link_button("🔗 Abrir / editar cadastro no Google Sheets", google_link_planilha(GOOGLE_PLANILHA_CADASTRO_ID), use_container_width=True)
-    st.caption("Após editar a planilha, volte ao app e recarregue a página para puxar a versão atualizada.")
+    st.link_button("ðŸ”— Abrir / editar cadastro no Google Sheets", google_link_planilha(GOOGLE_PLANILHA_CADASTRO_ID), use_container_width=True)
+    st.caption("ApÃ³s editar a planilha, volte ao app e recarregue a pÃ¡gina para puxar a versÃ£o atualizada.")
 
     try:
         cadastro_google = ler_cadastro_produtos_google()
         if not cadastro_google.empty:
             st.success(f"Cadastro lido do Google Sheets: {len(cadastro_google)} item(ns).")
         else:
-            st.warning("Cadastro do Google Sheets está vazio ou sem as colunas obrigatórias.")
+            st.warning("Cadastro do Google Sheets estÃ¡ vazio ou sem as colunas obrigatÃ³rias.")
     except Exception as e:
         st.warning(
-            "Não consegui ler o cadastro do Google Sheets por leitura simples. "
-            "Confira se a planilha está compartilhada como 'Qualquer pessoa com o link - Leitor' "
+            "NÃ£o consegui ler o cadastro do Google Sheets por leitura simples. "
+            "Confira se a planilha estÃ¡ compartilhada como 'Qualquer pessoa com o link - Leitor' "
             f"e se existe a aba 'Cadastro'. Detalhe: {e}"
         )
 
@@ -6592,8 +6798,8 @@ st.markdown("</div>", unsafe_allow_html=True)
 if False and pagina == "Tratamento Final":
     st.markdown('<div class="section-title">Tratamento de Pedido Final</div>', unsafe_allow_html=True)
     st.caption(
-        "Envie a planilha final editável. O sistema vai gerar um Excel para importação no Autcom: "
-        "coluna B = zx, coluna F = PEDIDO Final e coluna H = Preço Última Compra."
+        "Envie a planilha final editÃ¡vel. O sistema vai gerar um Excel para importaÃ§Ã£o no Autcom: "
+        "coluna B = zx, coluna F = PEDIDO Final e coluna H = PreÃ§o Ãšltima Compra."
     )
 
     if False and google_configurado():
@@ -6602,7 +6808,7 @@ if False and pagina == "Tratamento Final":
             pedidos_drive = google_listar_pedidos()
             pedidos_aprovados = pedidos_drive[pedidos_drive["status"].astype(str).str.lower().isin(["aprovado", "em edicao"])].copy()
             if pedidos_aprovados.empty:
-                st.info("Não há pedidos aprovados ou em edição no controle do Drive.")
+                st.info("NÃ£o hÃ¡ pedidos aprovados ou em ediÃ§Ã£o no controle do Drive.")
             else:
                 opcoes_drive = {
                     f"{r.get('id_pedido', '')} | {r.get('fornecedor', '')} | {r.get('nome_pedido', '')} | {r.get('status', '')}": r.to_dict()
@@ -6621,7 +6827,7 @@ if False and pagina == "Tratamento Final":
                 df_drive_preview = st.session_state.get("df_tratamento_drive")
                 pedido_drive_id = st.session_state.get("pedido_tratamento_drive_id")
                 if df_drive_preview is not None and pedido_drive_id:
-                    colunas_preview_drive = [c for c in ["zx", "codigo", "descricao", "Código Fábrica", "PEDIDO Final", "Preço Última Compra", "Valor Final do Pedido", "Total Geral do Pedido"] if c in df_drive_preview.columns]
+                    colunas_preview_drive = [c for c in ["zx", "codigo", "descricao", "CÃ³digo FÃ¡brica", "PEDIDO Final", "PreÃ§o Ãšltima Compra", "Valor Final do Pedido", "Total Geral do Pedido"] if c in df_drive_preview.columns]
                     st.dataframe(
                         df_drive_preview[colunas_preview_drive].head(50) if colunas_preview_drive else df_drive_preview.head(50),
                         use_container_width=True,
@@ -6640,7 +6846,7 @@ if False and pagina == "Tratamento Final":
                         c_forn.link_button("Abrir arquivo fornecedor", link_fornecedor)
                         st.rerun()
         except Exception as e:
-            st.warning(f"Não consegui usar o fluxo do Google Drive: {e}")
+            st.warning(f"NÃ£o consegui usar o fluxo do Google Drive: {e}")
 
         st.markdown("---")
         st.markdown("### Upload manual")
@@ -6663,7 +6869,7 @@ if False and pagina == "Tratamento Final":
     )
 
     if not link_tratamento and not planilha_tratamento:
-        st.info("Cole o link da planilha aprovada ou envie a planilha do pedido final para gerar o arquivo de importação Autcom.")
+        st.info("Cole o link da planilha aprovada ou envie a planilha do pedido final para gerar o arquivo de importaÃ§Ã£o Autcom.")
         st.stop()
 
     try:
@@ -6677,7 +6883,7 @@ if False and pagina == "Tratamento Final":
 
         st.success(f"Planilha lida com sucesso via {origem_tratamento}: {len(df_tratamento)} linha(s).")
 
-        colunas_preview = [c for c in ["zx", "descricao", "Código Fábrica", "PEDIDO Final", "Preço Última Compra", "Valor Final do Pedido", "Total Geral do Pedido"] if c in df_tratamento.columns]
+        colunas_preview = [c for c in ["zx", "descricao", "CÃ³digo FÃ¡brica", "PEDIDO Final", "PreÃ§o Ãšltima Compra", "Valor Final do Pedido", "Total Geral do Pedido"] if c in df_tratamento.columns]
         if colunas_preview:
             st.dataframe(
                 df_tratamento[colunas_preview].head(50),
@@ -6692,7 +6898,7 @@ if False and pagina == "Tratamento Final":
         col_dl_autcom, col_dl_fornecedor = st.columns(2)
         with col_dl_autcom:
             st.download_button(
-                "⬇️ Baixar pedido tratado para importação no Autcom",
+                "â¬‡ï¸ Baixar pedido tratado para importaÃ§Ã£o no Autcom",
                 excel_tratamento,
                 "pedido_tratado_importacao_autcom.xlsx",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -6700,7 +6906,7 @@ if False and pagina == "Tratamento Final":
             )
         with col_dl_fornecedor:
             st.download_button(
-                "⬇️ Baixar pedido para envio ao fornecedor",
+                "â¬‡ï¸ Baixar pedido para envio ao fornecedor",
                 gerar_excel_fornecedor_tratamento(df_tratamento),
                 "pedido_envio_fornecedor.xlsx",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -6711,7 +6917,7 @@ if False and pagina == "Tratamento Final":
     st.stop()
 
 if not giro_pdf:
-    st.info("Envie o PDF de Giro de Estoque para iniciar a análise.")
+    st.info("Envie o PDF de Giro de Estoque para iniciar a anÃ¡lise.")
     st.stop()
 
 aviso_pdf_grande(giro_pdf)
@@ -6721,11 +6927,27 @@ with st.spinner("Lendo Giro de Estoque com cache otimizado..."):
 
 if df_giro.empty:
     st.error(diagnosticar_pdf_giro(texto_giro))
-    with st.expander("Diagnóstico técnico do PDF de Giro"):
+    with st.expander("DiagnÃ³stico tÃ©cnico do PDF de Giro"):
         st.write(f"Metodo de leitura: {metodo_giro}")
         st.write(f"Meses identificados: {MESES}")
         st.text((texto_giro or "")[:4000])
     st.stop()
+
+meses_disponiveis_pdf = list(MESES)
+st.sidebar.markdown("Meses para analise")
+meses_selecionados = st.sidebar.multiselect(
+    "Meses para anÃƒÂ¡lise",
+    options=meses_disponiveis_pdf,
+    default=meses_disponiveis_pdf,
+    format_func=label_mes_giro,
+    label_visibility="collapsed",
+    help="Reduza os meses se quiser uma tela mais leve. Se selecionar todos, o app usa modo rÃƒÂ¡pido quando necessÃƒÂ¡rio.",
+)
+if meses_selecionados:
+    MESES = meses_selecionados
+else:
+    st.sidebar.warning("Selecione ao menos um mÃƒÂªs. Usando todos os meses do PDF.")
+    MESES = meses_disponiveis_pdf
 
 if cadastro_google is not None and not cadastro_google.empty:
     df_giro = aplicar_cadastro_dataframe(df_giro, cadastro_google)
@@ -6735,17 +6957,17 @@ else:
 mes_atual_pdf = mes_atual_referencia()
 if mes_atual_pdf in MESES:
     considerar_mes_atual_media = st.radio(
-        f"Considerar {label_mes_giro(mes_atual_pdf)} no cálculo da Média Giro Geral?",
-        ["Não", "Sim"],
+        f"Considerar {label_mes_giro(mes_atual_pdf)} no cÃ¡lculo da MÃ©dia Giro Geral?",
+        ["NÃ£o", "Sim"],
         index=0,
         horizontal=True,
         key="considerar_mes_atual_media_giro",
-        help="Se escolher Não, o mês atual continua aparecendo na tabela, mas não entra na Média Giro Geral nem na sugestão do pedido.",
+        help="Se escolher NÃ£o, o mÃªs atual continua aparecendo na tabela, mas nÃ£o entra na MÃ©dia Giro Geral nem na sugestÃ£o do pedido.",
     ) == "Sim"
 else:
     considerar_mes_atual_media = True
 
-df_transito = pd.DataFrame(columns=["codigo", "Saldo em Trânsito/ABERTO"])
+df_transito = pd.DataFrame(columns=["codigo", "Saldo em TrÃ¢nsito/ABERTO"])
 if pedidos_pdf:
     aviso_pdf_grande(pedidos_pdf)
     try:
@@ -6753,20 +6975,20 @@ if pedidos_pdf:
             df_transito = parse_pedidos_compra_aberto_pdf(pedidos_pdf)
         if df_transito is None or df_transito.empty:
             st.warning(
-                "Não encontrei itens em aberto nesse PDF. "
-                "A análise seguirá apenas com o estoque atual."
+                "NÃ£o encontrei itens em aberto nesse PDF. "
+                "A anÃ¡lise seguirÃ¡ apenas com o estoque atual."
             )
-            df_transito = pd.DataFrame(columns=["codigo", "Saldo em Trânsito/ABERTO"])
+            df_transito = pd.DataFrame(columns=["codigo", "Saldo em TrÃ¢nsito/ABERTO"])
         else:
-            total_aberto = pd.to_numeric(df_transito.get("Saldo em Trânsito/ABERTO", 0), errors="coerce").fillna(0).sum()
+            total_aberto = pd.to_numeric(df_transito.get("Saldo em TrÃ¢nsito/ABERTO", 0), errors="coerce").fillna(0).sum()
             st.success(f"Pedidos em aberto lidos: {len(df_transito)} item(ns), total em aberto {format_num_br(total_aberto, 1)}.")
     except Exception as e:
         st.warning(
-            "Não consegui ler o PDF de Pedidos em Aberto. "
-            "A análise seguirá apenas com o estoque atual. "
+            "NÃ£o consegui ler o PDF de Pedidos em Aberto. "
+            "A anÃ¡lise seguirÃ¡ apenas com o estoque atual. "
             f"Detalhe: {e}"
         )
-        df_transito = pd.DataFrame(columns=["codigo", "Saldo em Trânsito/ABERTO"])
+        df_transito = pd.DataFrame(columns=["codigo", "Saldo em TrÃ¢nsito/ABERTO"])
 
 tabela_resumo = montar_tabela_consolidada(
     df_giro,
@@ -6774,28 +6996,31 @@ tabela_resumo = montar_tabela_consolidada(
     dias_estoque_alvo=dias_estoque_alvo,
     meses_alerta_sem_compra=meses_alerta_sem_compra,
     considerar_mes_atual_media=considerar_mes_atual_media,
+    meses_ref=MESES,
 )
 
 assinatura_base = (
-    tabela_resumo["codigo"].astype(str).str.cat(sep="|")
-    + "|fab=" + tabela_resumo.get("Código Fábrica", pd.Series(dtype=str)).astype(str).str.cat(sep="|")
-    + "|emb=" + tabela_resumo.get("Embalagem", pd.Series(dtype=str)).astype(str).str.cat(sep="|")
-    + "|aberto=" + tabela_resumo.get("Saldo em Trânsito/ABERTO", pd.Series(dtype=str)).astype(str).str.cat(sep="|")
-    + f"|dias={dias_estoque_alvo}|alerta={meses_alerta_sem_compra}|mes_atual_media={int(considerar_mes_atual_media)}"
+    assinatura_dataframe_colunas(
+        tabela_resumo,
+        ["codigo", "CÃ³digo FÃ¡brica", "Embalagem", "Saldo em TrÃ¢nsito/ABERTO"],
+    )
+    + f"|meses={','.join(MESES)}|dias={dias_estoque_alvo}|alerta={meses_alerta_sem_compra}|mes_atual_media={int(considerar_mes_atual_media)}"
 )
 if st.session_state.get("assinatura_base_pedido") != assinatura_base:
     st.session_state["pedido_editado"] = inicializar_pedido_editavel(tabela_resumo)
     st.session_state["assinatura_base_pedido"] = assinatura_base
 
+editor_pedido_key = f"editor_pedido_final_{hashlib.md5(assinatura_base.encode('utf-8')).hexdigest()[:10]}"
+
 colunas_consolidadas = [
-    "codigo", "descricao", "Código Fábrica", "Embalagem",
+    "codigo", "descricao", "CÃ³digo FÃ¡brica", "Embalagem",
     *[col_giro("Giro Lojas", mes) for mes in MESES],
-    "Média Giro Lojas", "Estoque Lojas",
-    *[col_giro("Giro Única", mes) for mes in MESES],
-    "Média Giro Única", "Estoque Única",
+    "MÃ©dia Giro Lojas", "Estoque Lojas",
+    *[col_giro("Giro Ãšnica", mes) for mes in MESES],
+    "MÃ©dia Giro Ãšnica", "Estoque Ãšnica",
     *[col_giro("Giro Geral", mes) for mes in MESES],
-    "Média Giro Geral", "Estoque Atual Geral", "Estoque Geral", "Saldo em Trânsito/ABERTO", "Estoque Final",
-    "Estoque Alvo", "Sugestão Sistema", "Sugestão arredondada", "Data Última Compra", "Preço Última Compra",
+    "MÃ©dia Giro Geral", "Estoque Atual Geral", "Estoque Geral", "Saldo em TrÃ¢nsito/ABERTO", "Estoque Final",
+    "Estoque Alvo", "SugestÃ£o Sistema", "SugestÃ£o arredondada", "Data Ãšltima Compra", "PreÃ§o Ãšltima Compra",
 ]
 for col in colunas_consolidadas:
     if col not in tabela_resumo.columns:
@@ -6807,23 +7032,23 @@ st.markdown("---")
 if pagina == "Giro Consolidado":
     st.markdown('<div class="section-title">Giro Consolidado</div>', unsafe_allow_html=True)
     st.caption(
-        "A data da última compra é puxada somente da loja 009. "
-        "Quando a data ultrapassa o parâmetro de meses sem compra, aparece o ícone ⚠️ ao lado da data."
+        "A data da Ãºltima compra Ã© puxada somente da loja 009. "
+        "Quando a data ultrapassa o parÃ¢metro de meses sem compra, aparece o Ã­cone âš ï¸ ao lado da data."
     )
 
     tabela = tabela_resumo[colunas_consolidadas].copy()
-    tabela = filtrar_tabela(tabela, ["codigo", "descricao", "Código Fábrica"], "busca_consolidada")
+    tabela = filtrar_tabela(tabela, ["codigo", "descricao", "CÃ³digo FÃ¡brica"], "busca_consolidada")
     render_tabela_interativa_colorida(tabela)
 
     st.download_button(
-        "⬇️ Baixar tabela consolidada em CSV",
+        "â¬‡ï¸ Baixar tabela consolidada em CSV",
         gerar_csv(tabela),
         "tabela_consolidada_giro_pedido.csv",
         "text/csv",
     )
 
     st.markdown("---")
-    st.markdown('<div class="section-title">🔎 Drill por produto</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">ðŸ”Ž Drill por produto</div>', unsafe_allow_html=True)
     opcoes_produtos = (
         tabela_resumo["codigo"].astype(str) + " - " + tabela_resumo["descricao"].astype(str)
     ).drop_duplicates().tolist()
@@ -6843,16 +7068,16 @@ if pagina == "Giro Consolidado":
             hide_index=True,
             height=360,
             column_config={
-                "Cód. Empresa": st.column_config.TextColumn("Cód. Empresa", pinned=True),
+                "CÃ³d. Empresa": st.column_config.TextColumn("CÃ³d. Empresa", pinned=True),
                 "Unidade": st.column_config.TextColumn("Unidade", pinned=True),
             },
         )
 
 elif pagina == "Pedido de Compra":
-    st.markdown('<div class="section-title">🛒 Pedido de Compra</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">ðŸ›’ Pedido de Compra</div>', unsafe_allow_html=True)
     st.caption(
-        "Todos os itens aparecem aqui, inclusive os com sugestão zero. "
-        "A coluna PEDIDO Final é editável. A coluna Valor Final do Pedido é recalculada por quantidade × preço última compra."
+        "Todos os itens aparecem aqui, inclusive os com sugestÃ£o zero. "
+        "A coluna PEDIDO Final Ã© editÃ¡vel. A coluna Valor Final do Pedido Ã© recalculada por quantidade Ã— preÃ§o Ãºltima compra."
     )
 
     pedido_base_completo = st.session_state.get("pedido_editado", inicializar_pedido_editavel(tabela_resumo)).copy()
@@ -6863,13 +7088,13 @@ elif pagina == "Pedido de Compra":
     colunas_sugestao = colunas_pedido_compras(MESES)
     for col in colunas_sugestao:
         if col not in pedido_base_completo.columns:
-            pedido_base_completo[col] = 0 if col not in ["codigo", "descricao", "Código Fábrica", "Data Última Compra", "Origem Sugestão"] else ""
+            pedido_base_completo[col] = 0 if col not in ["codigo", "descricao", "CÃ³digo FÃ¡brica", "Data Ãšltima Compra", "Origem SugestÃ£o"] else ""
 
-    pedido_view = pedido_base_completo[colunas_sugestao].sort_values(["Sugestão Sistema", "descricao"], ascending=[False, True]).copy()
-    pedido_view = filtrar_tabela(pedido_view, ["codigo", "descricao", "Código Fábrica"], "busca_sugestao")
+    pedido_view = pedido_base_completo[colunas_sugestao].sort_values(["SugestÃ£o Sistema", "descricao"], ascending=[False, True]).copy()
+    pedido_view = filtrar_tabela(pedido_view, ["codigo", "descricao", "CÃ³digo FÃ¡brica"], "busca_sugestao")
 
-    # Recalcula na hora o Valor Final do Pedido quando o usuário altera PEDIDO Final.
-    estado_editor = st.session_state.get("editor_pedido_final", {})
+    # Recalcula na hora o Valor Final do Pedido quando o usuÃ¡rio altera PEDIDO Final.
+    estado_editor = st.session_state.get(editor_pedido_key, {})
     alteracoes_linhas = estado_editor.get("edited_rows", {}) if isinstance(estado_editor, dict) else {}
     if alteracoes_linhas:
         indices_visiveis = list(pedido_view.index)
@@ -6891,8 +7116,8 @@ elif pagina == "Pedido de Compra":
                         descricao_item = str(pedido_view.loc[indice_real].get("descricao", "")).strip()
                         codigo_item = str(pedido_view.loc[indice_real].get("codigo", "")).zfill(5)
                         st.warning(
-                            f"Item {codigo_item} - {descricao_item}: a embalagem é com {embalagem_item} unidades. "
-                            f"Altere para {pedido_validado}. O sistema ajustou automaticamente para o próximo múltiplo."
+                            f"Item {codigo_item} - {descricao_item}: a embalagem Ã© com {embalagem_item} unidades. "
+                            f"Altere para {pedido_validado}. O sistema ajustou automaticamente para o prÃ³ximo mÃºltiplo."
                         )
 
                     pedido_view.loc[indice_real, "PEDIDO Final"] = pedido_validado
@@ -6907,42 +7132,48 @@ elif pagina == "Pedido de Compra":
         st.session_state["pedido_editado"] = pedido_base_completo
 
     pedido_view = pedido_view[colunas_sugestao].copy()
-    pedido_style = pedido_view.style.apply(colorir_colunas_pedido, axis=0).apply(estilos_alerta_giro_fora_curva, axis=1).format(formatadores_para_tabela(pedido_view))
+    if usar_renderizacao_leve(pedido_view, LIMITE_CELULAS_EDITOR):
+        st.caption(
+            "Modo rÃƒÂ¡pido ativado no editor para manter o Streamlit estÃƒÂ¡vel com muitos meses/itens."
+        )
+        pedido_para_editor = pedido_view
+    else:
+        pedido_para_editor = pedido_view.style.apply(colorir_colunas_pedido, axis=0).apply(estilos_alerta_giro_fora_curva, axis=1).format(formatadores_para_tabela(pedido_view))
 
     pedido_editado = st.data_editor(
-        pedido_style,
+        pedido_para_editor,
         use_container_width=True,
         hide_index=True,
         height=650,
-        key="editor_pedido_final",
+        key=editor_pedido_key,
         disabled=[
             "codigo", "descricao",
             *[col_giro("Giro Geral", mes) for mes in MESES],
-            "Média Giro Geral",
-            "Estoque Lojas", "Estoque Única", "Estoque Geral",
-            "Saldo em Trânsito/ABERTO", "Estoque Final", "Estoque Alvo",
-            "Sugestão Sistema", "Sugestão arredondada",
-            "Preço Última Compra", "Data Última Compra",
-            "Origem Sugestão", "Valor Final do Pedido",
-            "Embalagem", "Código Fábrica",
+            "MÃ©dia Giro Geral",
+            "Estoque Lojas", "Estoque Ãšnica", "Estoque Geral",
+            "Saldo em TrÃ¢nsito/ABERTO", "Estoque Final", "Estoque Alvo",
+            "SugestÃ£o Sistema", "SugestÃ£o arredondada",
+            "PreÃ§o Ãšltima Compra", "Data Ãšltima Compra",
+            "Origem SugestÃ£o", "Valor Final do Pedido",
+            "Embalagem", "CÃ³digo FÃ¡brica",
         ],
         column_config={
-            "codigo": st.column_config.TextColumn("Código", pinned=True),
-            "descricao": st.column_config.TextColumn("Descrição", width="large", pinned=True),
-            "Código Fábrica": st.column_config.TextColumn("Código Fábrica", width="medium"),
+            "codigo": st.column_config.TextColumn("CÃ³digo", pinned=True),
+            "descricao": st.column_config.TextColumn("DescriÃ§Ã£o", width="large", pinned=True),
+            "CÃ³digo FÃ¡brica": st.column_config.TextColumn("CÃ³digo FÃ¡brica", width="medium"),
             "Embalagem": st.column_config.NumberColumn("Embalagem", min_value=0, step=1, format="%d"),
-            "Média Giro Lojas": st.column_config.NumberColumn("Média Giro Lojas", format="%.1f"),
+            "MÃ©dia Giro Lojas": st.column_config.NumberColumn("MÃ©dia Giro Lojas", format="%.1f"),
             "Estoque Lojas": st.column_config.NumberColumn("Estoque Lojas", format="%.1f"),
-            "Média Giro Única": st.column_config.NumberColumn("Média Giro Única", format="%.1f"),
-            "Estoque Única": st.column_config.NumberColumn("Estoque Única", format="%.1f"),
-            "Média Giro Geral": st.column_config.NumberColumn("Média Giro Geral", format="%.1f"),
+            "MÃ©dia Giro Ãšnica": st.column_config.NumberColumn("MÃ©dia Giro Ãšnica", format="%.1f"),
+            "Estoque Ãšnica": st.column_config.NumberColumn("Estoque Ãšnica", format="%.1f"),
+            "MÃ©dia Giro Geral": st.column_config.NumberColumn("MÃ©dia Giro Geral", format="%.1f"),
             "Estoque Geral": st.column_config.NumberColumn("Estoque Geral", format="%.1f"),
-            "Saldo em Trânsito/ABERTO": st.column_config.NumberColumn("Saldo em Trânsito", format="%.1f"),
+            "Saldo em TrÃ¢nsito/ABERTO": st.column_config.NumberColumn("Saldo em TrÃ¢nsito", format="%.1f"),
             "Estoque Final": st.column_config.NumberColumn("Estoque Final", format="%.1f"),
             "Estoque Alvo": st.column_config.NumberColumn("Estoque Alvo", format="%.1f"),
-            "Sugestão Sistema": st.column_config.NumberColumn("Sugestão Sistema", format="%d"),
-            "Sugestão arredondada": st.column_config.NumberColumn("Sugestão arredondada", format="%d"),
-            "Preço Última Compra": st.column_config.NumberColumn("Preço Última Compra", format="R$ %.2f"),
+            "SugestÃ£o Sistema": st.column_config.NumberColumn("SugestÃ£o Sistema", format="%d"),
+            "SugestÃ£o arredondada": st.column_config.NumberColumn("SugestÃ£o arredondada", format="%d"),
+            "PreÃ§o Ãšltima Compra": st.column_config.NumberColumn("PreÃ§o Ãšltima Compra", format="R$ %.2f"),
             "PEDIDO Final": st.column_config.NumberColumn("PEDIDO Final", min_value=0, step=1, format="%d"),
             "Valor Final do Pedido": st.column_config.NumberColumn("Valor Final do Pedido", format="R$ %.2f"),
         },
@@ -6977,7 +7208,7 @@ elif pagina == "Pedido de Compra":
         unsafe_allow_html=True,
     )
 
-    if st.button("💾 Salvar Pedido", type="primary"):
+    if st.button("ðŸ’¾ Salvar Pedido", type="primary"):
         base_completa = st.session_state["pedido_editado"].copy()
         if "Estoque Geral" not in base_completa.columns and "Estoque Atual Geral" in base_completa.columns:
             base_completa["Estoque Geral"] = base_completa["Estoque Atual Geral"]
@@ -6995,12 +7226,12 @@ elif pagina == "Pedido de Compra":
         )
         base_completa = atualizar_valor_e_origem(base_completa)
         st.session_state["pedido_editado"] = base_completa
-        st.success("Pedido salvo. Vá para a página Exportar Pedido para criar o Google Sheets na pasta de aprovação.")
+        st.success("Pedido salvo. VÃ¡ para a pÃ¡gina Exportar Pedido para criar o Google Sheets na pasta de aprovaÃ§Ã£o.")
 
     st.markdown("---")
     st.markdown("### Exportar pedido em Google Sheets")
-    st.markdown('<div class="sheets-badge">▦ Google Sheets</div>', unsafe_allow_html=True)
-    st.caption("Nesta versão, o pedido será enviado para um Google Apps Script, que cria a planilha Google Sheets diretamente na pasta de aprovação. Não usa OAuth, refresh_token nem Service Account no Python.")
+    st.markdown('<div class="sheets-badge">â–¦ Google Sheets</div>', unsafe_allow_html=True)
+    st.caption("Nesta versÃ£o, o pedido serÃ¡ enviado para um Google Apps Script, que cria a planilha Google Sheets diretamente na pasta de aprovaÃ§Ã£o. NÃ£o usa OAuth, refresh_token nem Service Account no Python.")
     st.link_button("Abrir pasta destino no Drive", google_link_pasta(GOOGLE_PASTA_APROVACAO_ID), use_container_width=True)
 
     if apps_script_configurado():
@@ -7008,7 +7239,7 @@ elif pagina == "Pedido de Compra":
             nome_pedido_drive = st.text_input("Nome do pedido", value=f"Pedido {datetime.now().strftime('%d-%m-%Y')}")
             fornecedor_drive = st.text_input("Fornecedor", value="")
             usuario_drive = st.text_input("Criado por", value="")
-            enviar_drive = st.form_submit_button("▦ Criar Google Sheets na pasta", type="primary")
+            enviar_drive = st.form_submit_button("â–¦ Criar Google Sheets na pasta", type="primary")
 
         if enviar_drive:
             try:
@@ -7035,20 +7266,20 @@ web_app_url = "https://script.google.com/macros/s/SEU_DEPLOY_ID/exec"
 
     with st.expander("Fallback: baixar CSV local"):
         st.download_button(
-            "⬇️ Baixar pedido em CSV",
+            "â¬‡ï¸ Baixar pedido em CSV",
             gerar_csv(pedido_editado[colunas_pedido_compras(MESES)]),
             "pedido_editavel.csv",
             "text/csv",
         )
 
-elif pagina == "Exportações":
-    st.markdown('<div class="section-title">Exportações</div>', unsafe_allow_html=True)
-    st.caption("O Excel será gerado para importação no Autcom: coluna B = código, coluna F = quantidade, coluna H = valor unitário, sem cabeçalho.")
+elif pagina == "ExportaÃ§Ãµes":
+    st.markdown('<div class="section-title">ExportaÃ§Ãµes</div>', unsafe_allow_html=True)
+    st.caption("O Excel serÃ¡ gerado para importaÃ§Ã£o no Autcom: coluna B = cÃ³digo, coluna F = quantidade, coluna H = valor unitÃ¡rio, sem cabeÃ§alho.")
 
     pedido_final = st.session_state.get("pedido_editado", inicializar_pedido_editavel(tabela_resumo)).copy()
     pedido_final, mensagens_exportar = validar_pedidos_por_embalagem(pedido_final)
     if mensagens_exportar:
-        st.warning("O sistema ajustou quantidades para respeitar a embalagem antes da exportação:\n\n" + "\n".join(mensagens_exportar[:10]))
+        st.warning("O sistema ajustou quantidades para respeitar a embalagem antes da exportaÃ§Ã£o:\n\n" + "\n".join(mensagens_exportar[:10]))
         if len(mensagens_exportar) > 10:
             st.caption(f"Mais {len(mensagens_exportar) - 10} ajuste(s) foram aplicado(s).")
         st.session_state["pedido_editado"] = pedido_final.copy()
@@ -7068,8 +7299,8 @@ elif pagina == "Exportações":
 
     st.dataframe(
         pedido_final[[
-            "codigo", "descricao", "Código Fábrica", "Sugestão Sistema", "Sugestão arredondada", "PEDIDO Final", "Preço Última Compra",
-            "Valor Final do Pedido", "Data Última Compra", "Origem Sugestão",
+            "codigo", "descricao", "CÃ³digo FÃ¡brica", "SugestÃ£o Sistema", "SugestÃ£o arredondada", "PEDIDO Final", "PreÃ§o Ãšltima Compra",
+            "Valor Final do Pedido", "Data Ãšltima Compra", "Origem SugestÃ£o",
         ]].style.format(formatadores_para_tabela(pedido_final)),
         use_container_width=True,
         hide_index=True,
@@ -7079,11 +7310,11 @@ elif pagina == "Exportações":
     col_dl1, col_dl2 = st.columns(2)
 
     with col_dl1:
-        render_download_card("Excel Autcom", "Arquivo sem cabeçalho: coluna B = código, F = quantidade, H = preço.")
+        render_download_card("Excel Autcom", "Arquivo sem cabeÃ§alho: coluna B = cÃ³digo, F = quantidade, H = preÃ§o.")
         try:
             excel_bytes = gerar_excel_pedido(pedido_final)
             st.download_button(
-                "⬇️ Baixar pedido para importação no Autcom",
+                "â¬‡ï¸ Baixar pedido para importaÃ§Ã£o no Autcom",
                 excel_bytes,
                 "pedido_importacao_autcom.xlsx",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -7093,10 +7324,12 @@ elif pagina == "Exportações":
             st.error(str(e))
 
     with col_dl2:
-        render_download_card("Cópia para fornecedor", "Lista simples com código de fábrica, descrição e quantidade.")
+        render_download_card("CÃ³pia para fornecedor", "Lista simples com cÃ³digo de fÃ¡brica, descriÃ§Ã£o e quantidade.")
         st.download_button(
-            "⬇️ Baixar cópia CSV para fornecedor",
+            "â¬‡ï¸ Baixar cÃ³pia CSV para fornecedor",
             gerar_copia_fornecedor_csv(pedido_final),
             "copia_fornecedor.csv",
             "text/csv",
         )
+
+
