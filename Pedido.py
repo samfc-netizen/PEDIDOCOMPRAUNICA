@@ -850,7 +850,7 @@ def parse_pedidos_compra_aberto(text):
     })
 
 
-def parse_pedidos_compra_aberto_pdf(uploaded_file):
+def _parse_pedidos_compra_aberto_pdf_stream(uploaded_file):
     """
     Lê o PDF de Pedidos em Aberto / Saldo em Trânsito.
 
@@ -978,6 +978,18 @@ def parse_pedidos_compra_aberto_pdf(uploaded_file):
         })
 
     return pd.DataFrame(columns=["codigo", "descricao", "Saldo em Trânsito/ABERTO"])
+
+
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=8)
+def parse_pedidos_compra_aberto_pdf_cached(pdf_bytes):
+    pdf_bytes = bytes(pdf_bytes or b"")
+    if not pdf_bytes:
+        return pd.DataFrame(columns=["codigo", "descricao", "Saldo em Trânsito/ABERTO"])
+    return _parse_pedidos_compra_aberto_pdf_stream(BytesIO(pdf_bytes))
+
+
+def parse_pedidos_compra_aberto_pdf(uploaded_file):
+    return parse_pedidos_compra_aberto_pdf_cached(_pdf_bytes(uploaded_file))
 
 
 # =========================================================
@@ -6736,8 +6748,25 @@ else:
 df_transito = pd.DataFrame(columns=["codigo", "Saldo em Trânsito/ABERTO"])
 if pedidos_pdf:
     aviso_pdf_grande(pedidos_pdf)
-    with st.spinner("Lendo Pedidos de Compra em Aberto com cache otimizado..."):
-        df_transito = parse_pedidos_compra_aberto_pdf(pedidos_pdf)
+    try:
+        with st.spinner("Lendo Pedidos de Compra em Aberto com cache otimizado..."):
+            df_transito = parse_pedidos_compra_aberto_pdf(pedidos_pdf)
+        if df_transito is None or df_transito.empty:
+            st.warning(
+                "Não encontrei itens em aberto nesse PDF. "
+                "A análise seguirá apenas com o estoque atual."
+            )
+            df_transito = pd.DataFrame(columns=["codigo", "Saldo em Trânsito/ABERTO"])
+        else:
+            total_aberto = pd.to_numeric(df_transito.get("Saldo em Trânsito/ABERTO", 0), errors="coerce").fillna(0).sum()
+            st.success(f"Pedidos em aberto lidos: {len(df_transito)} item(ns), total em aberto {format_num_br(total_aberto, 1)}.")
+    except Exception as e:
+        st.warning(
+            "Não consegui ler o PDF de Pedidos em Aberto. "
+            "A análise seguirá apenas com o estoque atual. "
+            f"Detalhe: {e}"
+        )
+        df_transito = pd.DataFrame(columns=["codigo", "Saldo em Trânsito/ABERTO"])
 
 tabela_resumo = montar_tabela_consolidada(
     df_giro,
