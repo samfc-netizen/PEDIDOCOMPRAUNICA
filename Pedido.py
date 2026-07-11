@@ -4625,6 +4625,98 @@ def _dataframe_de_tabela_pdf_fornecedor(linhas):
     return out.reset_index(drop=True)
 
 
+
+def _numero_quantidade_pdf_br(valor):
+    """
+    Converte quantidade impressa em PDFs brasileiros.
+
+    Nestes relatórios a quantidade é exibida com 3 casas decimais:
+    24,000 = 24 unidades; 1.500,000 = 1.500 unidades.
+    Essa regra é aplicada somente aos PDFs reconhecidos como brasileiros,
+    sem alterar a leitura de Excel/Sheets em que 1,000 pode significar mil.
+    """
+    txt = str(valor or "").strip().replace(" ", "").replace("\xa0", "")
+    if not txt:
+        return 0.0
+    if re.fullmatch(r"-?\d{1,3}(?:\.\d{3})*,\d{3}", txt) or re.fullmatch(r"-?\d+,\d{3}", txt):
+        return br_to_float(txt)
+    return numero_planilha_para_float(txt)
+
+
+def extrair_itens_pdf_3m(uploaded_file):
+    """
+    Parser específico e seguro para o layout de simulação/pedido da 3M.
+
+    Linha esperada:
+    Linha | Produto | Descrição | NCM | Agrupamento | Quantidade |
+    Valor Unitário | Valor Total
+
+    O ponto crítico deste modelo é que Quantidade usa 3 casas decimais.
+    Portanto, 24,000 significa 24 e não 24.000.
+    """
+    if uploaded_file is None:
+        return pd.DataFrame()
+
+    try:
+        texto = extract_text_from_pdf_pdfplumber(uploaded_file)
+    except Exception:
+        return pd.DataFrame()
+
+    texto_up = _texto_sem_acentos(texto).upper()
+    if "3M DO BRASIL" not in texto_up or "AGRUPAMENTO" not in texto_up or "VALOR UNITARIO" not in texto_up:
+        return pd.DataFrame()
+
+    padrao = re.compile(
+        r"^\s*(?P<linha>\d{1,4})\s+"
+        r"(?P<codigo>[A-Z]{1,4}\d[A-Z0-9]{5,})\s+"
+        r"(?P<descricao>.+?)\s+"
+        r"(?P<ncm>\d{8,10})\s+"
+        r"(?P<agrupamento>[A-Z0-9]{2,10})\s+"
+        r"(?P<qtd>-?\d{1,3}(?:\.\d{3})*,\d{3}|-?\d+,\d{3})\s+"
+        r"(?P<unit>-?\d{1,3}(?:\.\d{3})*,\d{4}|-?\d+,\d{4})\s+"
+        r"(?P<total>-?\d{1,3}(?:\.\d{3})*,\d{2}|-?\d+,\d{2})\s*$",
+        flags=re.IGNORECASE,
+    )
+
+    registros = []
+    vistos = set()
+    for raw in texto.splitlines():
+        linha = re.sub(r"\s+", " ", str(raw or "")).strip()
+        m = padrao.match(linha)
+        if not m:
+            continue
+
+        codigo = m.group("codigo").strip()
+        qtd = _numero_quantidade_pdf_br(m.group("qtd"))
+        preco = br_to_float(m.group("unit"))
+        total = br_to_float(m.group("total"))
+        if not codigo or qtd <= 0 or preco <= 0:
+            continue
+
+        # Validação contábil tolerante a IPI e demais acréscimos do documento.
+        calculado = qtd * preco
+        if total <= 0:
+            total = calculado
+        elif abs(calculado - total) > max(0.15, abs(total) * 0.25):
+            # Mantém os valores impressos, mas impede captura de linha tributária aleatória.
+            continue
+
+        chave = (normalizar_codigo_fabrica(codigo), round(qtd, 6), round(preco, 6), round(total, 2))
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+        registros.append({
+            "Código Fábrica": codigo,
+            "Descrição": re.sub(r"\s+", " ", m.group("descricao")).strip(),
+            "Quantidade": qtd,
+            "Valor Unitário": preco,
+            "Valor Total": total,
+            "Linha PDF": linha,
+        })
+
+    return pd.DataFrame(registros)
+
+
 def extrair_itens_pdf_por_tabelas(uploaded_file):
     """Lê PDFs de fornecedor com tabela real antes das heurísticas por texto."""
     if uploaded_file is None:
@@ -4782,6 +4874,12 @@ def ler_arquivo_comparativo(uploaded_file, codigos_referencia=None):
         return extrair_itens_txt_comparativo(uploaded_file, codigos_referencia=codigos_referencia)
 
     if nome.endswith(".pdf"):
+        # Layout 3M: a quantidade usa 3 casas decimais (24,000 = 24 unidades).
+        # Este parser dedicado precisa vir antes das heurísticas genéricas.
+        df_pdf = extrair_itens_pdf_3m(uploaded_file)
+        if not df_pdf.empty:
+            return df_pdf
+
         # Primeiro tenta tabela real do PDF. Isso evita confundir Código Produto/EAN/Código de Fábrica
         # com quantidade quando o PDF possui colunas explícitas como Qtd., VL. Unitário e VL. Total.
         df_pdf = extrair_itens_pdf_por_tabelas(uploaded_file)
