@@ -3301,13 +3301,55 @@ def _credenciais_service_account_google():
             "Configure o JSON em [gcp_service_account]."
         )
 
-    return service_account.Credentials.from_service_account_info(
-        cfg,
-        scopes=[
-            "https://www.googleapis.com/auth/spreadsheets.readonly",
-            "https://www.googleapis.com/auth/drive.readonly",
-        ],
-    )
+    # O Streamlit Secrets/TOML pode entregar a chave com \n literal, aspas extras
+    # ou cabeçalho copiado com underscores. Normaliza antes de criar o PEM.
+    private_key = str(cfg.get("private_key", "") or "").strip()
+    if not private_key:
+        raise RuntimeError(
+            "A credencial gcp_service_account não possui o campo private_key. "
+            "Cole a chave privada completa do arquivo JSON da conta de serviço."
+        )
+
+    # Remove aspas que eventualmente tenham sido copiadas como parte do valor.
+    if len(private_key) >= 2 and private_key[0] == private_key[-1] and private_key[0] in ('\"', "'"):
+        private_key = private_key[1:-1].strip()
+
+    # Converte sequências escapadas do TOML/JSON em quebras de linha reais.
+    private_key = private_key.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\r\n", "\n")
+
+    # Corrige cabeçalhos frequentemente colados com underscores.
+    private_key = private_key.replace("BEGIN_PRIVATE_KEY", "BEGIN PRIVATE KEY")
+    private_key = private_key.replace("END_PRIVATE_KEY", "END PRIVATE KEY")
+    private_key = private_key.replace("BEGIN RSA PRIVATE KEY", "BEGIN RSA PRIVATE KEY")
+
+    # Garante quebra de linha após o cabeçalho e antes do rodapé quando a chave foi colada em uma linha.
+    for header in ("-----BEGIN PRIVATE KEY-----", "-----BEGIN RSA PRIVATE KEY-----"):
+        if private_key.startswith(header) and not private_key.startswith(header + "\n"):
+            private_key = header + "\n" + private_key[len(header):].lstrip()
+    for footer in ("-----END PRIVATE KEY-----", "-----END RSA PRIVATE KEY-----"):
+        if footer in private_key and ("\n" + footer) not in private_key:
+            private_key = private_key.replace(footer, "\n" + footer)
+
+    if not private_key.endswith("\n"):
+        private_key += "\n"
+
+    cfg["private_key"] = private_key
+
+    try:
+        return service_account.Credentials.from_service_account_info(
+            cfg,
+            scopes=[
+                "https://www.googleapis.com/auth/spreadsheets.readonly",
+                "https://www.googleapis.com/auth/drive.readonly",
+            ],
+        )
+    except Exception as e:
+        raise RuntimeError(
+            "Não foi possível carregar a chave privada da conta de serviço. "
+            "No Streamlit Secrets, copie exatamente o campo private_key do JSON original, "
+            "incluindo BEGIN PRIVATE KEY, END PRIVATE KEY e as quebras de linha. "
+            f"Detalhe técnico: {e}"
+        ) from e
 
 
 @st.cache_data(show_spinner=False, ttl=300, max_entries=4)
