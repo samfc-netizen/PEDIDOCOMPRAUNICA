@@ -3317,21 +3317,37 @@ def _credenciais_service_account_google():
     # Converte sequências escapadas do TOML/JSON em quebras de linha reais.
     private_key = private_key.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\r\n", "\n")
 
-    # Corrige cabeçalhos frequentemente colados com underscores.
-    private_key = private_key.replace("BEGIN_PRIVATE_KEY", "BEGIN PRIVATE KEY")
-    private_key = private_key.replace("END_PRIVATE_KEY", "END PRIVATE KEY")
-    private_key = private_key.replace("BEGIN RSA PRIVATE KEY", "BEGIN RSA PRIVATE KEY")
+    # Reconstrói o envelope PEM de maneira canônica. Isso corrige variações como:
+    # ---_BEGIN_PRIVATE_KEY---, BEGIN_PRIVATE_KEY, excesso de hífens e espaços.
+    # Somente o cabeçalho/rodapé são normalizados; o corpo criptográfico é preservado.
+    texto_pem = private_key.strip()
+    match_inicio = re.search(r"BEGIN[\s_-]*(RSA[\s_-]*)?PRIVATE[\s_-]*KEY", texto_pem, flags=re.IGNORECASE)
+    match_fim = re.search(r"END[\s_-]*(RSA[\s_-]*)?PRIVATE[\s_-]*KEY", texto_pem, flags=re.IGNORECASE)
 
-    # Garante quebra de linha após o cabeçalho e antes do rodapé quando a chave foi colada em uma linha.
-    for header in ("-----BEGIN PRIVATE KEY-----", "-----BEGIN RSA PRIVATE KEY-----"):
-        if private_key.startswith(header) and not private_key.startswith(header + "\n"):
-            private_key = header + "\n" + private_key[len(header):].lstrip()
-    for footer in ("-----END PRIVATE KEY-----", "-----END RSA PRIVATE KEY-----"):
-        if footer in private_key and ("\n" + footer) not in private_key:
-            private_key = private_key.replace(footer, "\n" + footer)
+    if match_inicio and match_fim and match_fim.start() > match_inicio.end():
+        tipo_rsa = bool(match_inicio.group(1))
+        header = "-----BEGIN RSA PRIVATE KEY-----" if tipo_rsa else "-----BEGIN PRIVATE KEY-----"
+        footer = "-----END RSA PRIVATE KEY-----" if tipo_rsa else "-----END PRIVATE KEY-----"
 
-    if not private_key.endswith("\n"):
-        private_key += "\n"
+        corpo = texto_pem[match_inicio.end():match_fim.start()]
+        # Remove apenas separadores/ruídos nas bordas do corpo. Não substitui caracteres internos.
+        corpo = corpo.strip(" \t\r\n-_:;,'\"")
+        corpo = corpo.replace("\r\n", "\n").replace("\r", "\n")
+        linhas_corpo = [linha.strip() for linha in corpo.split("\n") if linha.strip()]
+
+        # Se a chave veio em uma única linha, remove espaços e refaz linhas PEM de 64 caracteres.
+        if len(linhas_corpo) <= 1:
+            corpo_unico = re.sub(r"\s+", "", corpo)
+            linhas_corpo = [corpo_unico[i:i + 64] for i in range(0, len(corpo_unico), 64)]
+
+        private_key = header + "\n" + "\n".join(linhas_corpo) + "\n" + footer + "\n"
+    else:
+        # Fallback para chaves que já estejam quase corretas.
+        private_key = private_key.replace("BEGIN_PRIVATE_KEY", "BEGIN PRIVATE KEY")
+        private_key = private_key.replace("END_PRIVATE_KEY", "END PRIVATE KEY")
+        private_key = private_key.replace("---_BEGIN", "-----BEGIN").replace("---_END", "-----END")
+        if not private_key.endswith("\n"):
+            private_key += "\n"
 
     cfg["private_key"] = private_key
 
@@ -3344,10 +3360,12 @@ def _credenciais_service_account_google():
             ],
         )
     except Exception as e:
+        primeira_linha = str(cfg.get("private_key", "")).splitlines()[0][:80] if cfg.get("private_key") else "vazia"
         raise RuntimeError(
             "Não foi possível carregar a chave privada da conta de serviço. "
-            "No Streamlit Secrets, copie exatamente o campo private_key do JSON original, "
-            "incluindo BEGIN PRIVATE KEY, END PRIVATE KEY e as quebras de linha. "
+            "A chave ainda não possui um PEM criptograficamente válido. "
+            f"Primeira linha detectada após normalização: {primeira_linha!r}. "
+            "O correto é '-----BEGIN PRIVATE KEY-----'. "
             f"Detalhe técnico: {e}"
         ) from e
 
