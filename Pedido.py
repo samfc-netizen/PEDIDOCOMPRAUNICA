@@ -5154,9 +5154,9 @@ def extrair_itens_pdf_mastersales_brasilux(uploaded_file, codigos_referencia=Non
                 codigo_relacionamento = referencias[norm_completo]
             elif norm_numerico in referencias:
                 codigo_relacionamento = referencias[norm_numerico]
-            else:
-                # O item não pertence ao pedido Única usado como referência.
-                continue
+            # Não descarta o item quando ele não estiver na referência da Única.
+            # O PDF MasterSales já possui colunas estruturadas e confiáveis; manter
+            # todos os itens permite exibir corretamente também "Somente fornecedor".
 
         qtd = numero_planilha_para_float(m.group("qtd"))
         preco = numero_planilha_para_float(m.group("preco"))
@@ -6049,9 +6049,29 @@ def render_pagina_comparativo_pedidos():
             colunas_preview = list(dict.fromkeys(colunas_preview))
             st.dataframe(df_fornecedor[colunas_preview].head(100), use_container_width=True, hide_index=True)
 
-        mapa_fornecedor = _mapear_colunas_comparativo(df_fornecedor, "cmp_fornecedor", "Pedido Fornecedor")
-        if not mapa_fornecedor:
-            return
+        # PDFs reconhecidos pelos parsers dedicados já retornam o padrão canônico.
+        # Nesses casos, o comparativo segue direto, sem solicitar mapeamento manual.
+        colunas_canonicas_fornecedor = {
+            "Código Fábrica", "Quantidade", "Valor Unitário", "Valor Total"
+        }
+        if colunas_canonicas_fornecedor.issubset(set(df_fornecedor.columns)):
+            mapa_fornecedor = {
+                "codigo": "Código Fábrica",
+                "descricao": "Descrição" if "Descrição" in df_fornecedor.columns else None,
+                "quantidade": "Quantidade",
+                "preco_unitario": "Valor Unitário",
+                "valor_total": "Valor Total",
+            }
+            st.success(
+                "Colunas do Pedido Fornecedor identificadas automaticamente: "
+                "Código de Fábrica, Quantidade, Valor Unitário e Valor Total."
+            )
+        else:
+            mapa_fornecedor = _mapear_colunas_comparativo(
+                df_fornecedor, "cmp_fornecedor", "Pedido Fornecedor"
+            )
+            if not mapa_fornecedor:
+                return
 
         st.markdown("### 2. Relacionamento manual dos itens sem identificação")
         relacionamentos = st.session_state.get("relacionamentos_comparativo", {})
