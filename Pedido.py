@@ -5091,6 +5091,95 @@ def extrair_itens_txt_comparativo(uploaded_file, codigos_referencia=None):
     return df_anchor if df_anchor is not None else pd.DataFrame()
 
 
+
+def extrair_itens_pdf_mastersales_brasilux(uploaded_file, codigos_referencia=None):
+    """
+    Parser dedicado ao RELATÓRIO DE PEDIDO MasterSales / Brasilux.
+
+    Layout real da linha:
+    Item + prefixo + código numérico + descrição + Qtde + Preço Venda + Valor Total
+    + Venda c/ Imp. + IPI + ST.
+
+    A quantidade é capturada imediatamente antes do primeiro ``R$``. Isso evita
+    confundir números da descrição/embalagem, como 900 ML, 18 LT ou 25 KG, com a
+    quantidade pedida.
+    """
+    try:
+        texto = extract_text_from_pdf_pdfplumber(uploaded_file)
+    except Exception:
+        return pd.DataFrame()
+
+    texto_upper = _texto_sem_acentos(texto).upper()
+    if "RELATORIO DE PEDIDO" not in texto_upper or "MASTERSALES" not in texto_upper:
+        return pd.DataFrame()
+
+    referencias = _referencias_codigo_fabrica(codigos_referencia)
+    registros = []
+    vistos = set()
+
+    # O trecho final exige cinco campos monetários do relatório, impedindo que a
+    # regex encerre a descrição no primeiro número que encontrar.
+    padrao = re.compile(
+        r"^\s*(?P<item>\d+)\s+"
+        r"(?:(?P<prefixo>[A-Z]{1,4})\s+)?"
+        r"(?P<codigo>\d{4,18})\s+-\s+"
+        r"(?P<descricao>.*?)\s+"
+        r"(?P<qtd>\d+(?:[\.,]\d+)?)\s+"
+        r"R\$\s*(?P<preco>[\d\.]+,\d{2})\s+"
+        r"R\$\s*(?P<total>[\d\.]+,\d{2})\s+"
+        r"R\$\s*(?P<preco_imp>[\d\.]+,\d{2})\s+"
+        r"R\$\s*(?P<ipi>[\d\.]+,\d{2})\s+"
+        r"R\$\s*(?P<st>[\d\.]+,\d{2})\s*$",
+        flags=re.IGNORECASE,
+    )
+
+    for linha in str(texto or "").splitlines():
+        linha = str(linha or "").strip()
+        m = padrao.match(linha)
+        if not m:
+            continue
+
+        prefixo = str(m.group("prefixo") or "").upper().strip()
+        codigo_num = m.group("codigo").strip()
+        codigo_pdf = f"{prefixo} {codigo_num}".strip()
+        norm_completo = normalizar_codigo_fabrica(codigo_pdf)
+        norm_numerico = normalizar_codigo_fabrica(codigo_num)
+
+        # Quando a planilha da Única foi fornecida, devolve exatamente o código
+        # existente nela. Assim o relacionamento funciona tanto para "TN 710041608"
+        # quanto para "710041608".
+        codigo_relacionamento = codigo_pdf
+        if referencias:
+            if norm_completo in referencias:
+                codigo_relacionamento = referencias[norm_completo]
+            elif norm_numerico in referencias:
+                codigo_relacionamento = referencias[norm_numerico]
+            else:
+                # O item não pertence ao pedido Única usado como referência.
+                continue
+
+        qtd = numero_planilha_para_float(m.group("qtd"))
+        preco = numero_planilha_para_float(m.group("preco"))
+        total = numero_planilha_para_float(m.group("total"))
+        descricao = m.group("descricao").strip(" -")
+
+        chave = (normalizar_codigo_fabrica(codigo_relacionamento), round(qtd, 4))
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+
+        registros.append({
+            "Código Fábrica": codigo_relacionamento,
+            "Descrição": descricao,
+            "Quantidade": qtd,
+            "Valor Unitário": preco,
+            "Valor Total": total if total > 0 else qtd * preco,
+            "Linha PDF": linha,
+        })
+
+    return pd.DataFrame(registros)
+
+
 def ler_arquivo_comparativo(uploaded_file, codigos_referencia=None):
     if uploaded_file is None:
         return pd.DataFrame()
@@ -5105,6 +5194,14 @@ def ler_arquivo_comparativo(uploaded_file, codigos_referencia=None):
         return extrair_itens_txt_comparativo(uploaded_file, codigos_referencia=codigos_referencia)
 
     if nome.endswith(".pdf"):
+        # Layout MasterSales/Brasilux: captura o Código de Fábrica e a quantidade
+        # imediatamente antes do primeiro R$, sem confundir 900 ML / 18 LT / 25 KG.
+        df_pdf = extrair_itens_pdf_mastersales_brasilux(
+            uploaded_file, codigos_referencia=codigos_referencia
+        )
+        if not df_pdf.empty:
+            return df_pdf
+
         # Layout 3M: a quantidade usa 3 casas decimais (24,000 = 24 unidades).
         # Este parser dedicado precisa vir antes das heurísticas genéricas.
         df_pdf = extrair_itens_pdf_3m(uploaded_file)
