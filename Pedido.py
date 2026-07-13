@@ -3371,25 +3371,29 @@ def _credenciais_service_account_google():
 
 
 @st.cache_data(show_spinner=False, ttl=300, max_entries=4)
-def ler_tabela_precos_brasilux_google_sheets(spreadsheet_id=GOOGLE_PLANILHA_PRECOS_BRASILUX_ID):
+def ler_tabela_precos_brasilux_google_sheets(
+    spreadsheet_id=GOOGLE_PLANILHA_PRECOS_BRASILUX_ID,
+    nome_aba="BRASILUX",
+):
     """
-    Lê a primeira aba pública da tabela Brasilux diretamente como CSV.
+    Lê especificamente a aba BRASILUX da tabela pública diretamente como CSV.
 
     Não utiliza conta de serviço, private_key, PEM nem Google API.
     A planilha precisa estar compartilhada como "Qualquer pessoa com o link".
-    A coluna D é preservada por posição, pois é a coluna oficial
-    TABELA MENOR PREÇO.
+    A coluna D é preservada por posição e os endpoints do Google retornam
+    o valor calculado das fórmulas, não o texto da fórmula.
     """
     spreadsheet_id = str(spreadsheet_id or "").strip()
+    nome_aba = str(nome_aba or "BRASILUX").strip() or "BRASILUX"
     if not spreadsheet_id:
         raise ValueError("O ID da planilha Brasilux não foi configurado.")
 
-    # O endpoint gviz sem nome de aba retorna a primeira aba visível da planilha.
-    # Mantemos header=None para preservar rigorosamente as posições A, B, C e D,
-    # inclusive quando a planilha possui títulos ou linhas adicionais no início.
+    # IMPORTANTE: sem o parâmetro sheet, o Google devolve a primeira aba visível,
+    # que pode não ser a aba BRASILUX. Isso fazia poucos códigos serem relacionados.
+    aba_url = urllib.parse.quote(nome_aba, safe="")
     urls = [
-        f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/gviz/tq?tqx=out:csv",
-        f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export?format=csv",
+        f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/gviz/tq?tqx=out:csv&sheet={aba_url}",
+        f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export?format=csv&sheet={aba_url}",
     ]
 
     ultimo_erro = None
@@ -3426,6 +3430,14 @@ def ler_tabela_precos_brasilux_google_sheets(spreadsheet_id=GOOGLE_PLANILHA_PREC
 
             # Garante nomes posicionais previsíveis: COL_1=A, COL_2=B, etc.
             df.columns = [f"COL_{i + 1}" for i in range(df.shape[1])]
+
+            # Confirma que a aba retornada possui ao menos A:D. A coluna D pode ser
+            # formulada; o CSV público traz o resultado exibido na célula.
+            if df.shape[1] < 4:
+                ultimo_erro = (
+                    f"A aba {nome_aba!r} foi acessada, mas não possui pelo menos quatro colunas (A:D)."
+                )
+                continue
             return df
 
         except urllib.error.HTTPError as e:
@@ -3440,7 +3452,7 @@ def ler_tabela_precos_brasilux_google_sheets(spreadsheet_id=GOOGLE_PLANILHA_PREC
             ultimo_erro = str(e)
 
     raise RuntimeError(
-        "Não consegui carregar a tabela Brasilux pelo link público. "
+        f"Não consegui carregar a aba {nome_aba!r} da tabela Brasilux pelo link público. "
         f"Detalhe: {ultimo_erro or 'erro não identificado'}"
     )
 
@@ -4037,6 +4049,27 @@ def normalizar_codigo_fabrica(valor):
     return txt
 
 
+def codigo_fabrica_nucleo_numerico(valor):
+    """
+    Retorna a parte numérica principal do código de fábrica para relacionamento seguro.
+
+    Exemplos:
+    - "AC 470200102" -> "470200102"
+    - "470200102" -> "470200102"
+    - "TN710041608" -> "710041608"
+
+    O núcleo só é usado como fallback quando ele é único nos dois pedidos. Dessa forma,
+    os modos de leitura anteriores continuam preservados e códigos ambíguos não são unidos.
+    """
+    norm = normalizar_codigo_fabrica(valor)
+    if not norm:
+        return ""
+    m = re.search(r"(\d{4,})$", norm)
+    if not m:
+        return ""
+    return (m.group(1).lstrip("0") or "0")
+
+
 def normalizar_descricao_chave(valor):
     txt = _texto_sem_acentos(valor).upper().strip()
     txt = re.sub(r"[^A-Z0-9 ]+", " ", txt)
@@ -4180,11 +4213,30 @@ def _extrair_descricao_ao_redor_codigo(linha, codigo):
 
 def _referencias_codigo_fabrica(codigos_referencia=None):
     referencias = {}
+    nucleos = {}
+    nucleos_ambiguos = set()
+
     for c in (codigos_referencia or []):
         original = str(c or "").strip()
         norm = normalizar_codigo_fabrica(original)
         if norm and len(norm) >= 3:
             referencias[norm] = original
+
+        nucleo = codigo_fabrica_nucleo_numerico(original)
+        if nucleo:
+            anterior = nucleos.get(nucleo)
+            if anterior is None:
+                nucleos[nucleo] = original
+            elif normalizar_codigo_fabrica(anterior) != norm:
+                nucleos_ambiguos.add(nucleo)
+
+    # Inclui o número sem o prefixo como alias somente quando ele identifica um único
+    # produto na planilha da Única. Isso cobre AC 470200102 x 470200102 sem criar
+    # relacionamentos incorretos em códigos repetidos.
+    for nucleo, original in nucleos.items():
+        if nucleo not in nucleos_ambiguos and nucleo not in referencias:
+            referencias[nucleo] = original
+
     return dict(sorted(referencias.items(), key=lambda kv: len(kv[0]), reverse=True))
 
 
@@ -5587,7 +5639,7 @@ def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw, mapa_unica=None,
             usados_fornecedor.add(match.name)
             metodo = "Relacionamento manual"
 
-        # 2) Relacionamento automático SOMENTE por Código de Fábrica normalizado.
+        # 2) Relacionamento automático pelo Código de Fábrica normalizado completo.
         if match is None and cod_fab_norm:
             candidatos = fornecedor[fornecedor["codigo_fabrica_norm"].astype(str).str.strip() == cod_fab_norm]
             candidatos = candidatos[~candidatos.index.isin(usados_fornecedor)]
@@ -5595,6 +5647,22 @@ def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw, mapa_unica=None,
                 match = candidatos.iloc[0]
                 usados_fornecedor.add(match.name)
                 metodo = "Código de Fábrica"
+
+        # 3) Fallback seguro pelo núcleo numérico do código.
+        # Exemplo real do MasterSales: "AC 470200102" no PDF e "470200102"
+        # no Pedido Única. Só relaciona quando o núcleo é único em ambos os lados.
+        if match is None:
+            nucleo_unica = codigo_fabrica_nucleo_numerico(cod_fab)
+            if nucleo_unica:
+                nucleos_unica = unica["codigo_fabrica"].apply(codigo_fabrica_nucleo_numerico)
+                nucleos_forn = fornecedor["codigo_fabrica"].apply(codigo_fabrica_nucleo_numerico)
+                if int((nucleos_unica == nucleo_unica).sum()) == 1 and int((nucleos_forn == nucleo_unica).sum()) == 1:
+                    candidatos = fornecedor[nucleos_forn == nucleo_unica]
+                    candidatos = candidatos[~candidatos.index.isin(usados_fornecedor)]
+                    if not candidatos.empty:
+                        match = candidatos.iloc[0]
+                        usados_fornecedor.add(match.name)
+                        metodo = "Código de Fábrica (número)"
 
         # Não usa descrição aproximada/fuzzy para evitar comparação de produtos parecidos.
 
