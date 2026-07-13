@@ -48,11 +48,13 @@ except Exception:
 
 try:
     from google.oauth2.credentials import Credentials
+    from google.oauth2 import service_account
     from google.auth.transport.requests import Request
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaIoBaseUpload
 except Exception:
     Credentials = None
+    service_account = None
     Request = None
     build = None
     MediaIoBaseUpload = None
@@ -87,6 +89,8 @@ GOOGLE_SUBPASTA_FINAIS = "Arquivos Finais"
 GOOGLE_PLANILHA_CONTROLE = "Controle de Pedidos - Dauto"
 GOOGLE_PLANILHA_CADASTRO = "Cadastro de Produtos - Dauto"
 GOOGLE_PLANILHA_CADASTRO_ID = "1iu9dbvhQCqdfWTrRL2_HMnAkQQnbK_cqN_k-9pZpkBw"
+GOOGLE_PLANILHA_PRECOS_BRASILUX_ID = "1OkQ-QamdcrCIg_LQUuIwdJrqrEAAoa5arLzkZD6rvi4"
+GOOGLE_PLANILHA_PRECOS_BRASILUX_LINK = "https://docs.google.com/spreadsheets/d/1OkQ-QamdcrCIg_LQUuIwdJrqrEAAoa5arLzkZD6rvi4/edit"
 GOOGLE_MODELO_PEDIDO_ID = "1iu9dbvhQCqdfWTrRL2_HMnAkQQnbK_cqN_k-9pZpkBw"
 GOOGLE_PASTA_APROVACAO_ID = "1ZlTC720fGMHk6cqApXtjeNPBe84Vgx_b"
 APPS_SCRIPT_WEB_APP_URL_PADRAO = "https://script.google.com/macros/s/AKfycbwihVeGlWG3-SpecqZhHR2TsFVYmYZEGlvyrImpLX9eliv-fl7CqUwWCWBnmnlFIBww/exec"
@@ -3274,6 +3278,133 @@ def ler_pedido_unica_comparativo_google_sheets(link):
     return df
 
 
+def _credenciais_service_account_google():
+    """Carrega a conta de serviço configurada no Streamlit Secrets."""
+    if service_account is None:
+        raise RuntimeError(
+            "A biblioteca google-auth não está instalada. Adicione google-auth e google-api-python-client ao requirements.txt."
+        )
+
+    cfg = None
+    for chave in ("gcp_service_account", "google_service_account", "service_account"):
+        try:
+            bloco = st.secrets.get(chave, None)
+            if bloco:
+                cfg = dict(bloco)
+                break
+        except Exception:
+            continue
+
+    if not cfg:
+        raise RuntimeError(
+            "Não encontrei as credenciais da conta de serviço no Streamlit Secrets. "
+            "Configure o JSON em [gcp_service_account]."
+        )
+
+    return service_account.Credentials.from_service_account_info(
+        cfg,
+        scopes=[
+            "https://www.googleapis.com/auth/spreadsheets.readonly",
+            "https://www.googleapis.com/auth/drive.readonly",
+        ],
+    )
+
+
+@st.cache_data(show_spinner=False, ttl=300, max_entries=4)
+def ler_tabela_precos_brasilux_google_sheets(spreadsheet_id=GOOGLE_PLANILHA_PRECOS_BRASILUX_ID):
+    """
+    Lê toda a primeira aba da tabela Brasilux usando a conta de serviço.
+    A coluna D é preservada por posição, pois é a coluna oficial TABELA MENOR PREÇO.
+    """
+    if build is None:
+        raise RuntimeError("google-api-python-client não está instalado no ambiente.")
+
+    creds = _credenciais_service_account_google()
+    servico = build("sheets", "v4", credentials=creds, cache_discovery=False)
+
+    meta = servico.spreadsheets().get(
+        spreadsheetId=spreadsheet_id,
+        fields="sheets.properties(title,index)",
+    ).execute()
+    abas = sorted(meta.get("sheets", []), key=lambda x: x.get("properties", {}).get("index", 0))
+    if not abas:
+        return pd.DataFrame()
+
+    nome_aba = abas[0]["properties"]["title"]
+    resposta = servico.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id,
+        range=f"'{nome_aba}'!A:Z",
+        valueRenderOption="UNFORMATTED_VALUE",
+    ).execute()
+    valores = resposta.get("values", [])
+    if not valores:
+        return pd.DataFrame()
+
+    largura = max(len(linha) for linha in valores)
+    valores = [list(linha) + [""] * (largura - len(linha)) for linha in valores]
+    return pd.DataFrame(valores, columns=[f"COL_{i+1}" for i in range(largura)])
+
+
+def montar_mapa_precos_brasilux(df_tabela, codigos_referencia):
+    """
+    Identifica automaticamente, entre as colunas A, B e C, qual contém o código
+    de fábrica com maior coincidência com o Pedido Única. O preço sempre vem da coluna D.
+    """
+    if df_tabela is None or df_tabela.empty or df_tabela.shape[1] < 4:
+        raise ValueError("A tabela Brasilux precisa possuir pelo menos quatro colunas; o preço deve estar na coluna D.")
+
+    referencias = {normalizar_codigo_fabrica(c) for c in (codigos_referencia or [])}
+    referencias.discard("")
+    if not referencias:
+        raise ValueError("Não encontrei códigos de fábrica válidos no Pedido Única para relacionar com a tabela Brasilux.")
+
+    candidatos = list(df_tabela.columns[:3])
+    melhor_coluna = None
+    melhor_pontuacao = -1
+    for coluna in candidatos:
+        codigos_coluna = df_tabela[coluna].astype(str).map(normalizar_codigo_fabrica)
+        pontuacao = int(codigos_coluna.isin(referencias).sum())
+        if pontuacao > melhor_pontuacao:
+            melhor_pontuacao = pontuacao
+            melhor_coluna = coluna
+
+    if melhor_coluna is None or melhor_pontuacao <= 0:
+        raise ValueError(
+            "Não consegui relacionar os códigos do Pedido Única com as colunas A, B ou C da tabela Brasilux."
+        )
+
+    coluna_preco = df_tabela.columns[3]  # Coluna D obrigatória
+    base = pd.DataFrame({
+        "codigo_fabrica_norm": df_tabela[melhor_coluna].astype(str).map(normalizar_codigo_fabrica),
+        "preco_brasilux": df_tabela[coluna_preco].apply(numero_planilha_para_float),
+    })
+    base = base[
+        base["codigo_fabrica_norm"].isin(referencias)
+        & (base["preco_brasilux"] > 0)
+    ].copy()
+    if base.empty:
+        raise ValueError("Nenhum preço válido da coluna D foi encontrado para os códigos do Pedido Única.")
+
+    # Em eventual código repetido, utiliza a última ocorrência válida da tabela.
+    mapa = base.drop_duplicates("codigo_fabrica_norm", keep="last").set_index("codigo_fabrica_norm")["preco_brasilux"].to_dict()
+    return mapa, melhor_coluna, melhor_pontuacao
+
+
+def aplicar_precos_brasilux_no_pedido_unica(unica, mapa_precos):
+    """
+    No modo Brasilux, substitui exclusivamente preço e valor da base Única.
+    A quantidade permanece exatamente igual à quantidade do Pedido Única.
+    Itens sem preço na tabela ficam com preço zero, sem reutilizar o preço do Pedido Única.
+    """
+    unica = unica.copy()
+    unica["preco_tabela_brasilux_encontrado"] = unica["codigo_fabrica_norm"].map(mapa_precos)
+    unica["preco_unitario"] = pd.to_numeric(
+        unica["preco_tabela_brasilux_encontrado"], errors="coerce"
+    ).fillna(0.0)
+    unica["valor_total"] = unica["quantidade"] * unica["preco_unitario"]
+    return unica.drop(columns=["preco_tabela_brasilux_encontrado"], errors="ignore")
+
+
 def gerar_excel_autcom_tratamento(df_tratamento):
     """
     Gera o Excel para importação no Autcom a partir da planilha de Tratamento de Pedido Final.
@@ -5174,7 +5305,7 @@ def _aplicar_relacionamentos_manuais(unica, fornecedor, relacionamentos):
     return fornecedor
 
 
-def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw, mapa_unica=None, mapa_fornecedor=None, relacionamentos_manuais=None):
+def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw, mapa_unica=None, mapa_fornecedor=None, relacionamentos_manuais=None, mapa_precos_brasilux=None):
     unica_normalizada = normalizar_pedido_comparativo(df_unica_raw, "Única", mapa_unica)
 
     # Regra do comparativo: itens com PEDIDO FINAL / quantidade da Única igual a zero
@@ -5185,6 +5316,8 @@ def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw, mapa_unica=None,
         unica_normalizada = unica_normalizada[unica_normalizada["quantidade"] > 0].copy()
 
     unica = agregar_pedido_comparativo(unica_normalizada)
+    if mapa_precos_brasilux:
+        unica = aplicar_precos_brasilux_no_pedido_unica(unica, mapa_precos_brasilux)
     fornecedor = agregar_pedido_comparativo(normalizar_pedido_comparativo(df_fornecedor_raw, "Fornecedor", mapa_fornecedor))
     fornecedor = _aplicar_relacionamentos_manuais(unica, fornecedor, relacionamentos_manuais)
 
@@ -5558,6 +5691,18 @@ def render_pagina_comparativo_pedidos():
     if "relacionamentos_comparativo" not in st.session_state:
         st.session_state["relacionamentos_comparativo"] = {}
 
+    pedido_brasilux = st.checkbox(
+        "Este pedido é da Brasilux",
+        value=False,
+        key="comparativo_pedido_brasilux",
+        help="Mantém o comparativo de quantidades com o Pedido Única e troca somente o preço de referência pela coluna D da tabela Brasilux.",
+    )
+    if pedido_brasilux:
+        st.info(
+            "Modo Brasilux ativo: itens e quantidades continuam vindo do Pedido Única; "
+            "somente o preço de referência será substituído pela coluna D da tabela Brasilux."
+        )
+
     col1, col2 = st.columns(2)
     with col1:
         link_unica_sheets = st.text_input(
@@ -5603,6 +5748,19 @@ def render_pagina_comparativo_pedidos():
             return
 
         codigos_ref = codigos_referencia_comparativo(df_unica, mapa_unica)
+
+        mapa_precos_brasilux = None
+        if pedido_brasilux:
+            with st.spinner("Lendo a tabela de preços Brasilux..."):
+                df_precos_brasilux = ler_tabela_precos_brasilux_google_sheets()
+                mapa_precos_brasilux, coluna_codigo_brasilux, qtd_relacionada_brasilux = montar_mapa_precos_brasilux(
+                    df_precos_brasilux, codigos_ref
+                )
+            st.success(
+                f"Tabela Brasilux carregada: {qtd_relacionada_brasilux} código(s) relacionado(s). "
+                "Preço de referência: coluna D."
+            )
+
         df_fornecedor = ler_arquivo_comparativo(pedido_fornecedor, codigos_referencia=codigos_ref)
         if df_fornecedor.empty:
             st.error(
@@ -5620,7 +5778,9 @@ def render_pagina_comparativo_pedidos():
 
         st.markdown("### 2. Relacionamento manual dos itens sem identificação")
         relacionamentos = st.session_state.get("relacionamentos_comparativo", {})
-        comparativo_base = montar_comparativo_pedidos(df_unica, df_fornecedor, mapa_unica, mapa_fornecedor, relacionamentos)
+        comparativo_base = montar_comparativo_pedidos(
+            df_unica, df_fornecedor, mapa_unica, mapa_fornecedor, relacionamentos, mapa_precos_brasilux
+        )
 
         nao_encontrados = comparativo_base[comparativo_base["Status"] == "Não encontrado no fornecedor"].copy()
         somente_fornecedor = comparativo_base[comparativo_base["Status"] == "Somente fornecedor"].copy()
@@ -5666,6 +5826,7 @@ def render_pagina_comparativo_pedidos():
             mapa_unica,
             mapa_fornecedor,
             st.session_state.get("relacionamentos_comparativo", {}),
+            mapa_precos_brasilux,
         )
         st.success(f"Comparativo gerado com {len(comparativo)} linha(s).")
 
