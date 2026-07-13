@@ -192,6 +192,83 @@ def numero_planilha_para_float(value):
         return 0.0
 
 
+
+def numero_monetario_para_float(value):
+    """
+    Converte preços e valores monetários sem confundir casas decimais com milhares.
+
+    Diferente de ``numero_planilha_para_float`` (usado também para quantidades),
+    aqui um único ponto ou uma única vírgula é tratado como separador decimal.
+    Isso é necessário porque arquivos .xls lidos com ``dtype=str`` podem entregar
+    um preço numérico como 114.383, que significa R$ 114,383 e não R$ 114.383,00.
+
+    Exemplos:
+    - 114.383 -> 114.383
+    - 64.124  -> 64.124
+    - 114,383 -> 114.383
+    - 1.234,56 -> 1234.56
+    - 1,234.56 -> 1234.56
+    - R$ 143,69 -> 143.69
+    """
+    if value is None:
+        return 0.0
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            if pd.isna(value):
+                return 0.0
+            return float(value)
+        except Exception:
+            pass
+
+    txt = str(value).strip()
+    if txt == "" or txt.lower() in ["nan", "none", "-"]:
+        return 0.0
+
+    txt = (
+        txt.replace("R$", "")
+        .replace(" ", "")
+        .replace(" ", "")
+        .replace("+", "")
+    )
+
+    negativo_parenteses = txt.startswith("(") and txt.endswith(")")
+    txt = txt.strip("()")
+
+    if "," in txt and "." in txt:
+        # O último separador é o decimal.
+        if txt.rfind(",") > txt.rfind("."):
+            txt = txt.replace(".", "").replace(",", ".")
+        else:
+            txt = txt.replace(",", "")
+    elif "," in txt:
+        partes = txt.split(",")
+        if len(partes) > 2:
+            # Várias vírgulas: mantém a última como decimal somente quando
+            # ela não forma um agrupamento clássico de milhares.
+            ultima = partes[-1]
+            if len(ultima) in (1, 2, 3, 4):
+                txt = "".join(partes[:-1]) + "." + ultima
+            else:
+                txt = "".join(partes)
+        else:
+            txt = txt.replace(",", ".")
+    elif "." in txt:
+        partes = txt.split(".")
+        if len(partes) > 2:
+            ultima = partes[-1]
+            if len(ultima) in (1, 2, 3, 4):
+                txt = "".join(partes[:-1]) + "." + ultima
+            else:
+                txt = "".join(partes)
+        # Um único ponto permanece decimal, inclusive quando há 3 casas.
+
+    try:
+        resultado = float(txt)
+        return -resultado if negativo_parenteses else resultado
+    except Exception:
+        return 0.0
+
 def corrigir_mojibake_texto(texto):
     texto = str(texto or "")
     if not any(marca in texto for marca in ["Ã", "Â", "â", "ðŸ"]):
@@ -3476,7 +3553,7 @@ def montar_mapa_precos_brasilux(df_tabela, codigos_referencia):
     coluna_preco = df_tabela.columns[3]  # Coluna D obrigatória
     base = pd.DataFrame({
         "codigo_fabrica_norm": df_tabela[melhor_coluna].astype(str).map(normalizar_codigo_fabrica),
-        "preco_brasilux": df_tabela[coluna_preco].apply(numero_planilha_para_float),
+        "preco_brasilux": df_tabela[coluna_preco].apply(numero_monetario_para_float),
     })
     base = base[
         base["codigo_fabrica_norm"].isin(referencias)
@@ -3547,7 +3624,7 @@ def gerar_excel_autcom_tratamento(df_tratamento):
         codigo = codigo_match.group(1).zfill(5) if codigo_match else ""
 
         qtd = numero_planilha_para_float(row.get(col_qtd, 0))
-        preco = numero_planilha_para_float(row.get(col_preco, 0))
+        preco = numero_monetario_para_float(row.get(col_preco, 0))
 
         try:
             qtd = int(round(float(qtd)))
@@ -4844,8 +4921,8 @@ def _dataframe_de_tabela_pdf_fornecedor(linhas):
     out["Código Fábrica"] = df[col_codigo].astype(str).str.strip()
     out["Descrição"] = df[col_desc].astype(str).str.strip() if col_desc else out["Código Fábrica"]
     out["Quantidade"] = df[col_qtd].apply(numero_planilha_para_float)
-    out["Valor Unitário"] = df[col_preco].apply(numero_planilha_para_float) if col_preco else 0.0
-    out["Valor Total"] = df[col_total].apply(numero_planilha_para_float) if col_total else 0.0
+    out["Valor Unitário"] = df[col_preco].apply(numero_monetario_para_float) if col_preco else 0.0
+    out["Valor Total"] = df[col_total].apply(numero_monetario_para_float) if col_total else 0.0
     out["Linha PDF"] = df.astype(str).agg(" | ".join, axis=1)
 
     out = out[~out["Código Fábrica"].astype(str).str.upper().str.contains("TOTAL DO PEDIDO|NUMERO DE ITENS|NÚMERO DE ITENS", na=False)]
@@ -5059,8 +5136,8 @@ def extrair_itens_txt_comparativo(uploaded_file, codigos_referencia=None):
             continue
         codigo = m.group("codigo").strip()
         qtd = numero_planilha_para_float(m.group("qtd"))
-        preco = numero_planilha_para_float(m.group("unit"))
-        total = numero_planilha_para_float(m.group("total"))
+        preco = numero_monetario_para_float(m.group("unit"))
+        total = numero_monetario_para_float(m.group("total"))
         if qtd <= 0 or not codigo:
             continue
         chave = (normalizar_codigo_fabrica(codigo), round(qtd, 6), round(preco, 6), round(total, 6))
@@ -5332,8 +5409,8 @@ def normalizar_pedido_comparativo(df, origem, mapa_colunas=None):
     out["codigo_fabrica_norm"] = out["codigo_fabrica"].apply(normalizar_codigo_fabrica)
     out["descricao"] = df[col_descricao].astype(str).str.strip() if col_descricao else out["codigo_fabrica"]
     out["quantidade"] = df[col_qtd].apply(numero_planilha_para_float)
-    out["preco_unitario"] = df[col_preco].apply(numero_planilha_para_float) if col_preco else 0.0
-    out["valor_total"] = df[col_total].apply(numero_planilha_para_float) if col_total else 0.0
+    out["preco_unitario"] = df[col_preco].apply(numero_monetario_para_float) if col_preco else 0.0
+    out["valor_total"] = df[col_total].apply(numero_monetario_para_float) if col_total else 0.0
     out.loc[(out["valor_total"] <= 0) & (out["preco_unitario"] > 0), "valor_total"] = out["quantidade"] * out["preco_unitario"]
     out.loc[(out["preco_unitario"] <= 0) & (out["valor_total"] > 0) & (out["quantidade"] > 0), "preco_unitario"] = out["valor_total"] / out["quantidade"]
     out["descricao_chave"] = out["descricao"].apply(normalizar_descricao_chave)
