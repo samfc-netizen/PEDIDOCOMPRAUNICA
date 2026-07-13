@@ -3373,36 +3373,76 @@ def _credenciais_service_account_google():
 @st.cache_data(show_spinner=False, ttl=300, max_entries=4)
 def ler_tabela_precos_brasilux_google_sheets(spreadsheet_id=GOOGLE_PLANILHA_PRECOS_BRASILUX_ID):
     """
-    Lê toda a primeira aba da tabela Brasilux usando a conta de serviço.
-    A coluna D é preservada por posição, pois é a coluna oficial TABELA MENOR PREÇO.
+    Lê a primeira aba pública da tabela Brasilux diretamente como CSV.
+
+    Não utiliza conta de serviço, private_key, PEM nem Google API.
+    A planilha precisa estar compartilhada como "Qualquer pessoa com o link".
+    A coluna D é preservada por posição, pois é a coluna oficial
+    TABELA MENOR PREÇO.
     """
-    if build is None:
-        raise RuntimeError("google-api-python-client não está instalado no ambiente.")
+    spreadsheet_id = str(spreadsheet_id or "").strip()
+    if not spreadsheet_id:
+        raise ValueError("O ID da planilha Brasilux não foi configurado.")
 
-    creds = _credenciais_service_account_google()
-    servico = build("sheets", "v4", credentials=creds, cache_discovery=False)
+    # O endpoint gviz sem nome de aba retorna a primeira aba visível da planilha.
+    # Mantemos header=None para preservar rigorosamente as posições A, B, C e D,
+    # inclusive quando a planilha possui títulos ou linhas adicionais no início.
+    urls = [
+        f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/gviz/tq?tqx=out:csv",
+        f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export?format=csv",
+    ]
 
-    meta = servico.spreadsheets().get(
-        spreadsheetId=spreadsheet_id,
-        fields="sheets.properties(title,index)",
-    ).execute()
-    abas = sorted(meta.get("sheets", []), key=lambda x: x.get("properties", {}).get("index", 0))
-    if not abas:
-        return pd.DataFrame()
+    ultimo_erro = None
+    for url in urls:
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            with urllib.request.urlopen(req, timeout=30) as resposta:
+                conteudo = resposta.read()
 
-    nome_aba = abas[0]["properties"]["title"]
-    resposta = servico.spreadsheets().values().get(
-        spreadsheetId=spreadsheet_id,
-        range=f"'{nome_aba}'!A:Z",
-        valueRenderOption="UNFORMATTED_VALUE",
-    ).execute()
-    valores = resposta.get("values", [])
-    if not valores:
-        return pd.DataFrame()
+            if not conteudo:
+                ultimo_erro = "O Google Sheets retornou um arquivo vazio."
+                continue
 
-    largura = max(len(linha) for linha in valores)
-    valores = [list(linha) + [""] * (largura - len(linha)) for linha in valores]
-    return pd.DataFrame(valores, columns=[f"COL_{i+1}" for i in range(largura)])
+            df = None
+            for encoding in ("utf-8-sig", "utf-8", "latin1"):
+                try:
+                    df = pd.read_csv(
+                        BytesIO(conteudo),
+                        header=None,
+                        dtype=str,
+                        encoding=encoding,
+                        keep_default_na=False,
+                    )
+                    break
+                except Exception:
+                    continue
+
+            if df is None or df.empty:
+                ultimo_erro = "A planilha foi acessada, mas não retornou linhas válidas."
+                continue
+
+            # Garante nomes posicionais previsíveis: COL_1=A, COL_2=B, etc.
+            df.columns = [f"COL_{i + 1}" for i in range(df.shape[1])]
+            return df
+
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                ultimo_erro = (
+                    "A planilha não está acessível publicamente. "
+                    "Em Compartilhar, mantenha 'Qualquer pessoa com o link' como Leitor ou Editor."
+                )
+            else:
+                ultimo_erro = f"HTTP {e.code} ao baixar a planilha."
+        except Exception as e:
+            ultimo_erro = str(e)
+
+    raise RuntimeError(
+        "Não consegui carregar a tabela Brasilux pelo link público. "
+        f"Detalhe: {ultimo_erro or 'erro não identificado'}"
+    )
 
 
 def montar_mapa_precos_brasilux(df_tabela, codigos_referencia):
