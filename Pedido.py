@@ -7778,6 +7778,31 @@ def consolidar_produtos_xml(df_itens: pd.DataFrame) -> pd.DataFrame:
     return agrupado.sort_values(["DESCRICAO", "COD_PRODUTO"]).reset_index(drop=True)
 
 
+def remover_notas_xml_repetidas(df_notas: pd.DataFrame, df_itens: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    if df_notas is None or df_notas.empty or "NR_CHAVE_ACESSO" not in df_notas.columns:
+        return df_notas.copy() if df_notas is not None else pd.DataFrame(), df_itens.copy() if df_itens is not None else pd.DataFrame(), pd.DataFrame()
+
+    notas = df_notas.copy()
+    notas["NR_CHAVE_ACESSO"] = notas["NR_CHAVE_ACESSO"].astype(str).str.strip()
+    notas_validas = notas[notas["NR_CHAVE_ACESSO"].ne("")].copy()
+    notas_sem_chave = notas[notas["NR_CHAVE_ACESSO"].eq("")].copy()
+
+    repetidas_mask = notas_validas.duplicated(subset=["NR_CHAVE_ACESSO"], keep="first")
+    notas_repetidas = notas_validas[repetidas_mask].copy()
+    notas_unicas = pd.concat(
+        [notas_validas[~repetidas_mask].copy(), notas_sem_chave],
+        ignore_index=True,
+        sort=False,
+    )
+
+    itens = df_itens.copy() if df_itens is not None else pd.DataFrame()
+    if not itens.empty and "NR_CHAVE_ACESSO" in itens.columns and not notas_repetidas.empty:
+        chaves_repetidas = set(notas_repetidas["NR_CHAVE_ACESSO"].astype(str).str.strip())
+        itens = itens[~itens["NR_CHAVE_ACESSO"].astype(str).str.strip().isin(chaves_repetidas)].copy()
+
+    return notas_unicas.reset_index(drop=True), itens.reset_index(drop=True), notas_repetidas.reset_index(drop=True)
+
+
 def gerar_excel_produtos_xml(df_notas: pd.DataFrame, df_itens: pd.DataFrame, df_produtos: pd.DataFrame) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -8294,14 +8319,35 @@ def render_pagina_previsao_financeira():
             st.warning("Não encontrei produtos nos XMLs enviados. Confira se os arquivos são NF-e completas e não eventos/cancelamentos.")
             return
 
-        produtos_xml = consolidar_produtos_xml(df_itens_raw)
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Notas lidas", len(df_notas_raw))
-        c2.metric("Produtos consolidados", len(produtos_xml))
-        c3.metric("Itens nas notas", len(df_itens_raw))
-        c4.metric("Valor total dos itens", formatar_moeda(float(pd.to_numeric(df_itens_raw.get("VL_TOTAL_ITEM", 0), errors="coerce").fillna(0).sum())))
+        df_notas_unicas, df_itens_unicos, df_notas_repetidas = remover_notas_xml_repetidas(df_notas_raw, df_itens_raw)
+        if not df_notas_repetidas.empty:
+            st.warning(
+                f"Foram encontradas {len(df_notas_repetidas)} nota(s) repetida(s) pela chave de acesso. "
+                "Elas foram sinalizadas e desconsideradas da consolidação."
+            )
+            with st.expander("Notas repetidas desconsideradas"):
+                colunas_rep = [
+                    "NR_CHAVE_ACESSO", "NM_EMITENTE", "NR_DOCUMENTO", "NR_SERIE",
+                    "DT_EMISSAO", "VL_NOTA_FISCAL", "ARQUIVO_ORIGEM",
+                ]
+                colunas_rep = [c for c in colunas_rep if c in df_notas_repetidas.columns]
+                st.dataframe(
+                    df_notas_repetidas[colunas_rep],
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "VL_NOTA_FISCAL": st.column_config.NumberColumn("Valor NF", format="R$ %.2f"),
+                    },
+                )
 
-        fornecedores = sorted(df_itens_raw["NM_EMITENTE"].dropna().astype(str).unique()) if "NM_EMITENTE" in df_itens_raw.columns else []
+        produtos_xml = consolidar_produtos_xml(df_itens_unicos)
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Notas válidas", len(df_notas_unicas), f"{len(df_notas_repetidas)} repetida(s)")
+        c2.metric("Produtos consolidados", len(produtos_xml))
+        c3.metric("Itens considerados", len(df_itens_unicos))
+        c4.metric("Valor total dos itens", formatar_moeda(float(pd.to_numeric(df_itens_unicos.get("VL_TOTAL_ITEM", 0), errors="coerce").fillna(0).sum())))
+
+        fornecedores = sorted(df_itens_unicos["NM_EMITENTE"].dropna().astype(str).unique()) if "NM_EMITENTE" in df_itens_unicos.columns else []
         filtro_fornecedor = st.multiselect(
             "Filtrar fornecedor",
             options=fornecedores,
@@ -8309,7 +8355,7 @@ def render_pagina_previsao_financeira():
             key="filtro_fornecedor_leitor_xml",
         )
 
-        itens_filtrados = df_itens_raw.copy()
+        itens_filtrados = df_itens_unicos.copy()
         if filtro_fornecedor and "NM_EMITENTE" in itens_filtrados.columns:
             itens_filtrados = itens_filtrados[itens_filtrados["NM_EMITENTE"].isin(filtro_fornecedor)].copy()
         produtos_filtrados = consolidar_produtos_xml(itens_filtrados)
@@ -8354,14 +8400,14 @@ def render_pagina_previsao_financeira():
                 },
             )
 
-        with st.expander("Notas lidas"):
+        with st.expander("Notas válidas consideradas"):
             colunas_notas_xml = [
                 "NM_EMITENTE", "NR_DOCUMENTO", "NR_SERIE", "DT_EMISSAO",
                 "CFOPS", "NATUREZA_OPERACAO", "VL_NOTA_FISCAL", "QTD_ITENS", "ARQUIVO_ORIGEM",
             ]
-            colunas_notas_xml = [c for c in colunas_notas_xml if c in df_notas_raw.columns]
+            colunas_notas_xml = [c for c in colunas_notas_xml if c in df_notas_unicas.columns]
             st.dataframe(
-                df_notas_raw[colunas_notas_xml],
+                df_notas_unicas[colunas_notas_xml],
                 use_container_width=True,
                 hide_index=True,
                 height=320,
@@ -8373,7 +8419,7 @@ def render_pagina_previsao_financeira():
 
         st.download_button(
             "Baixar produtos dos XMLs em Excel",
-            data=gerar_excel_produtos_xml(df_notas_raw, itens_filtrados, produtos_filtrados),
+            data=gerar_excel_produtos_xml(df_notas_unicas, itens_filtrados, produtos_filtrados),
             file_name="produtos_xml_consolidados.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary",
