@@ -7733,6 +7733,77 @@ def gerar_excel(df_resumo: pd.DataFrame, df_notas: pd.DataFrame, df_itens: pd.Da
     return output.getvalue()
 
 
+def consolidar_produtos_xml(df_itens: pd.DataFrame) -> pd.DataFrame:
+    if df_itens is None or df_itens.empty:
+        return pd.DataFrame()
+
+    df = df_itens.copy()
+    for col in ["COD_PRODUTO", "DESCRICAO", "NM_EMITENTE", "NR_DOCUMENTO", "NR_SERIE", "CFOP"]:
+        if col not in df.columns:
+            df[col] = ""
+        df[col] = df[col].astype(str).fillna("").str.strip()
+
+    for col in ["QTD", "VL_UNITARIO", "VL_TOTAL_ITEM"]:
+        if col not in df.columns:
+            df[col] = 0
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    df["CHAVE_PRODUTO_XML"] = df.apply(
+        lambda r: normalizar_texto_simples(r.get("COD_PRODUTO", "")) + "|" + normalizar_texto_simples(r.get("DESCRICAO", "")),
+        axis=1,
+    )
+    df["NOTA"] = df.apply(
+        lambda r: (str(r.get("NR_SERIE", "")).strip() + "/" if str(r.get("NR_SERIE", "")).strip() else "") + str(r.get("NR_DOCUMENTO", "")).strip(),
+        axis=1,
+    )
+
+    agrupado = df.groupby("CHAVE_PRODUTO_XML", as_index=False).agg(
+        COD_PRODUTO=("COD_PRODUTO", "first"),
+        DESCRICAO=("DESCRICAO", "first"),
+        QTD_TOTAL=("QTD", "sum"),
+        VL_TOTAL_ITEM=("VL_TOTAL_ITEM", "sum"),
+        QTD_LANCAMENTOS=("QTD", "size"),
+        FORNECEDORES=("NM_EMITENTE", lambda s: ", ".join(sorted({x for x in s.astype(str) if x.strip()}))),
+        NOTAS=("NOTA", lambda s: ", ".join(sorted({x for x in s.astype(str) if x.strip()}))),
+        CFOPS=("CFOP", lambda s: ", ".join(sorted({x for x in s.astype(str) if x.strip()}))),
+    )
+    agrupado["VL_UNITARIO_MEDIO"] = agrupado.apply(
+        lambda r: round(float(r["VL_TOTAL_ITEM"]) / float(r["QTD_TOTAL"]), 6) if float(r["QTD_TOTAL"] or 0) > 0 else 0,
+        axis=1,
+    )
+    agrupado = agrupado[[
+        "COD_PRODUTO", "DESCRICAO", "QTD_TOTAL", "VL_UNITARIO_MEDIO", "VL_TOTAL_ITEM",
+        "QTD_LANCAMENTOS", "FORNECEDORES", "NOTAS", "CFOPS",
+    ]]
+    return agrupado.sort_values(["DESCRICAO", "COD_PRODUTO"]).reset_index(drop=True)
+
+
+def gerar_excel_produtos_xml(df_notas: pd.DataFrame, df_itens: pd.DataFrame, df_produtos: pd.DataFrame) -> bytes:
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df_produtos.to_excel(writer, index=False, sheet_name="Produtos consolidados")
+        df_itens.to_excel(writer, index=False, sheet_name="Itens por nota")
+        df_notas.to_excel(writer, index=False, sheet_name="Notas")
+
+        for sheet_name in writer.sheets:
+            ws = writer.sheets[sheet_name]
+            ws.freeze_panes = "A2"
+            ws.auto_filter.ref = ws.dimensions
+            for cell in ws[1]:
+                cell.font = cell.font.copy(bold=True)
+            for col_cells in ws.columns:
+                max_len = 10
+                col_letter = col_cells[0].column_letter
+                header = str(col_cells[0].value or "")
+                for cell in col_cells[:200]:
+                    max_len = max(max_len, len(str(cell.value or "")))
+                ws.column_dimensions[col_letter].width = min(max_len + 2, 48)
+                if header in ["QTD_TOTAL", "QTD", "VL_UNITARIO", "VL_UNITARIO_MEDIO", "VL_TOTAL_ITEM"]:
+                    for cell in col_cells[1:]:
+                        cell.number_format = '#,##0.00'
+    return output.getvalue()
+
+
 
 
 # =========================================================
@@ -8137,7 +8208,7 @@ def render_pagina_previsao_financeira():
 
     pagina = st.radio(
         "Etapa da previsão",
-        ["Classificação dos XMLs", "Previsão de pagamentos", "Conciliação CSV x XML"],
+        ["Leitor de XMLs", "Classificação dos XMLs", "Previsão de pagamentos", "Conciliação CSV x XML"],
         horizontal=True,
         key="pagina_interna_previsao_financeira",
     )
@@ -8203,6 +8274,111 @@ def render_pagina_previsao_financeira():
         erros_xml = []
 
     hoje = pd.Timestamp.today().normalize()
+
+    if pagina == "Leitor de XMLs":
+        st.subheader("Leitor de XMLs - produtos das notas")
+        st.caption(
+            "Envie XMLs ou ZIPs de NF-e para listar os produtos por nota e consolidar quantidades quando o mesmo produto aparecer mais de uma vez."
+        )
+
+        if not uploads_xml:
+            st.info("Envie XMLs ou um ZIP no campo acima para ler os produtos das notas.")
+            return
+
+        if erros_xml:
+            with st.expander("Arquivos XML ignorados ou com erro"):
+                for erro in erros_xml:
+                    st.write(erro)
+
+        if df_itens_raw.empty:
+            st.warning("Não encontrei produtos nos XMLs enviados. Confira se os arquivos são NF-e completas e não eventos/cancelamentos.")
+            return
+
+        produtos_xml = consolidar_produtos_xml(df_itens_raw)
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Notas lidas", len(df_notas_raw))
+        c2.metric("Produtos consolidados", len(produtos_xml))
+        c3.metric("Itens nas notas", len(df_itens_raw))
+        c4.metric("Valor total dos itens", formatar_moeda(float(pd.to_numeric(df_itens_raw.get("VL_TOTAL_ITEM", 0), errors="coerce").fillna(0).sum())))
+
+        fornecedores = sorted(df_itens_raw["NM_EMITENTE"].dropna().astype(str).unique()) if "NM_EMITENTE" in df_itens_raw.columns else []
+        filtro_fornecedor = st.multiselect(
+            "Filtrar fornecedor",
+            options=fornecedores,
+            default=fornecedores,
+            key="filtro_fornecedor_leitor_xml",
+        )
+
+        itens_filtrados = df_itens_raw.copy()
+        if filtro_fornecedor and "NM_EMITENTE" in itens_filtrados.columns:
+            itens_filtrados = itens_filtrados[itens_filtrados["NM_EMITENTE"].isin(filtro_fornecedor)].copy()
+        produtos_filtrados = consolidar_produtos_xml(itens_filtrados)
+
+        busca_produto = st.text_input("Pesquisar produto/código", key="busca_produtos_xml")
+        if busca_produto:
+            termo = busca_produto.lower()
+            produtos_filtrados = produtos_filtrados[
+                produtos_filtrados["COD_PRODUTO"].astype(str).str.lower().str.contains(termo, na=False)
+                | produtos_filtrados["DESCRICAO"].astype(str).str.lower().str.contains(termo, na=False)
+            ].copy()
+
+        st.markdown("### Produtos consolidados")
+        st.dataframe(
+            produtos_filtrados,
+            use_container_width=True,
+            hide_index=True,
+            height=430,
+            column_config={
+                "QTD_TOTAL": st.column_config.NumberColumn("Quantidade total", format="%.2f"),
+                "VL_UNITARIO_MEDIO": st.column_config.NumberColumn("Valor unitário médio", format="R$ %.4f"),
+                "VL_TOTAL_ITEM": st.column_config.NumberColumn("Valor total", format="R$ %.2f"),
+                "QTD_LANCAMENTOS": st.column_config.NumberColumn("Lançamentos", format="%d"),
+            },
+        )
+
+        with st.expander("Itens por nota"):
+            colunas_itens_xml = [
+                "NM_EMITENTE", "NR_DOCUMENTO", "NR_SERIE", "DT_EMISSAO", "CFOP",
+                "COD_PRODUTO", "DESCRICAO", "QTD", "VL_UNITARIO", "VL_TOTAL_ITEM", "ARQUIVO_ORIGEM",
+            ]
+            colunas_itens_xml = [c for c in colunas_itens_xml if c in itens_filtrados.columns]
+            st.dataframe(
+                itens_filtrados[colunas_itens_xml],
+                use_container_width=True,
+                hide_index=True,
+                height=420,
+                column_config={
+                    "QTD": st.column_config.NumberColumn("Quantidade", format="%.2f"),
+                    "VL_UNITARIO": st.column_config.NumberColumn("Valor unitário", format="R$ %.4f"),
+                    "VL_TOTAL_ITEM": st.column_config.NumberColumn("Valor total", format="R$ %.2f"),
+                },
+            )
+
+        with st.expander("Notas lidas"):
+            colunas_notas_xml = [
+                "NM_EMITENTE", "NR_DOCUMENTO", "NR_SERIE", "DT_EMISSAO",
+                "CFOPS", "NATUREZA_OPERACAO", "VL_NOTA_FISCAL", "QTD_ITENS", "ARQUIVO_ORIGEM",
+            ]
+            colunas_notas_xml = [c for c in colunas_notas_xml if c in df_notas_raw.columns]
+            st.dataframe(
+                df_notas_raw[colunas_notas_xml],
+                use_container_width=True,
+                hide_index=True,
+                height=320,
+                column_config={
+                    "VL_NOTA_FISCAL": st.column_config.NumberColumn("Valor NF", format="R$ %.2f"),
+                    "QTD_ITENS": st.column_config.NumberColumn("Itens", format="%d"),
+                },
+            )
+
+        st.download_button(
+            "Baixar produtos dos XMLs em Excel",
+            data=gerar_excel_produtos_xml(df_notas_raw, itens_filtrados, produtos_filtrados),
+            file_name="produtos_xml_consolidados.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+        )
+        return
 
     if pagina == "Classificação dos XMLs":
         st.subheader("Classificação das NF-e importadas")
