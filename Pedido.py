@@ -8228,7 +8228,7 @@ def render_pagina_previsao_financeira():
     </style>
     """, unsafe_allow_html=True)
 
-    st.markdown('<div class="section-title">Previsão Financeira de Fornecedores</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Leitor de XML/ Previsão financeira</div>', unsafe_allow_html=True)
     st.caption("Consolidação do CSV do Autcom com parcelas de NF-e ainda não lançadas no sistema.")
 
     pagina = st.radio(
@@ -8358,6 +8358,34 @@ def render_pagina_previsao_financeira():
         itens_filtrados = df_itens_unicos.copy()
         if filtro_fornecedor and "NM_EMITENTE" in itens_filtrados.columns:
             itens_filtrados = itens_filtrados[itens_filtrados["NM_EMITENTE"].isin(filtro_fornecedor)].copy()
+        if "NR_CHAVE_ACESSO" in itens_filtrados.columns and "NR_CHAVE_ACESSO" in df_notas_unicas.columns:
+            chaves_disponiveis = sorted({str(x).strip() for x in itens_filtrados["NR_CHAVE_ACESSO"].dropna() if str(x).strip()})
+            notas_disponiveis = df_notas_unicas[df_notas_unicas["NR_CHAVE_ACESSO"].astype(str).str.strip().isin(chaves_disponiveis)].copy()
+
+            opcoes_notas = {}
+            for _, nota_row in notas_disponiveis.iterrows():
+                chave = str(nota_row.get("NR_CHAVE_ACESSO", "")).strip()
+                label = (
+                    f"NF {nota_row.get('NR_DOCUMENTO', '')} | "
+                    f"{nota_row.get('NM_EMITENTE', '')} | "
+                    f"{nota_row.get('DT_EMISSAO', '')} | "
+                    f"{chave[-8:] if chave else ''}"
+                )
+                opcoes_notas[label] = chave
+
+            notas_selecionadas_labels = st.multiselect(
+                "Notas para considerar no Excel e na consolidação",
+                options=list(opcoes_notas.keys()),
+                default=list(opcoes_notas.keys()),
+                key="notas_selecionadas_leitor_xml",
+            )
+            chaves_selecionadas = {opcoes_notas[label] for label in notas_selecionadas_labels}
+            itens_filtrados = itens_filtrados[itens_filtrados["NR_CHAVE_ACESSO"].astype(str).str.strip().isin(chaves_selecionadas)].copy()
+            df_notas_selecionadas = notas_disponiveis[notas_disponiveis["NR_CHAVE_ACESSO"].astype(str).str.strip().isin(chaves_selecionadas)].copy()
+        else:
+            df_notas_selecionadas = df_notas_unicas.copy()
+
+        st.caption(f"{len(df_notas_selecionadas)} nota(s) selecionada(s) para a consolidação e para o Excel.")
         produtos_filtrados = consolidar_produtos_xml(itens_filtrados)
 
         busca_produto = st.text_input("Pesquisar produto/código", key="busca_produtos_xml")
@@ -8405,9 +8433,9 @@ def render_pagina_previsao_financeira():
                 "NM_EMITENTE", "NR_DOCUMENTO", "NR_SERIE", "DT_EMISSAO",
                 "CFOPS", "NATUREZA_OPERACAO", "VL_NOTA_FISCAL", "QTD_ITENS", "ARQUIVO_ORIGEM",
             ]
-            colunas_notas_xml = [c for c in colunas_notas_xml if c in df_notas_unicas.columns]
+            colunas_notas_xml = [c for c in colunas_notas_xml if c in df_notas_selecionadas.columns]
             st.dataframe(
-                df_notas_unicas[colunas_notas_xml],
+                df_notas_selecionadas[colunas_notas_xml],
                 use_container_width=True,
                 hide_index=True,
                 height=320,
@@ -8419,7 +8447,7 @@ def render_pagina_previsao_financeira():
 
         st.download_button(
             "Baixar produtos dos XMLs em Excel",
-            data=gerar_excel_produtos_xml(df_notas_unicas, itens_filtrados, produtos_filtrados),
+            data=gerar_excel_produtos_xml(df_notas_selecionadas, itens_filtrados, produtos_filtrados),
             file_name="produtos_xml_consolidados.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary",
@@ -8663,7 +8691,7 @@ st.sidebar.markdown(
 )
 pagina = st.sidebar.radio(
     "Navegação",
-    ["Giro Consolidado", "Pedido de Compra", "Exportações", "Ruptura por Marca", "Comparativo de Pedidos", "Previsão Financeira", "Tratamento Final"],
+    ["Giro Consolidado", "Pedido de Compra", "Exportações", "Ruptura por Marca", "Comparativo de Pedidos", "Leitor de XML/ Previsão financeira", "Tratamento Final"],
     label_visibility="collapsed",
 )
 
@@ -8683,7 +8711,7 @@ st.sidebar.markdown(
     unsafe_allow_html=True,
 )
 
-if pagina == "Previsão Financeira":
+if pagina == "Leitor de XML/ Previsão financeira":
     render_pagina_previsao_financeira()
     st.stop()
 
