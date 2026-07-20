@@ -6112,7 +6112,7 @@ def fator_conversao_quantidade_3m(codigo="", descricao=""):
         return 50.0
     if codigo_norm in CODIGOS_3M_MULTIPLO_20:
         return 20.0
-    if "LIXA" in desc_norm and "3M" in desc_norm:
+    if "LIXA" in desc_norm and "3M" in desc_norm and "DISCO" not in desc_norm:
         return 50.0
     if "KIT RESPIRADOR" in desc_norm and "6200" in desc_norm and "3M" in desc_norm:
         return 20.0
