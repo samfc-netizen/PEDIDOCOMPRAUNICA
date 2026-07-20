@@ -4333,6 +4333,47 @@ def dataframe_fornecedor_tem_colunas_confiaveis(df):
     return _serie_parece_quantidade(df[col_qtd])
 
 
+def padronizar_dataframe_fornecedor_homologado(df):
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    df_tmp = df.copy()
+    df_tmp.columns = [str(c).strip() for c in df_tmp.columns]
+    col_codigo = _coluna_por_candidatos(df_tmp, [
+        "Código Fábrica", "Codigo Fabrica", "Código Produto", "Codigo Produto",
+        "Código", "Codigo", "Cód.", "Cod.", "Produto", "SKU", "Referência",
+        "Referencia", "Part Number",
+    ])
+    col_desc = _coluna_por_candidatos(df_tmp, [
+        "Descrição", "Descricao", "Descrição do item", "Descricao do item",
+        "Produto", "Item", "Nome", "Descr",
+    ])
+    col_qtd = _coluna_quantidade_flexivel(df_tmp)
+    col_preco = _coluna_valor_unitario_flexivel(df_tmp)
+    col_total = _coluna_valor_total_flexivel(df_tmp)
+
+    if not col_codigo or not col_qtd or not col_preco:
+        return pd.DataFrame()
+    if _coluna_auxiliar_nao_preco_quantidade(col_qtd) or _coluna_auxiliar_nao_preco_quantidade(col_preco):
+        return pd.DataFrame()
+    if not _serie_parece_quantidade(df_tmp[col_qtd]):
+        return pd.DataFrame()
+
+    out = pd.DataFrame()
+    out["Código Fábrica"] = df_tmp[col_codigo].astype(str).str.strip()
+    out["Descrição"] = df_tmp[col_desc].astype(str).str.strip() if col_desc else out["Código Fábrica"]
+    out["Quantidade"] = df_tmp[col_qtd].apply(numero_planilha_para_float)
+    out["Valor Unitário"] = df_tmp[col_preco].apply(numero_planilha_para_float)
+    out["Valor Total"] = df_tmp[col_total].apply(numero_planilha_para_float) if col_total else 0.0
+    out["Linha Fornecedor"] = df_tmp.astype(str).agg(" | ".join, axis=1)
+
+    out = out[out["Código Fábrica"].astype(str).str.strip().ne("")]
+    out = out[out["Quantidade"] > 0].copy()
+    out = out[out["Valor Unitário"] > 0].copy()
+    out.loc[(out["Valor Total"] <= 0) & (out["Valor Unitário"] > 0), "Valor Total"] = out["Quantidade"] * out["Valor Unitário"]
+    return out.reset_index(drop=True)
+
+
 def extrair_itens_por_codigos_em_dataframe(df, codigos_referencia=None):
     if df is None or df.empty:
         return pd.DataFrame()
@@ -5485,11 +5526,108 @@ def extrair_itens_pdf_mastersales_brasilux(uploaded_file, codigos_referencia=Non
     return pd.DataFrame(registros)
 
 
-def ler_arquivo_comparativo(uploaded_file, codigos_referencia=None):
+MODELOS_FORNECEDOR_COMPARATIVO = {
+    "Automático": "automatico",
+    "Akzo Automotivo": "akzo_automotivo",
+    "Maxi Rubber": "maxi_rubber",
+    "Coral": "coral",
+    "Sherwin Williams": "sherwin_williams",
+    "Auto America": "auto_america",
+    "3M": "3m",
+    "Brasilux / MasterSales": "brasilux_mastersales",
+}
+
+
+def _modelo_fornecedor_codigo(modelo_fornecedor=None):
+    modelo = str(modelo_fornecedor or "Automático").strip()
+    return MODELOS_FORNECEDOR_COMPARATIVO.get(modelo, modelo.lower().strip())
+
+
+def _ler_arquivo_comparativo_modelo_homologado(uploaded_file, codigos_referencia=None, modelo_fornecedor=None):
+    if uploaded_file is None:
+        return pd.DataFrame()
+
+    modelo = _modelo_fornecedor_codigo(modelo_fornecedor)
+    nome = str(getattr(uploaded_file, "name", "")).lower()
+    try:
+        uploaded_file.seek(0)
+    except Exception:
+        pass
+
+    if modelo in ("automatico", ""):
+        return pd.DataFrame()
+
+    if modelo == "maxi_rubber":
+        if nome.endswith(".txt"):
+            return extrair_itens_txt_comparativo(uploaded_file, codigos_referencia=codigos_referencia)
+        return pd.DataFrame()
+
+    if modelo == "brasilux_mastersales":
+        if nome.endswith(".pdf"):
+            return extrair_itens_pdf_mastersales_brasilux(uploaded_file, codigos_referencia=codigos_referencia)
+        return pd.DataFrame()
+
+    if modelo == "3m":
+        if nome.endswith(".pdf"):
+            return extrair_itens_pdf_3m(uploaded_file)
+        return pd.DataFrame()
+
+    if modelo == "auto_america":
+        if nome.endswith(".pdf"):
+            df_pdf = extrair_itens_pdf_orcamento_venda(uploaded_file)
+            if not df_pdf.empty:
+                return df_pdf
+            return extrair_itens_pdf_mercanet(uploaded_file)
+        return pd.DataFrame()
+
+    if modelo == "coral":
+        if nome.endswith(".pdf"):
+            return extrair_itens_pdf_por_tabelas(uploaded_file)
+        return pd.DataFrame()
+
+    if modelo == "sherwin_williams":
+        if nome.endswith(".pdf"):
+            return extrair_itens_pdf_por_blocos(uploaded_file, codigos_referencia=codigos_referencia)
+        return pd.DataFrame()
+
+    if modelo == "akzo_automotivo":
+        if nome.endswith((".xlsx", ".xls", ".csv", ".txt", ".html", ".htm")):
+            df_planilha = ler_planilha_comparativo_fornecedor(uploaded_file)
+            df_padrao = padronizar_dataframe_fornecedor_homologado(df_planilha)
+            if df_padrao is not None and not df_padrao.empty:
+                return df_padrao
+            if codigos_referencia and not dataframe_fornecedor_tem_colunas_confiaveis(df_planilha):
+                df_anchor = extrair_itens_por_codigos_em_dataframe(df_planilha, codigos_referencia)
+                if df_anchor is not None and not df_anchor.empty:
+                    return df_anchor
+            return df_planilha
+        if nome.endswith(".pdf"):
+            df_pdf = extrair_itens_pdf_por_tabelas(uploaded_file)
+            if not df_pdf.empty:
+                return df_pdf
+            return extrair_itens_pdf_por_codigos(uploaded_file, codigos_referencia=codigos_referencia)
+
+    return pd.DataFrame()
+
+
+def ler_arquivo_comparativo(uploaded_file, codigos_referencia=None, modelo_fornecedor=None):
     if uploaded_file is None:
         return pd.DataFrame()
 
     nome = str(getattr(uploaded_file, "name", "")).lower()
+    try:
+        uploaded_file.seek(0)
+    except Exception:
+        pass
+
+    df_modelo = _ler_arquivo_comparativo_modelo_homologado(
+        uploaded_file,
+        codigos_referencia=codigos_referencia,
+        modelo_fornecedor=modelo_fornecedor,
+    )
+    if df_modelo is not None and not df_modelo.empty:
+        return df_modelo
+
     try:
         uploaded_file.seek(0)
     except Exception:
@@ -5595,7 +5733,7 @@ def ler_arquivo_comparativo(uploaded_file, codigos_referencia=None):
     return df_planilha
 
 
-def ler_multiplos_arquivos_comparativo(arquivos, codigos_referencia=None):
+def ler_multiplos_arquivos_comparativo(arquivos, codigos_referencia=None, modelo_fornecedor=None):
     """Lê e consolida um ou vários arquivos do pedido do fornecedor.
 
     Cada arquivo é processado pelo mesmo leitor já usado no comparativo. Os DataFrames
@@ -5626,6 +5764,7 @@ def ler_multiplos_arquivos_comparativo(arquivos, codigos_referencia=None):
             df_arquivo = ler_arquivo_comparativo(
                 arquivo,
                 codigos_referencia=codigos_referencia,
+                modelo_fornecedor=modelo_fornecedor,
             )
 
             if df_arquivo is None or df_arquivo.empty:
@@ -6269,17 +6408,21 @@ def render_pagina_comparativo_pedidos():
     if "relacionamentos_comparativo" not in st.session_state:
         st.session_state["relacionamentos_comparativo"] = {}
 
-    pedido_brasilux = st.checkbox(
-        "Este pedido é da Brasilux",
-        value=False,
-        key="comparativo_pedido_brasilux",
-        help="Mantém o comparativo de quantidades com o Pedido Única e troca somente o preço de referência pela coluna D da tabela Brasilux.",
+    modelo_fornecedor = st.selectbox(
+        "Modelo do fornecedor",
+        list(MODELOS_FORNECEDOR_COMPARATIVO.keys()),
+        index=0,
+        key="comparativo_modelo_fornecedor",
+        help="Use Automático para manter a leitura atual. Ao selecionar um fornecedor homologado, o sistema tenta primeiro o modelo daquele fornecedor e só depois cai no automático.",
     )
+    pedido_brasilux = _modelo_fornecedor_codigo(modelo_fornecedor) == "brasilux_mastersales"
     if pedido_brasilux:
         st.info(
             "Modo Brasilux ativo: itens e quantidades continuam vindo do Pedido Única; "
             "somente o preço de referência será substituído pela coluna D da tabela Brasilux."
         )
+    elif _modelo_fornecedor_codigo(modelo_fornecedor) != "automatico":
+        st.info(f"Modelo homologado ativo: {modelo_fornecedor}. Se esse modelo não reconhecer o arquivo, o sistema tenta a leitura automática como fallback.")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -6348,6 +6491,7 @@ def render_pagina_comparativo_pedidos():
         df_fornecedor, arquivos_fornecedor_lidos, erros_fornecedor = ler_multiplos_arquivos_comparativo(
             pedidos_fornecedor,
             codigos_referencia=codigos_ref,
+            modelo_fornecedor=modelo_fornecedor,
         )
         if df_fornecedor.empty:
             st.error(
