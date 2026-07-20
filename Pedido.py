@@ -5294,6 +5294,105 @@ def extrair_itens_pdf_mercanet(uploaded_file):
     return pd.DataFrame(registros)
 
 
+def extrair_itens_pdf_dewalt(uploaded_file):
+    """
+    Parser para pedidos DeWalt/Black & Decker do modelo Oficio Representacoes.
+
+    Layout observado:
+    SKU | Produto | Qtd. | Preco Liquido | IPI | ICMS | Subtotal
+
+    Usa Preco Liquido como valor unitario sem imposto.
+    """
+    if uploaded_file is None:
+        return pd.DataFrame()
+
+    try:
+        pdf_bytes = _pdf_bytes(uploaded_file)
+        texto = extract_text_from_pdf_pdfplumber_cached(pdf_bytes)
+    except Exception:
+        return pd.DataFrame()
+
+    texto_norm = _texto_sem_acentos(texto).upper()
+    if (
+        "BLACK & DECKER" not in texto_norm
+        and "DEWALT" not in texto_norm
+        and "PRECO LIQUIDO" not in texto_norm
+    ):
+        return pd.DataFrame()
+
+    registros = []
+    vistos = set()
+
+    try:
+        with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+            for page in pdf.pages:
+                for tabela in (page.extract_tables() or []):
+                    if not tabela or len(tabela) < 2:
+                        continue
+
+                    linhas = [[str(c or "").strip() for c in (linha or [])] for linha in tabela]
+                    header_idx = None
+                    header_norm = []
+                    for idx, linha in enumerate(linhas[:10]):
+                        nomes = [_normalizar_nome_coluna_flex(c) for c in linha]
+                        joined = " ".join(nomes)
+                        if "SKU" in joined and "PRODUTO" in joined and "QTD" in joined and "PRECO LIQUIDO" in joined:
+                            header_idx = idx
+                            header_norm = nomes
+                            break
+                    if header_idx is None:
+                        continue
+
+                    def idx_col(*partes):
+                        for col_idx, nome in enumerate(header_norm):
+                            if all(parte in nome for parte in partes):
+                                return col_idx
+                        return None
+
+                    idx_sku = idx_col("SKU")
+                    idx_produto = idx_col("PRODUTO")
+                    idx_qtd = idx_col("QTD")
+                    idx_preco = idx_col("PRECO", "LIQUIDO")
+                    idx_subtotal = idx_col("SUBTOTAL")
+                    if idx_sku is None or idx_qtd is None or idx_preco is None:
+                        continue
+
+                    for row in linhas[header_idx + 1:]:
+                        if not any(row):
+                            continue
+                        if len(row) <= max(idx_sku, idx_qtd, idx_preco):
+                            continue
+
+                        codigo = re.sub(r"\s+", " ", row[idx_sku]).strip()
+                        descricao = re.sub(r"\s+", " ", row[idx_produto]).strip() if idx_produto is not None and idx_produto < len(row) else codigo
+                        qtd = numero_planilha_para_float(row[idx_qtd])
+                        preco = numero_planilha_para_float(row[idx_preco])
+                        subtotal = numero_planilha_para_float(row[idx_subtotal]) if idx_subtotal is not None and idx_subtotal < len(row) else 0.0
+
+                        if not codigo or qtd <= 0 or preco <= 0:
+                            continue
+                        if normalizar_codigo_fabrica(codigo) in {"QUANTIDADETOTAL", "VALORTOTAL", "VALORTOTALEMPRODUTOS"}:
+                            continue
+
+                        total_sem_imposto = qtd * preco
+                        chave = (normalizar_codigo_fabrica(codigo), round(qtd, 6), round(preco, 6))
+                        if chave in vistos:
+                            continue
+                        vistos.add(chave)
+                        registros.append({
+                            "Código Fábrica": codigo,
+                            "Descrição": descricao,
+                            "Quantidade": qtd,
+                            "Valor Unitário": preco,
+                            "Valor Total": total_sem_imposto if total_sem_imposto > 0 else subtotal,
+                            "Linha PDF": " | ".join([codigo, descricao, str(qtd), str(preco), str(subtotal)]),
+                        })
+    except Exception:
+        return pd.DataFrame()
+
+    return pd.DataFrame(registros)
+
+
 def extrair_itens_pdf_por_tabelas(uploaded_file):
     """Lê PDFs de fornecedor com tabela real antes das heurísticas por texto."""
     if uploaded_file is None:
@@ -5533,6 +5632,8 @@ MODELOS_FORNECEDOR_COMPARATIVO = {
     "Coral": "coral",
     "Sherwin Williams": "sherwin_williams",
     "Auto America": "auto_america",
+    "PDR": "pdr",
+    "DeWalt": "dewalt",
     "3M": "3m",
     "Brasilux / MasterSales": "brasilux_mastersales",
 }
@@ -5578,6 +5679,16 @@ def _ler_arquivo_comparativo_modelo_homologado(uploaded_file, codigos_referencia
             if not df_pdf.empty:
                 return df_pdf
             return extrair_itens_pdf_mercanet(uploaded_file)
+        return pd.DataFrame()
+
+    if modelo == "pdr":
+        if nome.endswith(".pdf"):
+            return extrair_itens_pdf_mercanet(uploaded_file)
+        return pd.DataFrame()
+
+    if modelo == "dewalt":
+        if nome.endswith(".pdf"):
+            return extrair_itens_pdf_dewalt(uploaded_file)
         return pd.DataFrame()
 
     if modelo == "coral":
@@ -5982,6 +6093,81 @@ def agregar_pedido_comparativo(df):
     return agg
 
 
+CODIGOS_3M_MULTIPLO_50 = {
+    "23100", "23098", "23101", "23128", "23099", "23096", "23097", "23102", "23103",
+    "87249", "13", "15", "55", "20021", "56", "60", "10014", "61", "62", "10016",
+    "54", "10017", "16", "10018", "83819", "57", "10019", "58", "59", "10021",
+    "83992", "84014", "84009", "84010", "84011", "84012", "20577", "84013",
+    "84019", "84020", "84015", "84016", "84021", "84017", "84018", "10022",
+    "85005", "10023", "10026", "10027", "10028",
+}
+
+CODIGOS_3M_MULTIPLO_20 = {"23399"}
+
+
+def fator_conversao_quantidade_3m(codigo="", descricao=""):
+    codigo_norm = normalizar_codigo_fabrica(codigo)
+    desc_norm = normalizar_descricao_chave(descricao)
+    if codigo_norm in CODIGOS_3M_MULTIPLO_50:
+        return 50.0
+    if codigo_norm in CODIGOS_3M_MULTIPLO_20:
+        return 20.0
+    if "LIXA" in desc_norm and "3M" in desc_norm:
+        return 50.0
+    if "KIT RESPIRADOR" in desc_norm and "6200" in desc_norm and "3M" in desc_norm:
+        return 20.0
+    return 1.0
+
+
+def converter_qtd_preco_3m(qtd, preco, valor, fator):
+    try:
+        fator = float(fator or 1)
+    except Exception:
+        fator = 1.0
+    qtd = float(qtd or 0)
+    preco = float(preco or 0)
+    valor = float(valor or 0)
+    if fator <= 1 or qtd <= 0:
+        return qtd, preco, valor
+
+    valor_preservado = valor if valor > 0 else qtd * preco
+    qtd_convertida = qtd * fator
+    preco_convertido = (valor_preservado / qtd_convertida) if qtd_convertida > 0 and valor_preservado > 0 else preco
+    return qtd_convertida, preco_convertido, valor_preservado
+
+
+def aplicar_regras_quantidade_3m_fornecedor(fornecedor):
+    if fornecedor is None or fornecedor.empty:
+        return fornecedor
+
+    fornecedor = fornecedor.copy()
+    fornecedor["codigo_fabrica_norm"] = fornecedor["codigo_fabrica_norm"].fillna("").astype(str).str.strip()
+    fornecedor["quantidade"] = pd.to_numeric(fornecedor["quantidade"], errors="coerce").fillna(0)
+    fornecedor["preco_unitario"] = pd.to_numeric(fornecedor["preco_unitario"], errors="coerce").fillna(0)
+    fornecedor["valor_total"] = pd.to_numeric(fornecedor["valor_total"], errors="coerce").fillna(0)
+
+    fatores = fornecedor.apply(
+        lambda r: fator_conversao_quantidade_3m(r.get("codigo_fabrica", ""), r.get("descricao", "")),
+        axis=1,
+    )
+    mask = fatores > 1
+    if not mask.any():
+        return fornecedor
+
+    for idx in fornecedor[mask].index:
+        qtd, preco, valor = converter_qtd_preco_3m(
+            fornecedor.at[idx, "quantidade"],
+            fornecedor.at[idx, "preco_unitario"],
+            fornecedor.at[idx, "valor_total"],
+            fatores.at[idx],
+        )
+        fornecedor.at[idx, "quantidade"] = qtd
+        fornecedor.at[idx, "preco_unitario"] = preco
+        fornecedor.at[idx, "valor_total"] = valor
+    fornecedor.loc[mask, "descricao"] = fornecedor.loc[mask, "descricao"].astype(str) + " [Qtd fornecedor convertida para unidade da Única]"
+    return fornecedor
+
+
 def codigos_referencia_comparativo(df_unica_raw, mapa_unica=None):
     try:
         unica_norm = normalizar_pedido_comparativo(df_unica_raw, "Única", mapa_unica)
@@ -6006,7 +6192,7 @@ def _aplicar_relacionamentos_manuais(unica, fornecedor, relacionamentos):
     return fornecedor
 
 
-def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw, mapa_unica=None, mapa_fornecedor=None, relacionamentos_manuais=None, mapa_precos_brasilux=None):
+def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw, mapa_unica=None, mapa_fornecedor=None, relacionamentos_manuais=None, mapa_precos_brasilux=None, modelo_fornecedor=None):
     unica_normalizada = normalizar_pedido_comparativo(df_unica_raw, "Única", mapa_unica)
 
     # Regra do comparativo: itens com PEDIDO FINAL / quantidade da Única igual a zero
@@ -6019,7 +6205,10 @@ def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw, mapa_unica=None,
     unica = agregar_pedido_comparativo(unica_normalizada)
     if mapa_precos_brasilux:
         unica = aplicar_precos_brasilux_no_pedido_unica(unica, mapa_precos_brasilux)
-    fornecedor = agregar_pedido_comparativo(normalizar_pedido_comparativo(df_fornecedor_raw, "Fornecedor", mapa_fornecedor))
+    fornecedor_normalizado = normalizar_pedido_comparativo(df_fornecedor_raw, "Fornecedor", mapa_fornecedor)
+    if _modelo_fornecedor_codigo(modelo_fornecedor) == "3m":
+        fornecedor_normalizado = aplicar_regras_quantidade_3m_fornecedor(fornecedor_normalizado)
+    fornecedor = agregar_pedido_comparativo(fornecedor_normalizado)
     fornecedor = _aplicar_relacionamentos_manuais(unica, fornecedor, relacionamentos_manuais)
 
     usados_fornecedor = set()
@@ -6095,6 +6284,17 @@ def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw, mapa_unica=None,
         qtd_fornecedor = float(match.get("quantidade", 0) or 0)
         preco_fornecedor = float(match.get("preco_unitario", 0) or 0)
         valor_fornecedor = float(match.get("valor_total", 0) or 0)
+        desc_fornecedor = str(match.get("descricao", "") or "")
+        if _modelo_fornecedor_codigo(modelo_fornecedor) == "3m":
+            fator_3m = fator_conversao_quantidade_3m(cod_fab, row.get("descricao", ""))
+            if fator_3m > 1 and qtd_fornecedor > 0 and qtd_fornecedor < qtd_unica:
+                qtd_fornecedor, preco_fornecedor, valor_fornecedor = converter_qtd_preco_3m(
+                    qtd_fornecedor,
+                    preco_fornecedor,
+                    valor_fornecedor,
+                    fator_3m,
+                )
+                desc_fornecedor = desc_fornecedor + " [Qtd fornecedor convertida para unidade da Única]"
 
         dif_qtd = qtd_fornecedor - qtd_unica
         dif_preco = preco_fornecedor - preco_unica
@@ -6112,10 +6312,10 @@ def montar_comparativo_pedidos(df_unica_raw, df_fornecedor_raw, mapa_unica=None,
             "Preço Única": row.get("preco_unitario", 0),
             "Valor Única": row.get("valor_total", 0),
             "Código Fornecedor": match.get("codigo_fabrica", ""),
-            "Descrição Fornecedor": match.get("descricao", ""),
-            "Qtd Fornecedor": match.get("quantidade", 0),
-            "Preço Fornecedor": match.get("preco_unitario", 0),
-            "Valor Fornecedor": match.get("valor_total", 0),
+            "Descrição Fornecedor": desc_fornecedor,
+            "Qtd Fornecedor": qtd_fornecedor,
+            "Preço Fornecedor": preco_fornecedor,
+            "Valor Fornecedor": valor_fornecedor,
             "Diferença Qtd": dif_qtd,
             "Diferença Preço": dif_preco,
             "Diferença Preço %": dif_preco_pct,
@@ -6549,7 +6749,7 @@ def render_pagina_comparativo_pedidos():
         st.markdown("### 2. Relacionamento manual dos itens sem identificação")
         relacionamentos = st.session_state.get("relacionamentos_comparativo", {})
         comparativo_base = montar_comparativo_pedidos(
-            df_unica, df_fornecedor, mapa_unica, mapa_fornecedor, relacionamentos, mapa_precos_brasilux
+            df_unica, df_fornecedor, mapa_unica, mapa_fornecedor, relacionamentos, mapa_precos_brasilux, modelo_fornecedor
         )
 
         nao_encontrados = comparativo_base[comparativo_base["Status"] == "Não encontrado no fornecedor"].copy()
@@ -6597,6 +6797,7 @@ def render_pagina_comparativo_pedidos():
             mapa_fornecedor,
             st.session_state.get("relacionamentos_comparativo", {}),
             mapa_precos_brasilux,
+            modelo_fornecedor,
         )
         st.success(f"Comparativo gerado com {len(comparativo)} linha(s).")
 
