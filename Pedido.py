@@ -2791,7 +2791,7 @@ def google_registrar_acompanhamento(pedido_info):
     return None
 
 
-def google_finalizar_pedido(pedido_id, df_tratamento, usuario=""):
+def google_finalizar_pedido(pedido_id, df_tratamento, usuario="", modelo_autcom=None):
     recursos = google_get_resources()
     pedidos = google_listar_pedidos()
     row = pedidos[pedidos["id_pedido"].astype(str) == str(pedido_id)]
@@ -2799,7 +2799,7 @@ def google_finalizar_pedido(pedido_id, df_tratamento, usuario=""):
         raise ValueError("Pedido nao encontrado.")
     row = row.iloc[0].to_dict()
     base_nome = google_safe_name(row.get("nome_pedido") or "pedido")
-    autcom_bytes = gerar_excel_autcom_tratamento(df_tratamento)
+    autcom_bytes = gerar_excel_autcom_tratamento(df_tratamento, modelo_autcom=modelo_autcom)
     fornecedor_bytes = gerar_excel_fornecedor_tratamento(df_tratamento)
     link_autcom = google_upload_bytes(
         f"{base_nome} - importacao autcom.xlsx",
@@ -2949,7 +2949,20 @@ def gerar_copia_fornecedor_csv(df):
     return fornecedor.to_csv(index=False, sep=";", decimal=",", encoding="utf-8-sig").encode("utf-8-sig")
 
 
-def gerar_excel_pedido(df_pedido):
+def quantidade_autcom_3m(codigo="", descricao="", quantidade=0):
+    qtd = int(round(float(quantidade or 0)))
+    if qtd <= 0:
+        return 0
+    try:
+        fator = float(fator_conversao_quantidade_3m(codigo, descricao) or 1)
+    except Exception:
+        fator = 1.0
+    if fator <= 1:
+        return qtd
+    return int(round(qtd / fator))
+
+
+def gerar_excel_pedido(df_pedido, modelo_autcom=None):
     """
     Excel para importação no Autcom, sem cabeçalho:
     Coluna B = código
@@ -2966,6 +2979,12 @@ def gerar_excel_pedido(df_pedido):
     linha_excel = 1
     for _, row in df_pedido.iterrows():
         qtd = int(round(float(row.get("PEDIDO Final", 0) or 0)))
+        if _modelo_fornecedor_codigo(modelo_autcom) == "3m":
+            qtd = quantidade_autcom_3m(
+                row.get("codigo", ""),
+                row.get("descricao", ""),
+                qtd,
+            )
         if qtd <= 0:
             continue
         ws.cell(row=linha_excel, column=2, value=str(row.get("codigo", "")).zfill(5))
@@ -3526,7 +3545,7 @@ def aplicar_precos_brasilux_no_pedido_unica(unica, mapa_precos):
     return unica.drop(columns=["preco_tabela_brasilux_encontrado"], errors="ignore")
 
 
-def gerar_excel_autcom_tratamento(df_tratamento):
+def gerar_excel_autcom_tratamento(df_tratamento, modelo_autcom=None):
     """
     Gera o Excel para importação no Autcom a partir da planilha de Tratamento de Pedido Final.
     Sem cabeçalho:
@@ -3543,6 +3562,7 @@ def gerar_excel_autcom_tratamento(df_tratamento):
     colunas_norm = {normalizar_coluna(c): c for c in df.columns}
 
     col_codigo = colunas_norm.get("ZX") or colunas_norm.get("CODIGO")
+    col_descricao = colunas_norm.get("DESCRICAO") or colunas_norm.get("DESCRICAO DO ITEM")
     col_qtd = colunas_norm.get("PEDIDO FINAL")
     col_preco = colunas_norm.get("PRECO ULTIMA COMPRA")
 
@@ -3574,6 +3594,12 @@ def gerar_excel_autcom_tratamento(df_tratamento):
             qtd = int(round(float(qtd)))
         except Exception:
             qtd = 0
+        if _modelo_fornecedor_codigo(modelo_autcom) == "3m":
+            qtd = quantidade_autcom_3m(
+                codigo,
+                row.get(col_descricao, "") if col_descricao else "",
+                qtd,
+            )
 
         if not codigo or qtd <= 0:
             continue
@@ -9419,7 +9445,14 @@ if pagina == "Tratamento Final":
         else:
             st.dataframe(df_tratamento.head(50), use_container_width=True, hide_index=True, height=360)
 
-        excel_tratamento = gerar_excel_autcom_tratamento(df_tratamento)
+        modelo_autcom_tratamento = st.selectbox(
+            "Regra especial para exportação Autcom",
+            ["Nenhuma", "3M"],
+            index=0,
+            key="modelo_autcom_tratamento",
+            help="Use 3M somente quando o arquivo Autcom precisa converter lixas para múltiplos de 50. As demais exportações não são alteradas.",
+        )
+        excel_tratamento = gerar_excel_autcom_tratamento(df_tratamento, modelo_autcom=modelo_autcom_tratamento)
         col_dl_autcom, col_dl_fornecedor = st.columns(2)
         with col_dl_autcom:
             st.download_button(
@@ -9573,7 +9606,14 @@ if False and pagina == "Tratamento Final":
         else:
             st.dataframe(df_tratamento.head(50), use_container_width=True, hide_index=True, height=360)
 
-        excel_tratamento = gerar_excel_autcom_tratamento(df_tratamento)
+        modelo_autcom_tratamento = st.selectbox(
+            "Regra especial para exportação Autcom",
+            ["Nenhuma", "3M"],
+            index=0,
+            key="modelo_autcom_tratamento",
+            help="Use 3M somente quando o arquivo Autcom precisa converter lixas para múltiplos de 50. As demais exportações não são alteradas.",
+        )
+        excel_tratamento = gerar_excel_autcom_tratamento(df_tratamento, modelo_autcom=modelo_autcom_tratamento)
         col_dl_autcom, col_dl_fornecedor = st.columns(2)
         with col_dl_autcom:
             st.download_button(
@@ -9977,8 +10017,15 @@ elif pagina == "Exportações":
 
     with col_dl1:
         render_download_card("Excel Autcom", "Arquivo sem cabeçalho: coluna B = código, F = quantidade, H = preço.")
+        modelo_autcom_exportacao = st.selectbox(
+            "Regra especial para exportação Autcom",
+            ["Nenhuma", "3M"],
+            index=0,
+            key="modelo_autcom_exportacao",
+            help="Use 3M somente quando o arquivo Autcom precisa converter lixas para múltiplos de 50. As demais exportações não são alteradas.",
+        )
         try:
-            excel_bytes = gerar_excel_pedido(pedido_final)
+            excel_bytes = gerar_excel_pedido(pedido_final, modelo_autcom=modelo_autcom_exportacao)
             st.download_button(
                 "⬇ Baixar pedido para importação no Autcom",
                 excel_bytes,
