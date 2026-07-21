@@ -2962,6 +2962,20 @@ def quantidade_autcom_3m(codigo="", descricao="", quantidade=0):
     return int(round(qtd / fator))
 
 
+def quantidade_preco_autcom_3m(codigo="", descricao="", quantidade=0, preco=0):
+    qtd = int(round(float(quantidade or 0)))
+    preco = numero_planilha_para_float(preco)
+    if qtd <= 0:
+        return 0, preco
+    try:
+        fator = float(fator_conversao_quantidade_3m(codigo, descricao) or 1)
+    except Exception:
+        fator = 1.0
+    if fator <= 1:
+        return qtd, preco
+    return int(round(qtd / fator)), preco * fator
+
+
 def gerar_excel_pedido(df_pedido, modelo_autcom=None):
     """
     Excel para importação no Autcom, sem cabeçalho:
@@ -2979,17 +2993,19 @@ def gerar_excel_pedido(df_pedido, modelo_autcom=None):
     linha_excel = 1
     for _, row in df_pedido.iterrows():
         qtd = int(round(float(row.get("PEDIDO Final", 0) or 0)))
+        preco = float(str(row.get("Preço Última Compra", 0)).replace(",", "." ) or 0)
         if _modelo_fornecedor_codigo(modelo_autcom) == "3m":
-            qtd = quantidade_autcom_3m(
+            qtd, preco = quantidade_preco_autcom_3m(
                 row.get("codigo", ""),
                 row.get("descricao", ""),
                 qtd,
+                preco,
             )
         if qtd <= 0:
             continue
         ws.cell(row=linha_excel, column=2, value=str(row.get("codigo", "")).zfill(5))
         ws.cell(row=linha_excel, column=6, value=qtd)
-        ws.cell(row=linha_excel, column=8, value=round(float(str(row.get("Preço Última Compra", 0)).replace(",", "." ) or 0), 2))
+        ws.cell(row=linha_excel, column=8, value=round(float(preco or 0), 2))
         ws.cell(row=linha_excel, column=8).number_format = '0.00'
         linha_excel += 1
 
@@ -3595,10 +3611,11 @@ def gerar_excel_autcom_tratamento(df_tratamento, modelo_autcom=None):
         except Exception:
             qtd = 0
         if _modelo_fornecedor_codigo(modelo_autcom) == "3m":
-            qtd = quantidade_autcom_3m(
+            qtd, preco = quantidade_preco_autcom_3m(
                 codigo,
                 row.get(col_descricao, "") if col_descricao else "",
                 qtd,
+                preco,
             )
 
         if not codigo or qtd <= 0:
