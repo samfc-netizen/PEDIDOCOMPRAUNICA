@@ -1,5 +1,5 @@
-streamlit
-pandas
+streamlit==1.48.1
+pandas==2.3.1
 pdfplumber
 openpyxl
 pymupdf
@@ -8,3 +8,5 @@ lxml
 google-api-python-client
 google-auth
 google-auth-httplib2
+pillow
+pytesseract
