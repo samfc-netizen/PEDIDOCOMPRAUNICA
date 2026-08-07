@@ -5436,6 +5436,78 @@ def extrair_itens_pdf_dewalt(uploaded_file):
     return pd.DataFrame(registros)
 
 
+def extrair_itens_pdf_norton(uploaded_file):
+    """
+    Parser para pre-pedido Norton.
+
+    Layout textual observado:
+    item codigo quantidade pecas BRL preco_unitario BRL total
+    A descricao costuma vir na linha anterior ao item.
+    """
+    if uploaded_file is None:
+        return pd.DataFrame()
+
+    try:
+        texto = extract_text_from_pdf_pdfplumber(uploaded_file)
+    except Exception:
+        return pd.DataFrame()
+
+    texto_norm = _texto_sem_acentos(texto).upper()
+    if "PRE-PEDIDO" not in texto_norm or "CODIGO DO" not in texto_norm or "PRECO POR" not in texto_norm:
+        return pd.DataFrame()
+
+    linhas = [re.sub(r"\s+", " ", str(l or "")).strip() for l in str(texto or "").splitlines()]
+    linhas = [l for l in linhas if l]
+    padrao_item = re.compile(
+        r"^\s*(?P<item>\d{1,4})\s+"
+        r"(?P<codigo>\d{6,18})\s+"
+        r"(?P<qtd>\d+(?:[\.,]\d+)?)\s+"
+        r"(?P<pecas>\d{1,3}(?:\.\d{3})*(?:,\d+)?|\d+(?:[\.,]\d+)?)\s+"
+        r"BRL\s+(?P<preco>\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})\s+"
+        r"BRL\s+(?P<total>\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})\s*$",
+        flags=re.IGNORECASE,
+    )
+
+    registros = []
+    vistos = set()
+    for idx, linha in enumerate(linhas):
+        m = padrao_item.match(linha)
+        if not m:
+            continue
+
+        codigo = m.group("codigo").strip()
+        qtd = numero_planilha_para_float(m.group("pecas"))
+        preco = numero_planilha_para_float(m.group("preco"))
+        total = numero_planilha_para_float(m.group("total"))
+        if not codigo or qtd <= 0 or preco <= 0:
+            continue
+
+        desc_partes = []
+        for j in range(max(0, idx - 3), idx):
+            cand = linhas[j]
+            cand_norm = _texto_sem_acentos(cand).upper()
+            if any(b in cand_norm for b in ["CODIGO DO", "ITEM DESCRICAO", "PRECO", "QUANTIDADE", "PRODUTO PECAS", "UNITARIO TOTAL"]):
+                continue
+            if re.search(r"[A-Za-zÁÉÍÓÚÃÕÇáéíóúãõç]{4,}", cand):
+                desc_partes.append(cand)
+        descricao = " ".join(desc_partes).strip() or codigo
+
+        chave = (normalizar_codigo_fabrica(codigo), round(qtd, 6), round(preco, 6))
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+        registros.append({
+            "Código Fábrica": codigo,
+            "Descrição": descricao,
+            "Quantidade": qtd,
+            "Valor Unitário": preco,
+            "Valor Total": total if total > 0 else qtd * preco,
+            "Linha PDF": linha,
+        })
+
+    return pd.DataFrame(registros)
+
+
 def extrair_itens_pdf_por_tabelas(uploaded_file):
     """Lê PDFs de fornecedor com tabela real antes das heurísticas por texto."""
     if uploaded_file is None:
@@ -5677,6 +5749,7 @@ MODELOS_FORNECEDOR_COMPARATIVO = {
     "Auto America": "auto_america",
     "PDR": "pdr",
     "DeWalt": "dewalt",
+    "Norton": "norton",
     "3M": "3m",
     "Brasilux / MasterSales": "brasilux_mastersales",
 }
@@ -5732,6 +5805,11 @@ def _ler_arquivo_comparativo_modelo_homologado(uploaded_file, codigos_referencia
     if modelo == "dewalt":
         if nome.endswith(".pdf"):
             return extrair_itens_pdf_dewalt(uploaded_file)
+        return pd.DataFrame()
+
+    if modelo == "norton":
+        if nome.endswith(".pdf"):
+            return extrair_itens_pdf_norton(uploaded_file)
         return pd.DataFrame()
 
     if modelo == "coral":
