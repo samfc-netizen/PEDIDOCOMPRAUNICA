@@ -5599,6 +5599,192 @@ def extrair_itens_pdf_atlas(uploaded_file):
     return pd.DataFrame(registros)
 
 
+def extrair_itens_pdf_adere(uploaded_file):
+    """
+    Parser para pedido Adere.
+
+    Layout observado:
+    Produto | Unid. | Preco | % IPI | Qtde. | Total
+
+    O codigo de fabrica vem antes do hifen na coluna Produto.
+    """
+    if uploaded_file is None:
+        return pd.DataFrame()
+
+    try:
+        pdf_bytes = _pdf_bytes(uploaded_file)
+    except Exception:
+        return pd.DataFrame()
+
+    registros = []
+    vistos = set()
+
+    try:
+        with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+            for page in pdf.pages:
+                for tabela in (page.extract_tables() or []):
+                    if not tabela or len(tabela) < 2:
+                        continue
+
+                    linhas = [[str(c or "").strip() for c in (linha or [])] for linha in tabela]
+                    max_cols = max((len(linha) for linha in linhas), default=0)
+                    linhas = [linha + [""] * (max_cols - len(linha)) for linha in linhas]
+
+                    header_idx = None
+                    header_norm = []
+                    for idx, linha in enumerate(linhas[:8]):
+                        nomes = [_normalizar_nome_coluna_flex(c) for c in linha]
+                        joined = " ".join(nomes)
+                        if "PRODUTO" in joined and "PRECO" in joined and "QTDE" in joined:
+                            header_idx = idx
+                            header_norm = nomes
+                            break
+                    if header_idx is None:
+                        continue
+
+                    def idx_col(*partes):
+                        for col_idx, nome in enumerate(header_norm):
+                            if all(parte in nome for parte in partes):
+                                return col_idx
+                        return None
+
+                    idx_produto = idx_col("PRODUTO")
+                    idx_qtd = idx_col("QTDE")
+                    idx_preco = idx_col("PRECO")
+                    idx_total = idx_col("TOTAL")
+                    if idx_produto is None or idx_qtd is None or idx_preco is None:
+                        continue
+
+                    for row in linhas[header_idx + 1:]:
+                        if len(row) <= max(idx_produto, idx_qtd, idx_preco):
+                            continue
+                        produto = re.sub(r"\s+", " ", row[idx_produto]).strip()
+                        if not produto or _normalizar_nome_coluna_flex(produto).startswith("TOTAL"):
+                            continue
+
+                        if " - " in produto:
+                            codigo, descricao = produto.split(" - ", 1)
+                        else:
+                            partes = produto.split(maxsplit=1)
+                            codigo = partes[0] if partes else ""
+                            descricao = partes[1] if len(partes) > 1 else produto
+
+                        codigo = codigo.strip()
+                        descricao = re.sub(r"\s+", " ", descricao).strip() or codigo
+                        qtd = numero_planilha_para_float(row[idx_qtd])
+                        preco = numero_planilha_para_float(row[idx_preco])
+                        total = numero_planilha_para_float(row[idx_total]) if idx_total is not None and idx_total < len(row) else 0.0
+
+                        if not codigo or qtd <= 0 or preco <= 0:
+                            continue
+
+                        chave = (normalizar_codigo_fabrica(codigo), round(qtd, 6), round(preco, 6))
+                        if chave in vistos:
+                            continue
+                        vistos.add(chave)
+                        registros.append({
+                            "Código Fábrica": codigo,
+                            "Descrição": descricao,
+                            "Quantidade": qtd,
+                            "Valor Unitário": preco,
+                            "Valor Total": total if total > 0 else qtd * preco,
+                            "Linha PDF": " | ".join(row),
+                        })
+    except Exception:
+        return pd.DataFrame()
+
+    return pd.DataFrame(registros)
+
+
+def extrair_itens_pdf_ppg(uploaded_file):
+    """
+    Parser para pedido PPG.
+
+    Layout observado:
+    Seq | Item | Descricao | Qtde | ... | Vl. Merc | Vl. Unit. NF | Valor NF
+
+    Usa Vl. Merc como valor unitario solicitado no comparativo.
+    """
+    if uploaded_file is None:
+        return pd.DataFrame()
+
+    try:
+        pdf_bytes = _pdf_bytes(uploaded_file)
+    except Exception:
+        return pd.DataFrame()
+
+    registros = []
+    vistos = set()
+
+    try:
+        with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+            for page in pdf.pages:
+                for tabela in (page.extract_tables() or []):
+                    if not tabela or len(tabela) < 2:
+                        continue
+
+                    linhas = [[str(c or "").strip() for c in (linha or [])] for linha in tabela]
+                    max_cols = max((len(linha) for linha in linhas), default=0)
+                    linhas = [linha + [""] * (max_cols - len(linha)) for linha in linhas]
+
+                    header_idx = None
+                    header_norm = []
+                    for idx, linha in enumerate(linhas[:8]):
+                        nomes = [_normalizar_nome_coluna_flex(c) for c in linha]
+                        joined = " ".join(nomes)
+                        if "ITEM" in joined and "QTDE" in joined and "VL MERC" in joined:
+                            header_idx = idx
+                            header_norm = nomes
+                            break
+                    if header_idx is None:
+                        continue
+
+                    def idx_col(*partes):
+                        for col_idx, nome in enumerate(header_norm):
+                            if all(parte in nome for parte in partes):
+                                return col_idx
+                        return None
+
+                    idx_item = idx_col("ITEM")
+                    idx_desc = idx_col("DESCRICAO")
+                    idx_qtd = idx_col("QTDE")
+                    idx_preco = idx_col("VL", "MERC")
+                    idx_total = idx_col("VALOR", "NF")
+                    if idx_item is None or idx_qtd is None or idx_preco is None:
+                        continue
+
+                    for row in linhas[header_idx + 1:]:
+                        if len(row) <= max(idx_item, idx_qtd, idx_preco):
+                            continue
+                        codigo = re.sub(r"\s+", " ", row[idx_item]).strip()
+                        descricao = re.sub(r"\s+", " ", row[idx_desc]).strip() if idx_desc is not None and idx_desc < len(row) else codigo
+                        qtd = numero_planilha_para_float(row[idx_qtd])
+                        preco = numero_planilha_para_float(row[idx_preco])
+                        total = numero_planilha_para_float(row[idx_total]) if idx_total is not None and idx_total < len(row) else 0.0
+
+                        if not codigo or qtd <= 0 or preco <= 0:
+                            continue
+                        if normalizar_codigo_fabrica(codigo) in {"ITEM", "TOTAL"}:
+                            continue
+
+                        chave = (normalizar_codigo_fabrica(codigo), round(qtd, 6), round(preco, 6))
+                        if chave in vistos:
+                            continue
+                        vistos.add(chave)
+                        registros.append({
+                            "Código Fábrica": codigo,
+                            "Descrição": descricao,
+                            "Quantidade": qtd,
+                            "Valor Unitário": preco,
+                            "Valor Total": total if total > 0 else qtd * preco,
+                            "Linha PDF": " | ".join(row),
+                        })
+    except Exception:
+        return pd.DataFrame()
+
+    return pd.DataFrame(registros)
+
+
 class _TabelaHtmlFornecedorParser(HTMLParser):
     def __init__(self):
         super().__init__()
@@ -5991,6 +6177,8 @@ MODELOS_FORNECEDOR_COMPARATIVO = {
     "Norton": "norton",
     "Atlas": "atlas",
     "Anjo": "anjo",
+    "Adere": "adere",
+    "PPG": "ppg",
     "3M": "3m",
     "Brasilux / MasterSales": "brasilux_mastersales",
 }
@@ -6067,6 +6255,16 @@ def _ler_arquivo_comparativo_modelo_homologado(uploaded_file, codigos_referencia
             if df_padrao is not None and not df_padrao.empty:
                 return df_padrao
             return df_planilha
+        return pd.DataFrame()
+
+    if modelo == "adere":
+        if nome.endswith(".pdf"):
+            return extrair_itens_pdf_adere(uploaded_file)
+        return pd.DataFrame()
+
+    if modelo == "ppg":
+        if nome.endswith(".pdf"):
+            return extrair_itens_pdf_ppg(uploaded_file)
         return pd.DataFrame()
 
     if modelo == "coral":
