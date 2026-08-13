@@ -638,6 +638,34 @@ def _token_numero_giro(valor):
     return bool(re.fullmatch(r"-?\d+(?:\.\d{3})*,\d{1,4}|-?\d+,\d{1,4}|-?\d+", txt))
 
 
+def _token_parece_unidade_relatorio(valor):
+    """
+    Reconhece a coluna de unidade por formato, nao por uma lista fechada.
+
+    Os relatorios trazem a coluna chamada UN, mas o valor do item pode ser UN,
+    PC, LT, CX, KG, RL ou outro codigo curto. A confirmacao real e feita pelo
+    contexto: a unidade precisa vir imediatamente antes das colunas numericas.
+    """
+    token = str(valor or "").upper().strip()
+    token = unicodedata.normalize("NFKD", token)
+    token = "".join(ch for ch in token if not unicodedata.combining(ch))
+    if not token:
+        return False
+    if _token_numero_giro(token) or _eh_numero_br(token):
+        return False
+    if re.fullmatch(r"\d{1,2}/\d{1,2}/\d{2,4}", token):
+        return False
+    bloqueados = {
+        "COD", "CODIGO", "DESCRICAO", "ITEM", "MEDIA", "PREVI", "PREVI30",
+        "PREVI60", "ESTOQUE", "SUGESTAO", "ABERTO", "BAIXADO", "TOTAL",
+        "QTDE", "QTD", "VR", "UNIT", "VRUNIT", "PR", "VENDA", "LUCRO",
+    }
+    compacto = re.sub(r"[^A-Z0-9]+", "", token)
+    if compacto in bloqueados:
+        return False
+    return bool(re.fullmatch(r"[A-Z0-9]{1,8}", compacto) and re.search(r"[A-Z]", compacto))
+
+
 def _encontrar_unidade_giro(partes, qtd_meses):
     """
     No PDF de giro, algumas descrições contêm a palavra/tipo 'UN' antes da unidade real.
@@ -653,13 +681,13 @@ def _encontrar_unidade_giro(partes, qtd_meses):
 
     for i, token in enumerate(partes):
         token_upper = str(token).strip().upper()
-        unidade_explicita = token_upper in ["UN", "UND", "UNID", "UNIDADE"]
+        unidade_explicita = _token_parece_unidade_relatorio(token_upper)
 
         # Alguns PDFs colam a unidade no fim do texto, ex.: "...-STUN 2,45 1,00..."
         unidade_colada = (
             not unidade_explicita
             and len(token_upper) > 2
-            and token_upper.endswith("UN")
+            and any(token_upper.endswith(u) for u in ["UN", "UND", "PC", "LT", "CX", "KG", "GL", "RL"])
             and not _token_numero_giro(token_upper)
         )
 
@@ -869,6 +897,25 @@ def extrair_descricao_pedido_aberto_tokens(tokens, un_index):
     return " ".join(descricao_tokens).strip()
 
 
+def encontrar_indice_unidade_pedido_aberto(tokens, indice_aberto=None):
+    """
+    Encontra a coluna de unidade na linha do pedido em aberto aceitando qualquer
+    unidade cadastrada. A validacao usa os numeros posteriores, pois depois da
+    unidade vem QTDE, TOT.LIT, TOT.KIL, PES.ITE, BAIXADO, ABERTO...
+    """
+    if not tokens:
+        return None
+    idx_aberto = 5 if indice_aberto is None else int(indice_aberto)
+    candidatos = []
+    for i, token in enumerate(tokens):
+        if not _token_parece_unidade_relatorio(token):
+            continue
+        valores_numericos = [p for p in tokens[i + 1:] if _eh_numero_br(p)]
+        if len(valores_numericos) > idx_aberto:
+            candidatos.append(i)
+    return candidatos[-1] if candidatos else None
+
+
 def encontrar_indice_aberto_no_cabecalho(text):
     """
     No relatório de Pedidos de Compra, após a unidade UN, a sequência numérica é:
@@ -910,7 +957,7 @@ def parse_linha_pedido_aberto(line, indice_aberto=None):
 
     Regra corrigida:
     - Não usa a posição do cabeçalho inteiro, porque a descrição varia.
-    - Localiza a unidade UN.
+    - Localiza a coluna de unidade, independente do valor cadastrado.
     - Depois da UN, considera apenas números.
     - Puxa a coluna ABERTO pelo índice fixo 5:
       QTDE=0, TOT.LIT=1, TOT.KIL=2, PES.ITE=3, BAIXADO=4, ABERTO=5, VR.UNIT=6.
@@ -923,11 +970,7 @@ def parse_linha_pedido_aberto(line, indice_aberto=None):
     codigo = match.group(1).zfill(5)
     partes = line.split()
 
-    un_index = None
-    for i, token in enumerate(partes):
-        if token.upper() in ["UN", "UND", "UNID", "UNIDADE"]:
-            un_index = i
-            break
+    un_index = encontrar_indice_unidade_pedido_aberto(partes, indice_aberto=indice_aberto)
 
     if un_index is None:
         return None
@@ -1041,11 +1084,7 @@ def _parse_pedidos_compra_aberto_pdf_stream(uploaded_file):
 
                     codigo = match_codigo.group(1).zfill(5)
 
-                    un_index = None
-                    for i, token in enumerate(textos):
-                        if token.upper() in ["UN", "UND", "UNID", "UNIDADE"]:
-                            un_index = i
-                            break
+                    un_index = encontrar_indice_unidade_pedido_aberto(textos, indice_aberto=5)
 
                     descricao = extrair_descricao_pedido_aberto_tokens(textos, un_index)
 
