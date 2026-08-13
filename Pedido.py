@@ -14,6 +14,7 @@ from email.mime.text import MIMEText
 from email.utils import formataddr
 from io import BytesIO, StringIO
 from datetime import datetime, date
+from pathlib import Path
 
 
 # Dependências da multipage de Previsão Financeira
@@ -60,7 +61,16 @@ except Exception:
     build = None
     MediaIoBaseUpload = None
 
-st.set_page_config(page_title="Análise de Giro e Pedido de Compra", layout="wide", page_icon="📊")
+APP_DIR = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
+APP_LOGO_PATH = APP_DIR / "assets" / "logos_dauto_unica.png"
+APP_FAVICON = "📊"
+if Image is not None and APP_LOGO_PATH.exists():
+    try:
+        APP_FAVICON = Image.open(APP_LOGO_PATH)
+    except Exception:
+        APP_FAVICON = "📊"
+
+st.set_page_config(page_title="Análise de Giro e Pedido de Compra", layout="wide", page_icon=APP_FAVICON)
 
 # =========================================================
 # CONFIGURAÇÕES DO NEGÓCIO
@@ -114,6 +124,17 @@ GOOGLE_ACOMPANHAMENTO_COLUNAS = [
 # =========================================================
 # FUNÇÕES AUXILIARES
 # =========================================================
+
+def imagem_local_para_data_uri(caminho):
+    try:
+        caminho = Path(caminho)
+        if not caminho.exists():
+            return ""
+        encoded = base64.b64encode(caminho.read_bytes()).decode("ascii")
+        return f"data:image/png;base64,{encoded}"
+    except Exception:
+        return ""
+
 
 def br_to_float(value):
     if value is None:
@@ -7841,12 +7862,18 @@ def aplicar_css_global():
                 color: #0f172a !important;
             }
             .sidebar-brand {
-                display: flex;
-                gap: 12px;
-                align-items: center;
                 padding: 10px 8px 18px 2px;
                 border-bottom: 1px solid rgba(148, 163, 184, .18);
                 margin-bottom: 16px;
+            }
+            .sidebar-brand-logo {
+                width: 100%;
+                max-width: 182px;
+                display: block;
+                margin: 0 auto 14px auto;
+                border-radius: 14px;
+                background: #ffffff;
+                box-shadow: 0 12px 28px rgba(2, 6, 23, .20);
             }
             .sidebar-brand-icon {
                 width: 38px;
@@ -7863,11 +7890,24 @@ def aplicar_css_global():
                 font-size: 18px;
                 line-height: 1.1;
                 font-weight: 850;
+                text-align: center;
             }
             .sidebar-brand-subtitle {
                 margin-top: 4px;
                 color: #cbd5e1;
                 font-size: 12px;
+                text-align: center;
+            }
+            .sidebar-dev {
+                margin-top: 12px;
+                padding: 10px 11px;
+                border-radius: 12px;
+                background: rgba(15, 23, 42, .34);
+                border: 1px solid rgba(148, 163, 184, .20);
+                color: #dbeafe;
+                font-size: 12px;
+                line-height: 1.35;
+                text-align: center;
             }
             .param-card {
                 background: rgba(15, 23, 42, .42);
@@ -9964,17 +10004,18 @@ def render_pagina_previsao_financeira():
 aplicar_css_global()
 render_header()
 
+logo_sidebar_uri = imagem_local_para_data_uri(APP_LOGO_PATH)
+logo_sidebar_html = f'<img class="sidebar-brand-logo" src="{logo_sidebar_uri}" alt="?nica e Dauto">' if logo_sidebar_uri else ""
+
 st.sidebar.markdown(
-    """
+    f"""
     <div class="sidebar-brand">
-        <div class="sidebar-brand-icon">
-            <svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M4 19V5"/><path d="M4 19h16"/><rect x="7" y="10" width="3" height="6" rx="1"/><rect x="12" y="6" width="3" height="10" rx="1"/><rect x="17" y="3" width="3" height="13" rx="1"/>
-            </svg>
-        </div>
-        <div>
-            <div class="sidebar-brand-title">Análise de Giro</div>
-            <div class="sidebar-brand-subtitle">Planeje melhor. Compre certo.</div>
+        {logo_sidebar_html}
+        <div class="sidebar-brand-title">An?lise de Giro</div>
+        <div class="sidebar-brand-subtitle">Planeje melhor. Compre certo.</div>
+        <div class="sidebar-dev">
+            Desenvolvido por Samuel Carvalho<br>
+            61 993215052
         </div>
     </div>
     """,
