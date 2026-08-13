@@ -193,6 +193,82 @@ def numero_planilha_para_float(value):
         return 0.0
 
 
+def numero_preco_unitario_para_float(value):
+    """
+    Converte valores de preco unitario preservando centavos.
+
+    Alguns arquivos de fornecedor chegam com preco decimal em formato americano
+    (199.90) e nao podem passar por conversores BR antigos que removem o ponto.
+    """
+    if value is None:
+        return 0.0
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            if pd.isna(value):
+                return 0.0
+            return float(value)
+        except Exception:
+            pass
+
+    txt_original = str(value).strip()
+    if txt_original == "" or txt_original.lower() in ["nan", "none", "-"]:
+        return 0.0
+
+    txt = txt_original.replace("R$", "").replace(" ", "").replace(" ", "").replace("+", "")
+    txt = re.sub(r"[^0-9,\.\-]", "", txt)
+    if not txt or txt in ["-", ".", ","]:
+        return 0.0
+
+    # Quando ha um unico separador e 1 ou 2 casas no fim, ele e decimal:
+    # 199,90 -> 199.90 | 199.90 -> 199.90
+    if re.fullmatch(r"-?\d+[\.,]\d{1,2}", txt):
+        return float(txt.replace(",", "."))
+
+    # Com dois tipos de separador, o ultimo separador e o decimal.
+    if "," in txt and "." in txt:
+        if txt.rfind(",") > txt.rfind("."):
+            txt = txt.replace(".", "").replace(",", ".")
+        else:
+            txt = txt.replace(",", "")
+        try:
+            return float(txt)
+        except Exception:
+            return 0.0
+
+    return numero_planilha_para_float(txt)
+
+
+def corrigir_preco_unitario_por_total(df, col_preco="Valor Unitário", col_qtd="Quantidade", col_total="Valor Total"):
+    """
+    Corrige centavos perdidos em preco unitario usando Valor Total / Quantidade.
+    Ex.: preco lido como 19990, quantidade 1 e total 199.90 -> preco 199.90.
+    """
+    if df is None or df.empty:
+        return df
+    if not all(col in df.columns for col in [col_preco, col_qtd, col_total]):
+        return df
+
+    out = df.copy()
+    preco = pd.to_numeric(out[col_preco], errors="coerce").fillna(0)
+    qtd = pd.to_numeric(out[col_qtd], errors="coerce").fillna(0)
+    total = pd.to_numeric(out[col_total], errors="coerce").fillna(0)
+    esperado = total / qtd.replace(0, pd.NA)
+
+    esperado = pd.to_numeric(esperado, errors="coerce").replace([math.inf, -math.inf], 0).fillna(0)
+
+    mask = (
+        (preco > 0)
+        & (qtd > 0)
+        & (total > 0)
+        & (esperado > 0)
+        & ((preco / 100 - esperado).abs() <= (esperado.abs() * 0.02 + 0.02))
+        & ((preco - esperado).abs() > (esperado.abs() * 5))
+    )
+    out.loc[mask, col_preco] = preco[mask] / 100
+    return out
+
+
 def corrigir_mojibake_texto(texto):
     texto = str(texto or "")
     if not any(marca in texto for marca in ["Ã", "Â", "â", "ðŸ"]):
@@ -4407,9 +4483,10 @@ def padronizar_dataframe_fornecedor_homologado(df):
     out["Código Fábrica"] = df_tmp[col_codigo].astype(str).str.strip()
     out["Descrição"] = df_tmp[col_desc].astype(str).str.strip() if col_desc else out["Código Fábrica"]
     out["Quantidade"] = df_tmp[col_qtd].apply(numero_planilha_para_float)
-    out["Valor Unitário"] = df_tmp[col_preco].apply(numero_planilha_para_float)
+    out["Valor Unitário"] = df_tmp[col_preco].apply(numero_preco_unitario_para_float)
     out["Valor Total"] = df_tmp[col_total].apply(numero_planilha_para_float) if col_total else 0.0
     out["Linha Fornecedor"] = df_tmp.astype(str).agg(" | ".join, axis=1)
+    out = corrigir_preco_unitario_por_total(out, "Valor Unitário", "Quantidade", "Valor Total")
 
     out = out[out["Código Fábrica"].astype(str).str.strip().ne("")]
     out = out[out["Quantidade"] > 0].copy()
@@ -4990,9 +5067,10 @@ def _dataframe_de_tabela_pdf_fornecedor(linhas):
     out["Código Fábrica"] = df[col_codigo].astype(str).str.strip()
     out["Descrição"] = df[col_desc].astype(str).str.strip() if col_desc else out["Código Fábrica"]
     out["Quantidade"] = df[col_qtd].apply(numero_planilha_para_float)
-    out["Valor Unitário"] = df[col_preco].apply(numero_planilha_para_float) if col_preco else 0.0
+    out["Valor Unitário"] = df[col_preco].apply(numero_preco_unitario_para_float) if col_preco else 0.0
     out["Valor Total"] = df[col_total].apply(numero_planilha_para_float) if col_total else 0.0
     out["Linha PDF"] = df.astype(str).agg(" | ".join, axis=1)
+    out = corrigir_preco_unitario_por_total(out, "Valor Unitário", "Quantidade", "Valor Total")
 
     out = out[~out["Código Fábrica"].astype(str).str.upper().str.contains("TOTAL DO PEDIDO|NUMERO DE ITENS|NÚMERO DE ITENS", na=False)]
     out = out[out["Código Fábrica"].astype(str).str.extract(r"([A-Za-z0-9]{3,})", expand=False).notna()]
@@ -6620,8 +6698,9 @@ def normalizar_pedido_comparativo(df, origem, mapa_colunas=None):
     out["codigo_fabrica_norm"] = out["codigo_fabrica"].apply(normalizar_codigo_fabrica)
     out["descricao"] = df[col_descricao].astype(str).str.strip() if col_descricao else out["codigo_fabrica"]
     out["quantidade"] = df[col_qtd].apply(numero_planilha_para_float)
-    out["preco_unitario"] = df[col_preco].apply(numero_planilha_para_float) if col_preco else 0.0
+    out["preco_unitario"] = df[col_preco].apply(numero_preco_unitario_para_float) if col_preco else 0.0
     out["valor_total"] = df[col_total].apply(numero_planilha_para_float) if col_total else 0.0
+    out = corrigir_preco_unitario_por_total(out, "preco_unitario", "quantidade", "valor_total")
     out.loc[(out["valor_total"] <= 0) & (out["preco_unitario"] > 0), "valor_total"] = out["quantidade"] * out["preco_unitario"]
     out.loc[(out["preco_unitario"] <= 0) & (out["valor_total"] > 0) & (out["quantidade"] > 0), "preco_unitario"] = out["valor_total"] / out["quantidade"]
     out["descricao_chave"] = out["descricao"].apply(normalizar_descricao_chave)
