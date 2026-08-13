@@ -74,7 +74,7 @@ if Image is not None and APP_LOGO_PATH.exists():
     except Exception:
         APP_FAVICON = "??"
 
-st.set_page_config(page_title="An?lise de Giro e Pedido de Compra", layout="wide", page_icon=APP_FAVICON)
+st.set_page_config(page_title="Analise de Giro e Pedido de Compra", layout="wide", page_icon=APP_FAVICON)
 
 # =========================================================
 # CONFIGURAÇÕES DO NEGÓCIO
@@ -7891,10 +7891,11 @@ def aplicar_css_global():
             }
             .sidebar-brand-title {
                 color: #ffffff;
-                font-size: 18px;
+                font-size: 17px;
                 line-height: 1.1;
                 font-weight: 850;
                 text-align: center;
+                letter-spacing: 0;
             }
             .sidebar-brand-subtitle {
                 margin-top: 4px;
@@ -10014,7 +10015,7 @@ if APP_LOGO_PATH.exists():
 st.sidebar.markdown(
     """
     <div class="sidebar-brand">
-        <div class="sidebar-brand-title">An?lise de Giro</div>
+        <div class="sidebar-brand-title">Analise de Giro</div>
         <div class="sidebar-brand-subtitle">Planeje melhor. Compre certo.</div>
         <div class="sidebar-dev">
             Desenvolvido por Samuel Carvalho<br>
