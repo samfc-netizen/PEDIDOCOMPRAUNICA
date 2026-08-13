@@ -62,15 +62,19 @@ except Exception:
     MediaIoBaseUpload = None
 
 APP_DIR = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
-APP_LOGO_PATH = APP_DIR / "assets" / "logos_dauto_unica.png"
-APP_FAVICON = "📊"
+APP_LOGO_CANDIDATES = [
+    APP_DIR / "assets" / "logos_dauto_unica.png",
+    APP_DIR / "logos_dauto_unica.png",
+]
+APP_LOGO_PATH = next((p for p in APP_LOGO_CANDIDATES if p.exists()), APP_LOGO_CANDIDATES[0])
+APP_FAVICON = "??"
 if Image is not None and APP_LOGO_PATH.exists():
     try:
         APP_FAVICON = Image.open(APP_LOGO_PATH)
     except Exception:
-        APP_FAVICON = "📊"
+        APP_FAVICON = "??"
 
-st.set_page_config(page_title="Análise de Giro e Pedido de Compra", layout="wide", page_icon=APP_FAVICON)
+st.set_page_config(page_title="An?lise de Giro e Pedido de Compra", layout="wide", page_icon=APP_FAVICON)
 
 # =========================================================
 # CONFIGURAÇÕES DO NEGÓCIO
@@ -10004,13 +10008,12 @@ def render_pagina_previsao_financeira():
 aplicar_css_global()
 render_header()
 
-logo_sidebar_uri = imagem_local_para_data_uri(APP_LOGO_PATH)
-logo_sidebar_html = f'<img class="sidebar-brand-logo" src="{logo_sidebar_uri}" alt="?nica e Dauto">' if logo_sidebar_uri else ""
+if APP_LOGO_PATH.exists():
+    st.sidebar.image(str(APP_LOGO_PATH), use_container_width=True)
 
 st.sidebar.markdown(
-    f"""
+    """
     <div class="sidebar-brand">
-        {logo_sidebar_html}
         <div class="sidebar-brand-title">An?lise de Giro</div>
         <div class="sidebar-brand-subtitle">Planeje melhor. Compre certo.</div>
         <div class="sidebar-dev">
