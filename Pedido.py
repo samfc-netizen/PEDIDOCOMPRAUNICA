@@ -5701,11 +5701,31 @@ def extrair_itens_pdf_atlas(uploaded_file):
                                 return col_idx
                         return None
 
-                    idx_codigo = idx_col("ITEM")
+                    def idx_col_exato(*opcoes):
+                        opcoes_norm = {_normalizar_nome_coluna_flex(op) for op in opcoes}
+                        for col_idx, nome in enumerate(header_norm):
+                            if nome in opcoes_norm:
+                                return col_idx
+                        return None
+
+                    def qtd_atlas(valor):
+                        txt = str(valor or "").strip()
+                        if "/" in txt:
+                            partes_qtd = [p.strip() for p in txt.split("/") if str(p).strip()]
+                            if partes_qtd:
+                                return numero_planilha_para_float(partes_qtd[-1])
+                        return numero_planilha_para_float(txt)
+
+                    layout_sap = any("QTD SALDO" in nome for nome in header_norm)
+                    idx_codigo = idx_col_exato("Produto") if layout_sap else idx_col_exato("Item")
+                    if idx_codigo is None:
+                        idx_codigo = idx_col("PRODUTO") if layout_sap else idx_col("ITEM")
                     idx_desc = idx_col("DESCRICAO")
-                    idx_qtd = idx_col("QTDE")
+                    idx_qtd = idx_col("QTD", "SALDO") if layout_sap else idx_col_exato("QTDE")
+                    if idx_qtd is None:
+                        idx_qtd = idx_col("QTDE")
                     idx_preco = idx_col("PRECO", "LIQ")
-                    idx_total = idx_col("TOTAL", "IMPOSTO")
+                    idx_total = idx_col("PRECO", "TOTAL") if layout_sap else idx_col("TOTAL", "IMPOSTO")
                     if idx_codigo is None or idx_qtd is None or idx_preco is None:
                         continue
 
@@ -5714,8 +5734,8 @@ def extrair_itens_pdf_atlas(uploaded_file):
                             continue
                         codigo = re.sub(r"\s+", " ", row[idx_codigo]).strip()
                         descricao = re.sub(r"\s+", " ", row[idx_desc]).strip() if idx_desc is not None and idx_desc < len(row) else codigo
-                        qtd = numero_planilha_para_float(row[idx_qtd])
-                        preco = numero_planilha_para_float(row[idx_preco])
+                        qtd = qtd_atlas(row[idx_qtd])
+                        preco = numero_preco_unitario_para_float(row[idx_preco])
                         total = numero_planilha_para_float(row[idx_total]) if idx_total is not None and idx_total < len(row) else 0.0
 
                         if not codigo or qtd <= 0 or preco <= 0:
