@@ -4478,7 +4478,13 @@ def extrair_itens_por_codigos_em_textos(textos, codigos_referencia=None, origem_
                 "Linha PDF": linha,
             })
 
-    return pd.DataFrame(registros)
+    df_atlas = pd.DataFrame(registros)
+    if not df_atlas.empty:
+        df_atlas = df_atlas.drop_duplicates(
+            subset=["Código Fábrica", "Quantidade", "Valor Unitário", "Valor Total"],
+            keep="first",
+        ).reset_index(drop=True)
+    return df_atlas
 
 
 def _celula_parece_numero_planilha(valor):
@@ -5671,12 +5677,13 @@ def extrair_itens_pdf_atlas(uploaded_file):
 
     registros = []
     vistos = set()
+    ultimo_header_norm = None
 
     try:
         with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
             for page in pdf.pages:
                 for tabela in (page.extract_tables() or []):
-                    if not tabela or len(tabela) < 2:
+                    if not tabela:
                         continue
 
                     linhas = [[str(c or "").strip() for c in (linha or [])] for linha in tabela]
@@ -5688,12 +5695,20 @@ def extrair_itens_pdf_atlas(uploaded_file):
                     for idx, linha in enumerate(linhas[:8]):
                         nomes = [_normalizar_nome_coluna_flex(c) for c in linha]
                         joined = " ".join(nomes)
-                        if "ITEM" in joined and "QTDE" in joined and "PRECO" in joined and "LIQ" in joined:
+                        if "ITEM" in joined and ("QTDE" in joined or "QTD" in joined) and "PRECO" in joined and "LIQ" in joined:
                             header_idx = idx
                             header_norm = nomes
                             break
                     if header_idx is None:
-                        continue
+                        if not ultimo_header_norm:
+                            continue
+                        header_norm = list(ultimo_header_norm)
+                        header_idx = -1
+                    else:
+                        ultimo_header_norm = list(header_norm)
+
+                    if len(header_norm) < max_cols:
+                        header_norm = header_norm + [""] * (max_cols - len(header_norm))
 
                     def idx_col(*partes):
                         for col_idx, nome in enumerate(header_norm):
@@ -5760,7 +5775,12 @@ def extrair_itens_pdf_atlas(uploaded_file):
     except Exception:
         return pd.DataFrame()
 
-    return pd.DataFrame(registros)
+    df_atlas = pd.DataFrame(registros)
+    if not df_atlas.empty:
+        colunas_dedupe = [c for c in ["Código Fábrica", "Quantidade", "Valor Unitário", "Valor Total"] if c in df_atlas.columns]
+        if colunas_dedupe:
+            df_atlas = df_atlas.drop_duplicates(subset=colunas_dedupe, keep="first").reset_index(drop=True)
+    return df_atlas
 
 
 def extrair_itens_pdf_adere(uploaded_file):
@@ -6634,6 +6654,15 @@ def ler_multiplos_arquivos_comparativo(arquivos, codigos_referencia=None, modelo
 
     # sort=False mantém a ordem original e permite unir arquivos com colunas extras.
     consolidado = pd.concat(frames, ignore_index=True, sort=False)
+    colunas_dedupe = [
+        col for col in [
+            "Arquivo de origem", "Código Fábrica", "Descrição",
+            "Quantidade", "Valor Unitário", "Valor Total",
+        ]
+        if col in consolidado.columns
+    ]
+    if colunas_dedupe:
+        consolidado = consolidado.drop_duplicates(subset=colunas_dedupe, keep="first").reset_index(drop=True)
     return consolidado, arquivos_lidos, erros
 
 
