@@ -5724,7 +5724,9 @@ def extrair_itens_pdf_atlas(uploaded_file):
                     idx_qtd = idx_col("QTD", "SALDO") if layout_sap else idx_col_exato("QTDE")
                     if idx_qtd is None:
                         idx_qtd = idx_col("QTDE")
-                    idx_preco = idx_col("PRECO", "LIQ")
+                    idx_preco = idx_col("PRECO", "NEGOCIADO") if layout_sap else idx_col("PRECO", "LIQ")
+                    if idx_preco is None:
+                        idx_preco = idx_col("PRECO", "LIQ")
                     idx_total = idx_col("PRECO", "TOTAL") if layout_sap else idx_col("TOTAL", "IMPOSTO")
                     if idx_codigo is None or idx_qtd is None or idx_preco is None:
                         continue
