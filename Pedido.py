@@ -1570,6 +1570,41 @@ def arredondar_para_embalagem(sugestao, embalagem):
             return 0
 
 
+def converter_saldo_aberto_3m_para_unidades(
+    df,
+    coluna_saldo="Saldo em Trânsito/ABERTO",
+    coluna_codigo_fabrica="Código Fábrica",
+    coluna_descricao="descricao",
+):
+    """
+    Converte o saldo em aberto da 3M, recebido em embalagens, para unidades.
+
+    Usa exatamente a mesma identificação aplicada na exportação Autcom 3M,
+    mas no sentido inverso. Ex.: saldo 20 e fator 50 => 1.000 unidades.
+    Os demais itens permanecem inalterados.
+    """
+    if df is None or df.empty or coluna_saldo not in df.columns:
+        return df
+
+    resultado = df.copy()
+    resultado[coluna_saldo] = pd.to_numeric(
+        resultado[coluna_saldo], errors="coerce"
+    ).fillna(0)
+
+    def converter_linha(row):
+        saldo = float(row.get(coluna_saldo, 0) or 0)
+        if saldo == 0:
+            return 0.0
+        fator = fator_conversao_quantidade_3m(
+            row.get(coluna_codigo_fabrica, ""),
+            row.get(coluna_descricao, ""),
+        )
+        return saldo * float(fator or 1)
+
+    resultado[coluna_saldo] = resultado.apply(converter_linha, axis=1)
+    return resultado
+
+
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=6)
 def montar_tabela_consolidada(
     df_giro,
@@ -1686,6 +1721,7 @@ def montar_tabela_consolidada(
     else:
         resumo["Saldo em Trânsito/ABERTO"] = 0
 
+    resumo = converter_saldo_aberto_3m_para_unidades(resumo)
     resumo["Saldo em Trânsito/ABERTO"] = pd.to_numeric(resumo["Saldo em Trânsito/ABERTO"], errors="coerce").fillna(0)
     resumo["Estoque Final"] = resumo["Estoque Atual Geral"] + resumo["Saldo em Trânsito/ABERTO"]
     resumo["Alerta Estoque"] = resumo.apply(
@@ -8364,6 +8400,10 @@ def montar_analise_ruptura_por_marca(df_ruptura, meses_ref, df_aberto_ruptura=No
         itens["Saldo em Trânsito/ABERTO"] = 0
 
     dias_estoque_pedido = max(int(dias_estoque_pedido or 30), 1)
+    itens = converter_saldo_aberto_3m_para_unidades(
+        itens,
+        coluna_codigo_fabrica="marca_codigo",
+    )
     itens["Saldo em Trânsito/ABERTO"] = pd.to_numeric(itens["Saldo em Trânsito/ABERTO"], errors="coerce").fillna(0).round(2)
     itens["Estoque Considerado"] = (itens["Estoque Geral"] + itens["Saldo em Trânsito/ABERTO"]).round(2)
     itens["Dias Estoque Pedido"] = dias_estoque_pedido
