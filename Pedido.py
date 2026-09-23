@@ -5626,8 +5626,12 @@ def extrair_itens_pdf_norton(uploaded_file):
     Parser para pre-pedido Norton.
 
     Layout textual observado:
-    item codigo quantidade pecas BRL preco_unitario BRL total
-    A descricao costuma vir na linha anterior ao item.
+    item codigo descricao quantidade_caixas quantidade_pecas BRL preco_por_peca
+
+    Regras do modelo:
+    - Quantidade = coluna "Quantidade de Peças" (150.00 deve virar 150);
+    - Valor Unitário = primeiro BRL, coluna "Preço por Peça";
+    - a descrição pode estar na própria linha ou quebrada antes/depois dela.
     """
     if uploaded_file is None:
         return pd.DataFrame()
@@ -5643,15 +5647,39 @@ def extrair_itens_pdf_norton(uploaded_file):
 
     linhas = [re.sub(r"\s+", " ", str(l or "")).strip() for l in str(texto or "").splitlines()]
     linhas = [l for l in linhas if l]
+    # Não exige Preço Unitário e Preço Total na mesma linha. O extrator do PDF
+    # Norton frequentemente joga essas duas colunas para a linha seguinte.
     padrao_item = re.compile(
         r"^\s*(?P<item>\d{1,4})\s+"
         r"(?P<codigo>\d{6,18})\s+"
-        r"(?P<qtd>\d+(?:[\.,]\d+)?)\s+"
-        r"(?P<pecas>\d{1,3}(?:\.\d{3})*(?:,\d+)?|\d+(?:[\.,]\d+)?)\s+"
-        r"BRL\s+(?P<preco>\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})\s+"
-        r"BRL\s+(?P<total>\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})\s*$",
+        r"(?P<descricao>.*?)\s*"
+        r"(?P<qtd_caixas>\d+(?:[\.,]\d+)?)\s+"
+        r"(?P<pecas>\d+(?:[\.,]\d+)?)\s+"
+        r"BRL\s+(?P<preco>\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})(?:\s|$)",
         flags=re.IGNORECASE,
     )
+
+    def limpar_trecho_descricao(valor):
+        trecho = re.sub(r"\s+", " ", str(valor or "")).strip()
+        trecho = re.sub(r"\s+BRL(?:\s|$).*", "", trecho, flags=re.IGNORECASE).strip()
+        trecho = re.sub(
+            r"\s+\d{1,3}(?:\.\d{3})*,\d{2}(?:\s+\d{1,3}(?:\.\d{3})*,\d{2})*\s*$",
+            "",
+            trecho,
+        ).strip()
+        return trecho
+
+    def eh_trecho_descricao(valor):
+        trecho = limpar_trecho_descricao(valor)
+        if not trecho or not re.search(r"[A-Za-zÁÉÍÓÚÃÕÇáéíóúãõç]{2,}", trecho):
+            return False
+        trecho_norm = _texto_sem_acentos(trecho).upper()
+        bloqueios = [
+            "CODIGO DO", "ITEM DESCRICAO", "PRECO", "QUANTIDADE",
+            "PRODUTO PECAS", "UNITARIO TOTAL", "FRETE", "ICMS", "PIS",
+            "COFINS", "CUSTO FINANC", "ST INCIDENTE", "VALOR TOTAL BRUTO",
+        ]
+        return not any(b in trecho_norm for b in bloqueios)
 
     registros = []
     vistos = set()
@@ -5661,20 +5689,21 @@ def extrair_itens_pdf_norton(uploaded_file):
             continue
 
         codigo = m.group("codigo").strip()
+        # Neste PDF o ponto é separador decimal: 150.00 = 150 peças.
         qtd = numero_planilha_para_float(m.group("pecas"))
         preco = numero_planilha_para_float(m.group("preco"))
-        total = numero_planilha_para_float(m.group("total"))
         if not codigo or qtd <= 0 or preco <= 0:
             continue
 
-        desc_partes = []
-        for j in range(max(0, idx - 3), idx):
-            cand = linhas[j]
-            cand_norm = _texto_sem_acentos(cand).upper()
-            if any(b in cand_norm for b in ["CODIGO DO", "ITEM DESCRICAO", "PRECO", "QUANTIDADE", "PRODUTO PECAS", "UNITARIO TOTAL"]):
-                continue
-            if re.search(r"[A-Za-zÁÉÍÓÚÃÕÇáéíóúãõç]{4,}", cand):
-                desc_partes.append(cand)
+        descricao_linha = limpar_trecho_descricao(m.group("descricao"))
+        desc_partes = [descricao_linha] if eh_trecho_descricao(descricao_linha) else []
+
+        # Quando a descrição não veio junto da linha numérica, procura somente
+        # nas linhas imediatamente vizinhas para não capturar impostos do item anterior.
+        if not desc_partes:
+            for j in [idx - 1, idx + 1]:
+                if 0 <= j < len(linhas) and eh_trecho_descricao(linhas[j]):
+                    desc_partes.append(limpar_trecho_descricao(linhas[j]))
         descricao = " ".join(desc_partes).strip() or codigo
 
         chave = (normalizar_codigo_fabrica(codigo), round(qtd, 6), round(preco, 6))
@@ -5686,7 +5715,7 @@ def extrair_itens_pdf_norton(uploaded_file):
             "Descrição": descricao,
             "Quantidade": qtd,
             "Valor Unitário": preco,
-            "Valor Total": total if total > 0 else qtd * preco,
+            "Valor Total": qtd * preco,
             "Linha PDF": linha,
         })
 
