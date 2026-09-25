@@ -3180,6 +3180,37 @@ def quantidade_preco_autcom_norton(quantidade=0, preco=0, embalagem=0):
     return qtd_pacotes, preco_unidade * fator
 
 
+def mapa_embalagens_cadastro_google():
+    """Retorna {codigo interno: embalagem} usando a aba pública Cadastro."""
+    try:
+        cadastro = ler_cadastro_produtos_google()
+    except Exception:
+        return {}
+    if cadastro is None or cadastro.empty or "codigo" not in cadastro.columns:
+        return {}
+
+    base = cadastro.copy()
+    base["codigo"] = base["codigo"].astype(str).str.extract(r"(\d+)", expand=False).fillna("")
+    base = base[base["codigo"] != ""].copy()
+    base["codigo"] = base["codigo"].str.zfill(5)
+    base["embalagem"] = pd.to_numeric(
+        base.get("embalagem", 0), errors="coerce"
+    ).fillna(0).round(0).astype(int)
+    base = base[base["embalagem"] > 1]
+    return base.drop_duplicates("codigo", keep="last").set_index("codigo")["embalagem"].to_dict()
+
+
+def embalagem_norton_do_item(codigo, embalagem_planilha=0, mapa_cadastro=None):
+    """Prioriza a embalagem da planilha e completa pelo Cadastro quando ausente."""
+    embalagem = int(round(numero_planilha_para_float(embalagem_planilha)))
+    if embalagem > 1:
+        return embalagem
+
+    codigo_norm = re.sub(r"\D+", "", str(codigo or "")).zfill(5)
+    mapa_cadastro = mapa_cadastro or {}
+    return int(round(numero_planilha_para_float(mapa_cadastro.get(codigo_norm, 0))))
+
+
 def gerar_excel_pedido(df_pedido, modelo_autcom=None):
     """
     Excel para importação no Autcom, sem cabeçalho:
@@ -3194,22 +3225,30 @@ def gerar_excel_pedido(df_pedido, modelo_autcom=None):
     ws = wb.active
     ws.title = "Pedido"
 
+    modelo_codigo = _modelo_fornecedor_codigo(modelo_autcom)
+    mapa_embalagens = mapa_embalagens_cadastro_google() if modelo_codigo == "norton" else {}
+
     linha_excel = 1
     for _, row in df_pedido.iterrows():
         qtd = int(round(float(row.get("PEDIDO Final", 0) or 0)))
         preco = float(str(row.get("Preço Última Compra", 0)).replace(",", "." ) or 0)
-        if _modelo_fornecedor_codigo(modelo_autcom) == "3m":
+        if modelo_codigo == "3m":
             qtd, preco = quantidade_preco_autcom_3m(
                 row.get("codigo", ""),
                 row.get("descricao", ""),
                 qtd,
                 preco,
             )
-        elif _modelo_fornecedor_codigo(modelo_autcom) == "norton":
+        elif modelo_codigo == "norton":
+            embalagem = embalagem_norton_do_item(
+                row.get("codigo", ""),
+                row.get("Embalagem", 0),
+                mapa_embalagens,
+            )
             qtd, preco = quantidade_preco_autcom_norton(
                 qtd,
                 preco,
-                row.get("Embalagem", 0),
+                embalagem,
             )
         if qtd <= 0:
             continue
@@ -3808,6 +3847,9 @@ def gerar_excel_autcom_tratamento(df_tratamento, modelo_autcom=None):
     ws = wb.active
     ws.title = "Pedido"
 
+    modelo_codigo = _modelo_fornecedor_codigo(modelo_autcom)
+    mapa_embalagens = mapa_embalagens_cadastro_google() if modelo_codigo == "norton" else {}
+
     linha_excel = 1
     for _, row in df.iterrows():
         codigo_raw = str(row.get(col_codigo, "")).strip()
@@ -3821,18 +3863,23 @@ def gerar_excel_autcom_tratamento(df_tratamento, modelo_autcom=None):
             qtd = int(round(float(qtd)))
         except Exception:
             qtd = 0
-        if _modelo_fornecedor_codigo(modelo_autcom) == "3m":
+        if modelo_codigo == "3m":
             qtd, preco = quantidade_preco_autcom_3m(
                 codigo,
                 row.get(col_descricao, "") if col_descricao else "",
                 qtd,
                 preco,
             )
-        elif _modelo_fornecedor_codigo(modelo_autcom) == "norton":
+        elif modelo_codigo == "norton":
+            embalagem = embalagem_norton_do_item(
+                codigo,
+                row.get(col_embalagem, 0) if col_embalagem else 0,
+                mapa_embalagens,
+            )
             qtd, preco = quantidade_preco_autcom_norton(
                 qtd,
                 preco,
-                row.get(col_embalagem, 0) if col_embalagem else 0,
+                embalagem,
             )
 
         if not codigo or qtd <= 0:
