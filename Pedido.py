@@ -1570,18 +1570,20 @@ def arredondar_para_embalagem(sugestao, embalagem):
             return 0
 
 
-def converter_saldo_aberto_3m_para_unidades(
+def converter_saldo_aberto_para_unidades(
     df,
     coluna_saldo="Saldo em Trânsito/ABERTO",
+    coluna_embalagem="Embalagem",
     coluna_codigo_fabrica="Código Fábrica",
     coluna_descricao="descricao",
 ):
     """
-    Converte o saldo em aberto da 3M, recebido em embalagens, para unidades.
+    Converte o saldo em aberto, recebido em caixas/pacotes, para unidades.
 
-    Usa exatamente a mesma identificação aplicada na exportação Autcom 3M,
-    mas no sentido inverso. Ex.: saldo 20 e fator 50 => 1.000 unidades.
-    Os demais itens permanecem inalterados.
+    Prioriza a embalagem cadastrada no produto. Se não houver cadastro, mantém
+    a compatibilidade com a regra especial 3M. Exemplos:
+    - Norton: saldo 2 e embalagem 102 => 204 unidades;
+    - sem embalagem/regra especial: saldo 2 => 2 unidades.
     """
     if df is None or df.empty or coluna_saldo not in df.columns:
         return df
@@ -1595,10 +1597,14 @@ def converter_saldo_aberto_3m_para_unidades(
         saldo = float(row.get(coluna_saldo, 0) or 0)
         if saldo == 0:
             return 0.0
-        fator = fator_conversao_quantidade_3m(
-            row.get(coluna_codigo_fabrica, ""),
-            row.get(coluna_descricao, ""),
-        )
+        embalagem = numero_planilha_para_float(row.get(coluna_embalagem, 0))
+        if embalagem > 1:
+            fator = embalagem
+        else:
+            fator = fator_conversao_quantidade_3m(
+                row.get(coluna_codigo_fabrica, ""),
+                row.get(coluna_descricao, ""),
+            )
         return saldo * float(fator or 1)
 
     resultado[coluna_saldo] = resultado.apply(converter_linha, axis=1)
@@ -1721,7 +1727,7 @@ def montar_tabela_consolidada(
     else:
         resumo["Saldo em Trânsito/ABERTO"] = 0
 
-    resumo = converter_saldo_aberto_3m_para_unidades(resumo)
+    resumo = converter_saldo_aberto_para_unidades(resumo)
     resumo["Saldo em Trânsito/ABERTO"] = pd.to_numeric(resumo["Saldo em Trânsito/ABERTO"], errors="coerce").fillna(0)
     resumo["Estoque Final"] = resumo["Estoque Atual Geral"] + resumo["Saldo em Trânsito/ABERTO"]
     resumo["Alerta Estoque"] = resumo.apply(
@@ -3153,6 +3159,27 @@ def quantidade_preco_autcom_3m(codigo="", descricao="", quantidade=0, preco=0):
     return int(round(qtd / fator)), preco * fator
 
 
+def quantidade_preco_autcom_norton(quantidade=0, preco=0, embalagem=0):
+    """
+    Converte o pedido Norton de unidades para caixas/pacotes no Excel Autcom.
+
+    Ex.: 102 unidades, embalagem 102 e preço unitário R$ 2,00 resultam em
+    1 caixa e preço de R$ 204,00. Sem embalagem cadastrada, mantém unidades.
+    Se a quantidade não for múltipla, sobe para o próximo pacote fechado.
+    """
+    qtd_unidades = int(round(numero_planilha_para_float(quantidade)))
+    preco_unidade = numero_planilha_para_float(preco)
+    fator = int(round(numero_planilha_para_float(embalagem)))
+
+    if qtd_unidades <= 0:
+        return 0, preco_unidade
+    if fator <= 1:
+        return qtd_unidades, preco_unidade
+
+    qtd_pacotes = int(math.ceil(qtd_unidades / fator))
+    return qtd_pacotes, preco_unidade * fator
+
+
 def gerar_excel_pedido(df_pedido, modelo_autcom=None):
     """
     Excel para importação no Autcom, sem cabeçalho:
@@ -3177,6 +3204,12 @@ def gerar_excel_pedido(df_pedido, modelo_autcom=None):
                 row.get("descricao", ""),
                 qtd,
                 preco,
+            )
+        elif _modelo_fornecedor_codigo(modelo_autcom) == "norton":
+            qtd, preco = quantidade_preco_autcom_norton(
+                qtd,
+                preco,
+                row.get("Embalagem", 0),
             )
         if qtd <= 0:
             continue
@@ -3758,6 +3791,7 @@ def gerar_excel_autcom_tratamento(df_tratamento, modelo_autcom=None):
     col_descricao = colunas_norm.get("DESCRICAO") or colunas_norm.get("DESCRICAO DO ITEM")
     col_qtd = colunas_norm.get("PEDIDO FINAL")
     col_preco = colunas_norm.get("PRECO ULTIMA COMPRA")
+    col_embalagem = colunas_norm.get("EMBALAGEM")
 
     faltantes = []
     if not col_codigo:
@@ -3793,6 +3827,12 @@ def gerar_excel_autcom_tratamento(df_tratamento, modelo_autcom=None):
                 row.get(col_descricao, "") if col_descricao else "",
                 qtd,
                 preco,
+            )
+        elif _modelo_fornecedor_codigo(modelo_autcom) == "norton":
+            qtd, preco = quantidade_preco_autcom_norton(
+                qtd,
+                preco,
+                row.get(col_embalagem, 0) if col_embalagem else 0,
             )
 
         if not codigo or qtd <= 0:
@@ -8402,6 +8442,7 @@ def montar_analise_ruptura_por_marca(df_ruptura, meses_ref, df_aberto_ruptura=No
     for mes in meses_ref:
         df[mes] = pd.to_numeric(df.get(mes, 0), errors="coerce").fillna(0)
     df["estoque"] = pd.to_numeric(df.get("estoque", 0), errors="coerce").fillna(0)
+    df["embalagem"] = pd.to_numeric(df.get("embalagem", 0), errors="coerce").fillna(0)
     df["codigo"] = df["codigo"].astype(str).str.extract(r"(\d+)")[0].fillna("").str.zfill(5)
     df["marca"] = df.get("marca", "SEM MARCA").astype(str).str.strip().replace("", "SEM MARCA")
     df["descricao"] = df.get("descricao", "").astype(str).str.strip()
@@ -8409,6 +8450,7 @@ def montar_analise_ruptura_por_marca(df_ruptura, meses_ref, df_aberto_ruptura=No
     agg_dict = {mes: "sum" for mes in meses_ref}
     agg_dict.update({
         "estoque": "sum",
+        "embalagem": "first",
         "marca_codigo": "first",
         "unidade": "first",
     })
@@ -8429,8 +8471,9 @@ def montar_analise_ruptura_por_marca(df_ruptura, meses_ref, df_aberto_ruptura=No
         itens["Saldo em Trânsito/ABERTO"] = 0
 
     dias_estoque_pedido = max(int(dias_estoque_pedido or 30), 1)
-    itens = converter_saldo_aberto_3m_para_unidades(
+    itens = converter_saldo_aberto_para_unidades(
         itens,
+        coluna_embalagem="embalagem",
         coluna_codigo_fabrica="marca_codigo",
     )
     itens["Saldo em Trânsito/ABERTO"] = pd.to_numeric(itens["Saldo em Trânsito/ABERTO"], errors="coerce").fillna(0).round(2)
@@ -10280,10 +10323,10 @@ if pagina == "Tratamento Final":
 
         modelo_autcom_tratamento = st.selectbox(
             "Regra especial para exportação Autcom",
-            ["Nenhuma", "3M"],
+            ["Nenhuma", "3M", "Norton"],
             index=0,
             key="modelo_autcom_tratamento",
-            help="Use 3M somente quando o arquivo Autcom precisa converter lixas para múltiplos de 50. As demais exportações não são alteradas.",
+            help="3M usa os fatores especiais cadastrados no sistema. Norton divide as unidades pela Embalagem cadastrada e ajusta o preço para caixa/pacote.",
         )
         excel_tratamento = gerar_excel_autcom_tratamento(df_tratamento, modelo_autcom=modelo_autcom_tratamento)
         col_dl_autcom, col_dl_fornecedor = st.columns(2)
@@ -10441,10 +10484,10 @@ if False and pagina == "Tratamento Final":
 
         modelo_autcom_tratamento = st.selectbox(
             "Regra especial para exportação Autcom",
-            ["Nenhuma", "3M"],
+            ["Nenhuma", "3M", "Norton"],
             index=0,
             key="modelo_autcom_tratamento",
-            help="Use 3M somente quando o arquivo Autcom precisa converter lixas para múltiplos de 50. As demais exportações não são alteradas.",
+            help="3M usa os fatores especiais cadastrados no sistema. Norton divide as unidades pela Embalagem cadastrada e ajusta o preço para caixa/pacote.",
         )
         excel_tratamento = gerar_excel_autcom_tratamento(df_tratamento, modelo_autcom=modelo_autcom_tratamento)
         col_dl_autcom, col_dl_fornecedor = st.columns(2)
@@ -10852,10 +10895,10 @@ elif pagina == "Exportações":
         render_download_card("Excel Autcom", "Arquivo sem cabeçalho: coluna B = código, F = quantidade, H = preço.")
         modelo_autcom_exportacao = st.selectbox(
             "Regra especial para exportação Autcom",
-            ["Nenhuma", "3M"],
+            ["Nenhuma", "3M", "Norton"],
             index=0,
             key="modelo_autcom_exportacao",
-            help="Use 3M somente quando o arquivo Autcom precisa converter lixas para múltiplos de 50. As demais exportações não são alteradas.",
+            help="3M usa os fatores especiais cadastrados no sistema. Norton divide as unidades pela Embalagem cadastrada e ajusta o preço para caixa/pacote.",
         )
         try:
             excel_bytes = gerar_excel_pedido(pedido_final, modelo_autcom=modelo_autcom_exportacao)
