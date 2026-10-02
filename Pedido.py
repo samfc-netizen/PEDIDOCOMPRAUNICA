@@ -1580,10 +1580,14 @@ def converter_saldo_aberto_para_unidades(
     """
     Converte o saldo em aberto, recebido em caixas/pacotes, para unidades.
 
-    Prioriza a embalagem cadastrada no produto. Se não houver cadastro, mantém
-    a compatibilidade com a regra especial 3M. Exemplos:
+    Para a 3M, usa exclusivamente os mesmos itens e fatores da exportação
+    Autcom 3M. A simples existência de embalagem no cadastro não ativa a regra.
+    Para Norton, identificado na descrição, usa a embalagem cadastrada.
+
+    Exemplos:
+    - item 3M da regra, saldo 20 e fator 50 => 1.000 unidades;
     - Norton: saldo 2 e embalagem 102 => 204 unidades;
-    - sem embalagem/regra especial: saldo 2 => 2 unidades.
+    - qualquer outro produto, mesmo com embalagem, saldo 2 => 2 unidades.
     """
     if df is None or df.empty or coluna_saldo not in df.columns:
         return df
@@ -1597,15 +1601,22 @@ def converter_saldo_aberto_para_unidades(
         saldo = float(row.get(coluna_saldo, 0) or 0)
         if saldo == 0:
             return 0.0
+
+        codigo_fabrica = row.get(coluna_codigo_fabrica, "")
+        descricao = row.get(coluna_descricao, "")
+        fator_3m = fator_conversao_quantidade_3m(codigo_fabrica, descricao)
+
+        # Mesma seleção da exportação 3M: códigos listados, lixas 3M elegíveis
+        # e o kit respirador específico. A embalagem genérica não interfere.
+        if fator_3m > 1:
+            return saldo * float(fator_3m)
+
+        descricao_norm = normalizar_descricao_chave(descricao)
         embalagem = numero_planilha_para_float(row.get(coluna_embalagem, 0))
-        if embalagem > 1:
-            fator = embalagem
-        else:
-            fator = fator_conversao_quantidade_3m(
-                row.get(coluna_codigo_fabrica, ""),
-                row.get(coluna_descricao, ""),
-            )
-        return saldo * float(fator or 1)
+        if "NORTON" in descricao_norm and embalagem > 1:
+            return saldo * float(embalagem)
+
+        return saldo
 
     resultado[coluna_saldo] = resultado.apply(converter_linha, axis=1)
     return resultado
