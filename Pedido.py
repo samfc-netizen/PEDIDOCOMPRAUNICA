@@ -1189,7 +1189,8 @@ def ler_cadastro_produtos_csv(uploaded_file):
         candidatos_fabrica = [
             "CÓD. FÁBRICA", "COD. FÁBRICA", "CÓD. FABRICA", "COD. FABRICA",
             "CÓDIGO DE FÁBRICA", "CODIGO DE FABRICA", "NOVO CÓDIGO DE FÁBRICA",
-            "NOVO CODIGO DE FABRICA", "COD FABRICA", "CÓD FABRICA",
+            "NOVO CODIGO DE FABRICA", "NOVO CÓDIGO", "NOVO CODIGO",
+            "NOVO CÓD.", "NOVO COD.", "COD FABRICA", "CÓD FABRICA",
             "CÓDIGO FÁBRICA", "CODIGO FABRICA", "CODIGO_FABRICA", "codigo_fabrica",
         ]
 
@@ -1318,7 +1319,8 @@ def normalizar_cadastro_produtos_df(df):
         col_fabrica_local = encontrar_local([
             "COD. FÁBRICA", "CÓD. FÁBRICA", "COD. FABRICA", "CÓD. FABRICA",
             "CODIGO DE FABRICA", "CÓDIGO DE FÁBRICA", "NOVO CODIGO DE FABRICA",
-            "NOVO CÓDIGO DE FÁBRICA", "COD FABRICA", "CÓD FABRICA",
+            "NOVO CÓDIGO DE FÁBRICA", "NOVO CÓDIGO", "NOVO CODIGO",
+            "NOVO CÓD.", "NOVO COD.", "COD FABRICA", "CÓD FABRICA",
             "CODIGO FABRICA", "CÓDIGO FÁBRICA", "CODIGO_FABRICA", "codigo_fabrica",
         ])
         col_embalagem_local = encontrar_local([
@@ -1363,7 +1365,8 @@ def normalizar_cadastro_produtos_df(df):
         col_fabrica = encontrar([
             "COD. FÁBRICA", "CÓD. FÁBRICA", "COD. FABRICA", "CÓD. FABRICA",
             "CODIGO DE FABRICA", "CÓDIGO DE FÁBRICA", "NOVO CODIGO DE FABRICA",
-            "NOVO CÓDIGO DE FÁBRICA", "COD FABRICA", "CÓD FABRICA",
+            "NOVO CÓDIGO DE FÁBRICA", "NOVO CÓDIGO", "NOVO CODIGO",
+            "NOVO CÓD.", "NOVO COD.", "COD FABRICA", "CÓD FABRICA",
             "CODIGO FABRICA", "CÓDIGO FÁBRICA", "CODIGO_FABRICA", "codigo_fabrica",
         ])
     if not col_embalagem:
@@ -3933,6 +3936,7 @@ def gerar_excel_fornecedor_tratamento(df_tratamento):
     col_fabrica = (
         colunas_norm.get("CODIGO FABRICA") or colunas_norm.get("COD FABRICA") or
         colunas_norm.get("CODIGO DE FABRICA") or colunas_norm.get("NOVO CODIGO DE FABRICA") or
+        colunas_norm.get("NOVO CODIGO") or
         colunas_norm.get("CODIGO_FABRICA")
     )
     col_qtd = colunas_norm.get("PEDIDO FINAL") or colunas_norm.get("QUANTIDADE") or colunas_norm.get("QTD") or colunas_norm.get("QTDE")
