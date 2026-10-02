@@ -1574,7 +1574,7 @@ def converter_saldo_aberto_para_unidades(
     df,
     coluna_saldo="Saldo em Trânsito/ABERTO",
     coluna_embalagem="Embalagem",
-    coluna_codigo_fabrica="Código Fábrica",
+    coluna_codigo_regra="codigo",
     coluna_descricao="descricao",
 ):
     """
@@ -1602,9 +1602,12 @@ def converter_saldo_aberto_para_unidades(
         if saldo == 0:
             return 0.0
 
-        codigo_fabrica = row.get(coluna_codigo_fabrica, "")
+        # A exportação Autcom 3M usa o código interno do produto. O saldo em
+        # aberto precisa usar a mesma chave para selecionar exatamente os
+        # mesmos itens.
+        codigo_regra = row.get(coluna_codigo_regra, "")
         descricao = row.get(coluna_descricao, "")
-        fator_3m = fator_conversao_quantidade_3m(codigo_fabrica, descricao)
+        fator_3m = fator_conversao_quantidade_3m(codigo_regra, descricao)
 
         # Mesma seleção da exportação 3M: códigos listados, lixas 3M elegíveis
         # e o kit respirador específico. A embalagem genérica não interfere.
@@ -7045,7 +7048,9 @@ def fator_conversao_quantidade_3m(codigo="", descricao=""):
         return 50.0
     if codigo_norm in CODIGOS_3M_MULTIPLO_20:
         return 20.0
-    if "LIXA" in desc_norm and "3M" in desc_norm and "DISCO" not in desc_norm:
+    # Exige a palavra inteira LIXA. Assim, produtos como LIXADEIRA não entram
+    # indevidamente na conversão de pacotes da 3M.
+    if re.search(r"\bLIXA\b", desc_norm) and "3M" in desc_norm and "DISCO" not in desc_norm:
         return 50.0
     if "KIT RESPIRADOR" in desc_norm and "6200" in desc_norm and "3M" in desc_norm:
         return 20.0
@@ -8532,7 +8537,7 @@ def montar_analise_ruptura_por_marca(df_ruptura, meses_ref, df_aberto_ruptura=No
     itens = converter_saldo_aberto_para_unidades(
         itens,
         coluna_embalagem="embalagem",
-        coluna_codigo_fabrica="marca_codigo",
+        coluna_codigo_regra="codigo",
     )
     itens["Saldo em Trânsito/ABERTO"] = pd.to_numeric(itens["Saldo em Trânsito/ABERTO"], errors="coerce").fillna(0).round(2)
     itens["Estoque Considerado"] = (itens["Estoque Geral"] + itens["Saldo em Trânsito/ABERTO"]).round(2)
