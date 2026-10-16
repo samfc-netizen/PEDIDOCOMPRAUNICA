@@ -1463,21 +1463,34 @@ def ler_cadastro_produtos_google():
 
 
 def preparar_atualizacao_cadastro_csv(arquivo):
-    """Lê a base nova sem alterar a planilha e preserva códigos como texto."""
+    """Lê CSV do Autcom com separador/encoding variáveis, sem gravar no Sheets."""
     dados = arquivo.getvalue()
-    bruto = csv_bytes_para_dataframe_raw(dados)
-    if bruto is None or bruto.empty:
-        raise ValueError("CSV vazio ou não reconhecido.")
-    colunas = {normalizar_coluna(c): c for c in bruto.columns}
-    def coluna(*nomes):
-        return next((colunas[normalizar_coluna(n)] for n in nomes if normalizar_coluna(n) in colunas), None)
-    cod = coluna("Cód.Item", "Código", "Codigo Item")
-    desc = coluna("Descrição", "Descrição do item")
-    fab = coluna("Novo Código de fábrica", "Código de fábrica", "Cód. Fábrica")
-    if not all((cod, desc, fab)):
-        raise ValueError("O CSV precisa ter Cód.Item, Descrição e Novo Código de fábrica.")
-    df = bruto[[cod, desc, fab]].copy().fillna("")
-    df.columns = ["Cód.Item", "Descrição", "Novo Código de fábrica"]
+    bruto = None
+    for encoding in ("utf-8-sig", "cp1252", "latin1"):
+        for separador in (";", ",", "\t"):
+            try:
+                candidato = pd.read_csv(BytesIO(dados), sep=separador, encoding=encoding,
+                                        dtype=str, keep_default_na=False, on_bad_lines="skip")
+                if candidato.empty:
+                    continue
+                nomes = {normalizar_coluna(c): c for c in candidato.columns}
+                def localizar(*alternativas):
+                    return next((nomes[normalizar_coluna(n)] for n in alternativas
+                                 if normalizar_coluna(n) in nomes), None)
+                cod = localizar("Cód.Item", "Código", "Codigo Item")
+                desc = localizar("Descrição", "Descrição do item")
+                fab = localizar("Novo Código de fábrica", "Código de fábrica", "Cód. Fábrica")
+                if cod and desc and fab:
+                    bruto = candidato[[cod, desc, fab]].copy()
+                    break
+            except (UnicodeError, pd.errors.ParserError, ValueError):
+                continue
+        if bruto is not None:
+            break
+    if bruto is None:
+        raise ValueError("Não encontrei as colunas Cód.Item, Descrição e Novo Código de fábrica. Verifique o cabeçalho do CSV.")
+    bruto.columns = ["Cód.Item", "Descrição", "Novo Código de fábrica"]
+    df = bruto.fillna("")
     for c in df.columns:
         df[c] = df[c].astype(str).str.strip()
     df["Cód.Item"] = df["Cód.Item"].str.replace(r"\.0$", "", regex=True)
@@ -1485,8 +1498,7 @@ def preparar_atualizacao_cadastro_csv(arquivo):
     if df.empty:
         raise ValueError("Não encontrei códigos de produtos válidos no CSV.")
     df["_chave"] = df["Cód.Item"].str.zfill(5)
-    df = df.drop_duplicates("_chave", keep="first")
-    return df
+    return df.drop_duplicates("_chave", keep="first")
 
 
 def gravar_novos_produtos_google(novos):
