@@ -1503,7 +1503,22 @@ def preparar_atualizacao_cadastro_csv(arquivo):
 
 def gravar_novos_produtos_google(novos):
     """Revalida os códigos antes de inserir, sem limpar nem sobrescrever o cadastro."""
-    _, sheets, _ = google_get_services()
+    # Para este cadastro, aceita a conta de serviço já configurada no Secrets.
+    # Mantém OAuth como alternativa para instalações antigas.
+    try:
+        cfg_sa = next((dict(st.secrets[k]) for k in ("gcp_service_account", "google_service_account", "service_account") if k in st.secrets), None)
+    except Exception:
+        cfg_sa = None
+    if cfg_sa:
+        if service_account is None or build is None:
+            raise RuntimeError("Instale google-auth e google-api-python-client no requirements.txt.")
+        cfg_sa["private_key"] = str(cfg_sa.get("private_key", "")).replace("\\n", "\n")
+        cred = service_account.Credentials.from_service_account_info(
+            cfg_sa, scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+        sheets = build("sheets", "v4", credentials=cred, cache_discovery=False)
+    else:
+        _, sheets, _ = google_get_services()
     sid = GOOGLE_PLANILHA_CADASTRO_ID
     meta = sheets.spreadsheets().get(spreadsheetId=sid, fields="sheets(properties(title,sheetId))").execute()
     abas = meta.get("sheets", [])
@@ -10540,10 +10555,32 @@ with col_upload_3:
                         st.session_state["cadastro_atualizacao_hash"] = assinatura
                         st.session_state["cadastro_atualizacao_edit"] = novos
                     st.caption("Confira os novos itens e preencha EMBALAGEM quando desejar. Campos vazios são permitidos.")
-                    editados = st.data_editor(st.session_state["cadastro_atualizacao_edit"], hide_index=True, use_container_width=True,
+                    ampliar_editor = st.toggle(
+                        "Expandir tabela para cadastrar embalagens",
+                        value=True,
+                        key="cadastro_expandir_editor_embalagem",
+                        help="Exibe mais linhas de uma vez e amplia a área de edição.",
+                    )
+                    altura_editor = 850 if ampliar_editor else 320
+                    editados = st.data_editor(
+                        st.session_state["cadastro_atualizacao_edit"],
+                        hide_index=True,
+                        use_container_width=True,
+                        height=altura_editor,
                         disabled=["Cód.Item", "Descrição", "Novo Código de fábrica", "_chave"],
-                        column_config={"_chave": None, "EMBALAGEM": st.column_config.TextColumn("EMBALAGEM (opcional)")},
-                        key=f"editor_cadastro_{assinatura[:12]}")
+                        column_order=["Cód.Item", "Descrição", "Novo Código de fábrica", "EMBALAGEM"],
+                        column_config={
+                            "_chave": None,
+                            "Cód.Item": st.column_config.TextColumn("Cód.Item", width="small"),
+                            "Descrição": st.column_config.TextColumn("Descrição", width="large"),
+                            "Novo Código de fábrica": st.column_config.TextColumn("Código de fábrica", width="medium"),
+                            "EMBALAGEM": st.column_config.TextColumn(
+                                "EMBALAGEM (editar aqui)", width="medium",
+                                help="Informe a quantidade por embalagem. Pode ficar vazio.",
+                            ),
+                        },
+                        key=f"editor_cadastro_{assinatura[:12]}",
+                    )
                     if st.button(f"Salvar atualização ({len(novos)} novos produtos)", type="primary", key="salvar_cadastro_produtos"):
                         try:
                             with st.spinner("Conferindo e incluindo produtos no Google Sheets..."):
