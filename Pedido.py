@@ -1481,7 +1481,11 @@ def preparar_atualizacao_cadastro_csv(arquivo):
                 desc = localizar("Descrição", "Descrição do item")
                 fab = localizar("Novo Código de fábrica", "Código de fábrica", "Cód. Fábrica")
                 if cod and desc and fab:
+                    # A coluna E do cadastro deve vir do CSV, nunca do editor.
+                    # Usa a quinta coluna física do CSV (E), independentemente do cabeçalho.
+                    # Se o relatório não possuir a quinta coluna, mantém E vazia.
                     bruto = candidato[[cod, desc, fab]].copy()
+                    bruto["E_CSV"] = candidato.iloc[:, 4].astype(str) if candidato.shape[1] >= 5 else ""
                     break
             except (UnicodeError, pd.errors.ParserError, ValueError):
                 continue
@@ -1489,7 +1493,7 @@ def preparar_atualizacao_cadastro_csv(arquivo):
             break
     if bruto is None:
         raise ValueError("Não encontrei as colunas Cód.Item, Descrição e Novo Código de fábrica. Verifique o cabeçalho do CSV.")
-    bruto.columns = ["Cód.Item", "Descrição", "Novo Código de fábrica"]
+    bruto.columns = ["Cód.Item", "Descrição", "Novo Código de fábrica", "E_CSV"]
     df = bruto.fillna("")
     for c in df.columns:
         df[c] = df[c].astype(str).str.strip()
@@ -10504,32 +10508,31 @@ with col_upload_3:
                     if st.session_state.get("cadastro_atualizacao_hash") != assinatura:
                         st.session_state["cadastro_atualizacao_hash"] = assinatura
                         st.session_state["cadastro_atualizacao_edit"] = novos
-                    st.caption("Confira os novos produtos e preencha a coluna E, se desejar. A coluna D será preenchida com zero.")
+                    st.caption("Preencha a coluna D (EMBALAGEM) se desejar; sem preenchimento ela ficará vazia. A coluna E vem automaticamente da quinta coluna do CSV.")
                     colunas_copia = ["Cód.Item", "Descrição", "Novo Código de fábrica"]
-                    # O editor permite informar a nova coluna E antes de copiar.
+                    # D é editável e opcional; E vem exclusivamente do CSV.
                     tabela_editor = novos[colunas_copia].fillna("").astype(str).copy()
-                    tabela_editor["D"] = "0"
-                    tabela_editor["E"] = ""
-                    chave_editor = f"cadastro_editor_copia_5col_{assinatura[:12]}"
+                    tabela_editor["D"] = ""
+                    tabela_editor["E"] = novos["E_CSV"].fillna("").astype(str)
+                    chave_editor = f"cadastro_editor_copia_5col_v2_{assinatura[:12]}"
                     tabela_editada = st.data_editor(
                         tabela_editor,
                         hide_index=True,
                         use_container_width=True,
                         height=min(850, max(200, 38 * (len(tabela_editor) + 1))),
-                        disabled=["Cód.Item", "Descrição", "Novo Código de fábrica", "D"],
+                        disabled=["Cód.Item", "Descrição", "Novo Código de fábrica", "E"],
                         column_order=["Cód.Item", "Descrição", "Novo Código de fábrica", "D", "E"],
                         column_config={
                             "Cód.Item": st.column_config.TextColumn("A · Código", width="small"),
                             "Descrição": st.column_config.TextColumn("B · Descrição", width="large"),
                             "Novo Código de fábrica": st.column_config.TextColumn("C · Código de fábrica", width="medium"),
-                            "D": st.column_config.TextColumn("D · Zero", width="small"),
-                            "E": st.column_config.TextColumn("E · Preencher (opcional)", width="medium"),
+                            "D": st.column_config.TextColumn("D · Embalagem (opcional)", width="medium"),
+                            "E": st.column_config.TextColumn("E · Dados do CSV", width="medium"),
                         },
                         key=chave_editor,
                     )
-                    # Cinco colunas, sem cabeçalho: A, B, C, D=0, E=valor informado.
+                    # Cinco colunas, sem cabeçalho: A, B, C, D=opcional, E=CSV.
                     tabela_para_colar = tabela_editada[colunas_copia + ["D", "E"]].fillna("").astype(str)
-                    tabela_para_colar["D"] = "0"
                     texto_para_colar = tabela_para_colar.to_csv(
                         sep="\t", index=False, header=False, lineterminator="\n"
                     ).rstrip("\n")
@@ -10567,7 +10570,7 @@ with col_upload_3:
                     st.info(
                         "Abra a aba **Cadastro** no Google Sheets, clique na primeira célula vazia "
                         "da coluna A e pressione **Ctrl+V**. Não cole sobre produtos existentes. "
-                        "Serão coladas as colunas A, B, C, D (zero) e E (valor preenchido acima)."
+                        "Serão coladas as colunas A, B, C, D (opcional, vazia por padrão) e E (importada do CSV)."
                     )
         except Exception as erro:
             st.error(f"Falha ao analisar CSV: {erro}")
