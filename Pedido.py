@@ -1462,6 +1462,68 @@ def ler_cadastro_produtos_google():
     return ler_cadastro_produtos_google_public_cached(GOOGLE_PLANILHA_CADASTRO_ID, "Cadastro")
 
 
+def preparar_atualizacao_cadastro_csv(arquivo):
+    """Lê a base nova sem alterar a planilha e preserva códigos como texto."""
+    dados = arquivo.getvalue()
+    bruto = csv_bytes_para_dataframe_raw(dados)
+    if bruto is None or bruto.empty:
+        raise ValueError("CSV vazio ou não reconhecido.")
+    colunas = {normalizar_coluna(c): c for c in bruto.columns}
+    def coluna(*nomes):
+        return next((colunas[normalizar_coluna(n)] for n in nomes if normalizar_coluna(n) in colunas), None)
+    cod = coluna("Cód.Item", "Código", "Codigo Item")
+    desc = coluna("Descrição", "Descrição do item")
+    fab = coluna("Novo Código de fábrica", "Código de fábrica", "Cód. Fábrica")
+    if not all((cod, desc, fab)):
+        raise ValueError("O CSV precisa ter Cód.Item, Descrição e Novo Código de fábrica.")
+    df = bruto[[cod, desc, fab]].copy().fillna("")
+    df.columns = ["Cód.Item", "Descrição", "Novo Código de fábrica"]
+    for c in df.columns:
+        df[c] = df[c].astype(str).str.strip()
+    df["Cód.Item"] = df["Cód.Item"].str.replace(r"\.0$", "", regex=True)
+    df = df[df["Cód.Item"].str.fullmatch(r"\d+")].copy()
+    if df.empty:
+        raise ValueError("Não encontrei códigos de produtos válidos no CSV.")
+    df["_chave"] = df["Cód.Item"].str.zfill(5)
+    df = df.drop_duplicates("_chave", keep="first")
+    return df
+
+
+def gravar_novos_produtos_google(novos):
+    """Revalida os códigos antes de inserir, sem limpar nem sobrescrever o cadastro."""
+    _, sheets, _ = google_get_services()
+    sid = GOOGLE_PLANILHA_CADASTRO_ID
+    meta = sheets.spreadsheets().get(spreadsheetId=sid, fields="sheets(properties(title,sheetId))").execute()
+    abas = meta.get("sheets", [])
+    aba = next((x["properties"]["title"] for x in abas if x["properties"]["title"] == "Cadastro"), None)
+    if aba is None:
+        raise ValueError("A aba 'Cadastro' não existe no Google Sheets.")
+    resultado = sheets.spreadsheets().values().get(spreadsheetId=sid, range="'Cadastro'!A:D", valueRenderOption="FORMATTED_VALUE").execute()
+    linhas = resultado.get("values", [])
+    if not linhas:
+        raise ValueError("A aba Cadastro está sem cabeçalho; operação cancelada.")
+    cab = {normalizar_coluna(c): i for i, c in enumerate(linhas[0])}
+    def indice(*nomes):
+        return next((cab[normalizar_coluna(n)] for n in nomes if normalizar_coluna(n) in cab), None)
+    idx = [indice("Cód.Item", "Código"), indice("Descrição"), indice("Novo Código de fábrica"), indice("Embalagem")]
+    if any(i is None for i in idx) or len(set(idx)) != 4 or max(idx) > 3:
+        raise ValueError("As quatro colunas esperadas devem estar nas colunas A:D da aba Cadastro.")
+    existentes = {str(l[idx[0]]).strip().removesuffix(".0").zfill(5) for l in linhas[1:] if len(l) > idx[0] and str(l[idx[0]]).strip()}
+    adicionar = []
+    for _, r in novos.iterrows():
+        if r["_chave"] in existentes:
+            continue
+        linha = [""] * 4
+        for pos, valor in zip(idx, [r["Cód.Item"], r["Descrição"], r["Novo Código de fábrica"], r["EMBALAGEM"]]):
+            linha[pos] = str(valor).strip() if pd.notna(valor) else ""
+        adicionar.append(linha)
+        existentes.add(r["_chave"])
+    if adicionar:
+        sheets.spreadsheets().values().append(spreadsheetId=sid, range="'Cadastro'!A:D", valueInputOption="RAW", insertDataOption="INSERT_ROWS", body={"values": adicionar}).execute()
+    ler_cadastro_produtos_google_public_cached.clear()
+    return len(adicionar)
+
+
 def aplicar_cadastro_dataframe(df_giro, cadastro):
     if cadastro is None or cadastro.empty:
         return df_giro
@@ -10445,8 +10507,41 @@ with col_upload_3:
             f"e se existe a aba 'Cadastro'. Detalhe: {e}"
         )
 
-    cadastro_csv = st.file_uploader("CSV - Cadastro de Produtos (fallback)", type=["csv"], key="upload_cadastro_csv")
-    render_upload_status("Cadastro de Produtos", cadastro_csv)
+    st.markdown("**Atualizar cadastro pelo CSV**")
+    arquivo_atualizacao = st.file_uploader("Importar nova base de produtos", type=["csv"], key="upload_atualizacao_cadastro")
+    cadastro_csv = None  # Cadastro oficial continua sendo o Sheets.
+    if arquivo_atualizacao is not None:
+        try:
+            importados = preparar_atualizacao_cadastro_csv(arquivo_atualizacao)
+            if cadastro_google.empty:
+                st.error("Não foi possível comparar com o Sheets. Atualização bloqueada para evitar duplicações.")
+            else:
+                existentes = set(cadastro_google["codigo"].astype(str).str.strip().str.zfill(5))
+                novos = importados[~importados["_chave"].isin(existentes)].copy()
+                st.info(f"CSV: {len(importados):,} itens | Já cadastrados: {len(importados)-len(novos):,} | Novos: {len(novos):,}".replace(",", "."))
+                if novos.empty:
+                    st.success("Todos os produtos do CSV já estão cadastrados. Nenhuma inclusão necessária.")
+                else:
+                    novos["EMBALAGEM"] = ""
+                    assinatura = hashlib.sha256(arquivo_atualizacao.getvalue()).hexdigest()
+                    if st.session_state.get("cadastro_atualizacao_hash") != assinatura:
+                        st.session_state["cadastro_atualizacao_hash"] = assinatura
+                        st.session_state["cadastro_atualizacao_edit"] = novos
+                    st.caption("Confira os novos itens e preencha EMBALAGEM quando desejar. Campos vazios são permitidos.")
+                    editados = st.data_editor(st.session_state["cadastro_atualizacao_edit"], hide_index=True, use_container_width=True,
+                        disabled=["Cód.Item", "Descrição", "Novo Código de fábrica", "_chave"],
+                        column_config={"_chave": None, "EMBALAGEM": st.column_config.TextColumn("EMBALAGEM (opcional)")},
+                        key=f"editor_cadastro_{assinatura[:12]}")
+                    if st.button(f"Salvar atualização ({len(novos)} novos produtos)", type="primary", key="salvar_cadastro_produtos"):
+                        try:
+                            with st.spinner("Conferindo e incluindo produtos no Google Sheets..."):
+                                incluidos = gravar_novos_produtos_google(editados)
+                            st.success(f"Atualização concluída: {incluidos} novos produtos inseridos no Google Sheets.")
+                            st.rerun()
+                        except Exception as erro:
+                            st.error(f"Não foi possível gravar no Google Sheets: {erro}")
+        except Exception as erro:
+            st.error(f"Falha ao analisar CSV: {erro}")
 
 st.markdown("</div>", unsafe_allow_html=True)
 
