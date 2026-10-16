@@ -1501,71 +1501,6 @@ def preparar_atualizacao_cadastro_csv(arquivo):
     return df.drop_duplicates("_chave", keep="first")
 
 
-def gravar_novos_produtos_google(novos):
-    """Revalida os códigos antes de inserir, sem limpar nem sobrescrever o cadastro."""
-    # Usa a secao efetivamente configurada pelo usuario, sem exigir OAuth.
-    # Nao utiliza o helper de leitura, pois seus escopos sao somente leitura.
-    cfg_sa = None
-    for nome_secao in ("google_service_account", "gcp_service_account", "service_account"):
-        if nome_secao in st.secrets:
-            cfg_sa = dict(st.secrets[nome_secao])
-            break
-    if cfg_sa is None:
-        raise RuntimeError("Configure [google_service_account] no Streamlit Secrets para habilitar a gravacao.")
-    if service_account is None or build is None:
-        raise RuntimeError("Instale google-auth e google-api-python-client no requirements.txt.")
-    chave = str(cfg_sa.get("private_key", "") or "").strip().replace("\\n", "\n").replace("\r\n", "\n")
-    if not (chave.startswith("-----BEGIN PRIVATE KEY-----") and "-----END PRIVATE KEY-----" in chave):
-        raise RuntimeError(
-            "A private_key em [google_service_account] nao e uma chave PEM valida. "
-            "Use a private_key original do JSON da conta de servico, sem substituir por private_key_id, "
-            "valores de exemplo ou identificadores. A leitura publica do Sheets nao valida essa chave."
-        )
-    cfg_sa["private_key"] = chave
-    try:
-        cred = service_account.Credentials.from_service_account_info(
-            cfg_sa, scopes=["https://www.googleapis.com/auth/spreadsheets"]
-        )
-    except (ValueError, TypeError) as erro:
-        raise RuntimeError(
-            "Nao foi possivel interpretar a private_key de [google_service_account]. "
-            "Confira se ela corresponde integralmente ao campo private_key do JSON original "
-            "(inclusive BEGIN/END PRIVATE KEY e as quebras de linha). "
-            "Se a chave original nao estiver disponivel, gere outra chave JSON no Google Cloud."
-        ) from erro
-    sheets = build("sheets", "v4", credentials=cred, cache_discovery=False)
-    sid = GOOGLE_PLANILHA_CADASTRO_ID
-    meta = sheets.spreadsheets().get(spreadsheetId=sid, fields="sheets(properties(title,sheetId))").execute()
-    abas = meta.get("sheets", [])
-    aba = next((x["properties"]["title"] for x in abas if x["properties"]["title"] == "Cadastro"), None)
-    if aba is None:
-        raise ValueError("A aba 'Cadastro' não existe no Google Sheets.")
-    resultado = sheets.spreadsheets().values().get(spreadsheetId=sid, range="'Cadastro'!A:D", valueRenderOption="FORMATTED_VALUE").execute()
-    linhas = resultado.get("values", [])
-    if not linhas:
-        raise ValueError("A aba Cadastro está sem cabeçalho; operação cancelada.")
-    cab = {normalizar_coluna(c): i for i, c in enumerate(linhas[0])}
-    def indice(*nomes):
-        return next((cab[normalizar_coluna(n)] for n in nomes if normalizar_coluna(n) in cab), None)
-    idx = [indice("Cód.Item", "Código"), indice("Descrição"), indice("Novo Código de fábrica"), indice("Embalagem")]
-    if any(i is None for i in idx) or len(set(idx)) != 4 or max(idx) > 3:
-        raise ValueError("As quatro colunas esperadas devem estar nas colunas A:D da aba Cadastro.")
-    existentes = {str(l[idx[0]]).strip().removesuffix(".0").zfill(5) for l in linhas[1:] if len(l) > idx[0] and str(l[idx[0]]).strip()}
-    adicionar = []
-    for _, r in novos.iterrows():
-        if r["_chave"] in existentes:
-            continue
-        linha = [""] * 4
-        for pos, valor in zip(idx, [r["Cód.Item"], r["Descrição"], r["Novo Código de fábrica"], r["EMBALAGEM"]]):
-            linha[pos] = str(valor).strip() if pd.notna(valor) else ""
-        adicionar.append(linha)
-        existentes.add(r["_chave"])
-    if adicionar:
-        sheets.spreadsheets().values().append(spreadsheetId=sid, range="'Cadastro'!A:D", valueInputOption="RAW", insertDataOption="INSERT_ROWS", body={"values": adicionar}).execute()
-    ler_cadastro_produtos_google_public_cached.clear()
-    return len(adicionar)
-
-
 def aplicar_cadastro_dataframe(df_giro, cadastro):
     if cadastro is None or cadastro.empty:
         return df_giro
@@ -10569,41 +10504,61 @@ with col_upload_3:
                     if st.session_state.get("cadastro_atualizacao_hash") != assinatura:
                         st.session_state["cadastro_atualizacao_hash"] = assinatura
                         st.session_state["cadastro_atualizacao_edit"] = novos
-                    st.caption("Confira os novos itens e preencha EMBALAGEM quando desejar. Campos vazios são permitidos.")
-                    ampliar_editor = st.toggle(
-                        "Expandir tabela para cadastrar embalagens",
-                        value=True,
-                        key="cadastro_expandir_editor_embalagem",
-                        help="Exibe mais linhas de uma vez e amplia a área de edição.",
-                    )
-                    altura_editor = 850 if ampliar_editor else 320
-                    editados = st.data_editor(
-                        st.session_state["cadastro_atualizacao_edit"],
+                    st.caption("Produtos identificados como novos. Confira antes de copiar para o Google Sheets.")
+                    colunas_copia = ["Cód.Item", "Descrição", "Novo Código de fábrica"]
+                    tabela_novos = novos[colunas_copia].fillna("").astype(str)
+                    st.dataframe(
+                        tabela_novos,
                         hide_index=True,
                         use_container_width=True,
-                        height=altura_editor,
-                        disabled=["Cód.Item", "Descrição", "Novo Código de fábrica", "_chave"],
-                        column_order=["Cód.Item", "Descrição", "Novo Código de fábrica", "EMBALAGEM"],
+                        height=min(700, max(160, 38 * (len(tabela_novos) + 1))),
                         column_config={
-                            "_chave": None,
                             "Cód.Item": st.column_config.TextColumn("Cód.Item", width="small"),
                             "Descrição": st.column_config.TextColumn("Descrição", width="large"),
                             "Novo Código de fábrica": st.column_config.TextColumn("Código de fábrica", width="medium"),
-                            "EMBALAGEM": st.column_config.TextColumn(
-                                "EMBALAGEM (editar aqui)", width="medium",
-                                help="Informe a quantidade por embalagem. Pode ficar vazio.",
-                            ),
                         },
-                        key=f"editor_cadastro_{assinatura[:12]}",
                     )
-                    if st.button(f"Salvar atualização ({len(novos)} novos produtos)", type="primary", key="salvar_cadastro_produtos"):
-                        try:
-                            with st.spinner("Conferindo e incluindo produtos no Google Sheets..."):
-                                incluidos = gravar_novos_produtos_google(editados)
-                            st.success(f"Atualização concluída: {incluidos} novos produtos inseridos no Google Sheets.")
-                            st.rerun()
-                        except Exception as erro:
-                            st.error(f"Não foi possível gravar no Google Sheets: {erro}")
+                    # TSV sem cabeçalho: colar diretamente na primeira linha vazia
+                    # das colunas A:C da aba Cadastro, sem sobrescrever o cabeçalho.
+                    texto_para_colar = tabela_novos.to_csv(
+                        sep="\t", index=False, header=False, lineterminator="\n"
+                    ).rstrip("\n")
+                    import streamlit.components.v1 as components
+                    import html as html_lib
+                    # O componente recebe o texto como JSON (sem interpolar HTML do CSV).
+                    payload_json = json.dumps(texto_para_colar, ensure_ascii=False).replace("<", "\\u003c")
+                    html_copia = (
+                        '<!doctype html><html><head><meta charset="utf-8"></head>'
+                        '<body style="margin:0;font-family:system-ui,Arial,sans-serif;">'
+                        '<button id="copiar" style="background:#1463b8;color:white;border:0;border-radius:8px;'
+                        'padding:12px 22px;font-size:15px;font-weight:650;cursor:pointer;">'
+                        'Copiar novos produtos (3 colunas)</button>'
+                        '<span id="estado" style="margin-left:12px;font-size:13px;"></span>'
+                        '<script>const dados = ' + payload_json + ';'
+                        'document.getElementById("copiar").addEventListener("click",async()=>{'
+                        'const estado=document.getElementById("estado");'
+                        'try {await navigator.clipboard.writeText(dados);'
+                        'estado.textContent="Copiado! Cole no Sheets com Ctrl+V.";}'
+                        'catch(e){const t=document.createElement("textarea");t.value=dados;'
+                        'document.body.appendChild(t);t.select();let ok=false;'
+                        'try{ok=document.execCommand("copy")}catch(_){}t.remove();'
+                        'estado.textContent=ok?"Copiado! Cole no Sheets com Ctrl+V.":'
+                        '"Cópia automática bloqueada. Use o download abaixo.";}'
+                        '});</script></body></html>'
+                    )
+                    components.html(html_copia, height=62)
+                    st.download_button(
+                        "Baixar novos produtos (TSV para Google Sheets)",
+                        data=texto_para_colar.encode("utf-8-sig"),
+                        file_name="novos_produtos_para_sheets.tsv",
+                        mime="text/tab-separated-values",
+                        key=f"baixar_novos_cadastro_{hashlib.sha256(arquivo_atualizacao.getvalue()).hexdigest()[:12]}",
+                    )
+                    st.info(
+                        "Abra a aba **Cadastro** no Google Sheets, clique na primeira célula vazia "
+                        "da coluna A e pressione **Ctrl+V**. Não cole sobre produtos existentes. "
+                        "A coluna EMBALAGEM (D) ficará vazia para os novos itens."
+                    )
         except Exception as erro:
             st.error(f"Falha ao analisar CSV: {erro}")
 
