@@ -10504,23 +10504,33 @@ with col_upload_3:
                     if st.session_state.get("cadastro_atualizacao_hash") != assinatura:
                         st.session_state["cadastro_atualizacao_hash"] = assinatura
                         st.session_state["cadastro_atualizacao_edit"] = novos
-                    st.caption("Produtos identificados como novos. Confira antes de copiar para o Google Sheets.")
+                    st.caption("Confira os novos produtos e preencha a coluna E, se desejar. A coluna D será preenchida com zero.")
                     colunas_copia = ["Cód.Item", "Descrição", "Novo Código de fábrica"]
-                    tabela_novos = novos[colunas_copia].fillna("").astype(str)
-                    st.dataframe(
-                        tabela_novos,
+                    # O editor permite informar a nova coluna E antes de copiar.
+                    tabela_editor = novos[colunas_copia].fillna("").astype(str).copy()
+                    tabela_editor["D"] = "0"
+                    tabela_editor["E"] = ""
+                    chave_editor = f"cadastro_editor_copia_5col_{assinatura[:12]}"
+                    tabela_editada = st.data_editor(
+                        tabela_editor,
                         hide_index=True,
                         use_container_width=True,
-                        height=min(700, max(160, 38 * (len(tabela_novos) + 1))),
+                        height=min(850, max(200, 38 * (len(tabela_editor) + 1))),
+                        disabled=["Cód.Item", "Descrição", "Novo Código de fábrica", "D"],
+                        column_order=["Cód.Item", "Descrição", "Novo Código de fábrica", "D", "E"],
                         column_config={
-                            "Cód.Item": st.column_config.TextColumn("Cód.Item", width="small"),
-                            "Descrição": st.column_config.TextColumn("Descrição", width="large"),
-                            "Novo Código de fábrica": st.column_config.TextColumn("Código de fábrica", width="medium"),
+                            "Cód.Item": st.column_config.TextColumn("A · Código", width="small"),
+                            "Descrição": st.column_config.TextColumn("B · Descrição", width="large"),
+                            "Novo Código de fábrica": st.column_config.TextColumn("C · Código de fábrica", width="medium"),
+                            "D": st.column_config.TextColumn("D · Zero", width="small"),
+                            "E": st.column_config.TextColumn("E · Preencher (opcional)", width="medium"),
                         },
+                        key=chave_editor,
                     )
-                    # TSV sem cabeçalho: colar diretamente na primeira linha vazia
-                    # das colunas A:C da aba Cadastro, sem sobrescrever o cabeçalho.
-                    texto_para_colar = tabela_novos.to_csv(
+                    # Cinco colunas, sem cabeçalho: A, B, C, D=0, E=valor informado.
+                    tabela_para_colar = tabela_editada[colunas_copia + ["D", "E"]].fillna("").astype(str)
+                    tabela_para_colar["D"] = "0"
+                    texto_para_colar = tabela_para_colar.to_csv(
                         sep="\t", index=False, header=False, lineterminator="\n"
                     ).rstrip("\n")
                     import streamlit.components.v1 as components
@@ -10532,7 +10542,7 @@ with col_upload_3:
                         '<body style="margin:0;font-family:system-ui,Arial,sans-serif;">'
                         '<button id="copiar" style="background:#1463b8;color:white;border:0;border-radius:8px;'
                         'padding:12px 22px;font-size:15px;font-weight:650;cursor:pointer;">'
-                        'Copiar novos produtos (3 colunas)</button>'
+                        'Copiar novos produtos (A até E)</button>'
                         '<span id="estado" style="margin-left:12px;font-size:13px;"></span>'
                         '<script>const dados = ' + payload_json + ';'
                         'document.getElementById("copiar").addEventListener("click",async()=>{'
@@ -10557,7 +10567,7 @@ with col_upload_3:
                     st.info(
                         "Abra a aba **Cadastro** no Google Sheets, clique na primeira célula vazia "
                         "da coluna A e pressione **Ctrl+V**. Não cole sobre produtos existentes. "
-                        "A coluna EMBALAGEM (D) ficará vazia para os novos itens."
+                        "Serão coladas as colunas A, B, C, D (zero) e E (valor preenchido acima)."
                     )
         except Exception as erro:
             st.error(f"Falha ao analisar CSV: {erro}")
