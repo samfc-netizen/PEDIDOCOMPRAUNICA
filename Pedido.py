@@ -1503,22 +1503,37 @@ def preparar_atualizacao_cadastro_csv(arquivo):
 
 def gravar_novos_produtos_google(novos):
     """Revalida os códigos antes de inserir, sem limpar nem sobrescrever o cadastro."""
-    # Para este cadastro, aceita a conta de serviço já configurada no Secrets.
-    # Mantém OAuth como alternativa para instalações antigas.
+    # Usa a secao efetivamente configurada pelo usuario, sem exigir OAuth.
+    # Nao utiliza o helper de leitura, pois seus escopos sao somente leitura.
+    cfg_sa = None
+    for nome_secao in ("google_service_account", "gcp_service_account", "service_account"):
+        if nome_secao in st.secrets:
+            cfg_sa = dict(st.secrets[nome_secao])
+            break
+    if cfg_sa is None:
+        raise RuntimeError("Configure [google_service_account] no Streamlit Secrets para habilitar a gravacao.")
+    if service_account is None or build is None:
+        raise RuntimeError("Instale google-auth e google-api-python-client no requirements.txt.")
+    chave = str(cfg_sa.get("private_key", "") or "").strip().replace("\\n", "\n").replace("\r\n", "\n")
+    if not (chave.startswith("-----BEGIN PRIVATE KEY-----") and "-----END PRIVATE KEY-----" in chave):
+        raise RuntimeError(
+            "A private_key em [google_service_account] nao e uma chave PEM valida. "
+            "Use a private_key original do JSON da conta de servico, sem substituir por private_key_id, "
+            "valores de exemplo ou identificadores. A leitura publica do Sheets nao valida essa chave."
+        )
+    cfg_sa["private_key"] = chave
     try:
-        cfg_sa = next((dict(st.secrets[k]) for k in ("gcp_service_account", "google_service_account", "service_account") if k in st.secrets), None)
-    except Exception:
-        cfg_sa = None
-    if cfg_sa:
-        if service_account is None or build is None:
-            raise RuntimeError("Instale google-auth e google-api-python-client no requirements.txt.")
-        cfg_sa["private_key"] = str(cfg_sa.get("private_key", "")).replace("\\n", "\n")
         cred = service_account.Credentials.from_service_account_info(
             cfg_sa, scopes=["https://www.googleapis.com/auth/spreadsheets"]
         )
-        sheets = build("sheets", "v4", credentials=cred, cache_discovery=False)
-    else:
-        _, sheets, _ = google_get_services()
+    except (ValueError, TypeError) as erro:
+        raise RuntimeError(
+            "Nao foi possivel interpretar a private_key de [google_service_account]. "
+            "Confira se ela corresponde integralmente ao campo private_key do JSON original "
+            "(inclusive BEGIN/END PRIVATE KEY e as quebras de linha). "
+            "Se a chave original nao estiver disponivel, gere outra chave JSON no Google Cloud."
+        ) from erro
+    sheets = build("sheets", "v4", credentials=cred, cache_discovery=False)
     sid = GOOGLE_PLANILHA_CADASTRO_ID
     meta = sheets.spreadsheets().get(spreadsheetId=sid, fields="sheets(properties(title,sheetId))").execute()
     abas = meta.get("sheets", [])
